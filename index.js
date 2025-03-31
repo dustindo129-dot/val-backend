@@ -97,6 +97,18 @@ app.use('/api/users', userRoutes);      // User management endpoints
 app.use('/api/chapters', chaptersRouter); // Chapter management endpoints
 app.use('/api/novels', moduleRoutes);   // Module management endpoints
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  // Check MongoDB connection
+  const isMongoConnected = mongoose.connection.readyState === 1;
+  
+  if (isMongoConnected) {
+    res.status(200).json({ status: 'healthy', mongodb: 'connected' });
+  } else {
+    res.status(503).json({ status: 'unhealthy', mongodb: 'disconnected' });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   // Log error details
