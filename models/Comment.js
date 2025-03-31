@@ -1,25 +1,53 @@
 import mongoose from 'mongoose';
-import sanitizeHtml from 'sanitize-html';
 
 /**
  * Main Comment Schema
  * Supports both novel and chapter comments
  * Includes like/dislike functionality and soft deletion
  */
+
+// Custom sanitization function
+const sanitizeText = (text) => {
+  if (!text) return '';
+  
+  // Convert special characters to HTML entities
+  const escapeHtml = (str) => {
+    const htmlEntities = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    };
+    return str.replace(/[&<>"']/g, match => htmlEntities[match]);
+  };
+
+  // Strip all HTML tags except newlines
+  const stripTags = (str) => {
+    // Replace HTML tags with newlines to preserve formatting
+    const withNewlines = str.replace(/<br\s*\/?>/gi, '\n')
+                           .replace(/<\/p>/gi, '\n\n')
+                           .replace(/<\/div>/gi, '\n');
+    
+    // Remove all remaining HTML tags
+    const noTags = withNewlines.replace(/<[^>]+>/g, '');
+    
+    // Clean up excessive newlines and spaces
+    return noTags.replace(/\n\s*\n\s*\n/g, '\n\n')
+                 .replace(/\s+/g, ' ')
+                 .trim();
+  };
+
+  // First strip tags, then escape any remaining HTML characters
+  return escapeHtml(stripTags(text));
+};
+
 const commentSchema = new mongoose.Schema({
   text: {
     type: String,
     required: true,
     set: function(text) {
-      // Sanitize HTML content before saving
-      return sanitizeHtml(text, {
-        allowedTags: ['p', 'br', 'strong', 'em', 'u', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
-                     'ul', 'ol', 'li', 'blockquote', 'code', 'pre', 'a', 'img'],
-        allowedAttributes: {
-          'a': ['href', 'target'],
-          'img': ['src', 'alt', 'width', 'height']
-        }
-      });
+      return sanitizeText(text);
     }
   },
   user: {
