@@ -1,7 +1,6 @@
 import express from 'express';
 import User from '../models/User.js';
 import { generateToken } from '../middleware/auth.js';
-import { validateRecaptcha } from '../middleware/recaptcha.js';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -59,7 +58,7 @@ router.post('/register-admin', async (req, res) => {
  * Register a new regular user
  * @route POST /api/auth/signup
  */
-router.post('/signup', validateRecaptcha, async (req, res) => {
+router.post('/signup', async (req, res) => {
   try {
     console.log('\n--- Starting signup process ---');
     console.log('Request body:', JSON.stringify(req.body, null, 2));
