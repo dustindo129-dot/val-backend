@@ -7,12 +7,15 @@ const router = express.Router();
 /**
  * Get comments for a specific content (novel or chapter)
  * Supports sorting by newest, oldest, or most liked
- * @route GET /api/comments/:contentType/:contentId
+ * @route GET /api/comments
  */
-router.get('/:contentType/:contentId', async (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const { contentType, contentId } = req.params;
-    const { sort = 'newest' } = req.query;
+    const { contentType, contentId, sort = 'newest', includeDeleted = false } = req.query;
+
+    if (!contentType || !contentId) {
+      return res.status(400).json({ message: 'contentType and contentId are required' });
+    }
 
     let sortQuery = {};
     switch (sort) {
@@ -30,7 +33,7 @@ router.get('/:contentType/:contentId', async (req, res) => {
     const allComments = await Comment.find({
       contentType,
       contentId,
-      isDeleted: { $ne: true }
+      ...(includeDeleted === 'false' && { isDeleted: { $ne: true } })
     })
     .sort(sortQuery)
     .populate('user', 'username avatar');

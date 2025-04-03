@@ -3,15 +3,56 @@ import Module from '../models/Module.js';
 import { auth } from '../middleware/auth.js';
 import admin from '../middleware/admin.js';
 import Chapter from '../models/Chapter.js';
+import { clearNovelCaches } from '../utils/cacheUtils.js';
+import Novel from '../models/Novel.js';
+import mongoose from 'mongoose';
 
 const router = express.Router();
 
-// Get all modules for a novel
+// New optimized route to get all modules with chapters for a novel
+router.get('/:novelId/modules-with-chapters', async (req, res) => {
+  try {
+    // First get all modules for the novel
+    const modules = await Module.find({ novelId: req.params.novelId })
+      .sort('order')
+      .lean(); // Use lean() for better performance since we're modifying the objects
+
+    // Get all chapters for this novel in one query
+    const chapters = await Chapter.find({ 
+      novelId: req.params.novelId 
+    }).sort('order').lean();
+
+    // Create a map of moduleId to chapters for efficient lookup
+    const chaptersByModule = chapters.reduce((acc, chapter) => {
+      if (!acc[chapter.moduleId]) {
+        acc[chapter.moduleId] = [];
+      }
+      acc[chapter.moduleId].push(chapter);
+      return acc;
+    }, {});
+
+    // Attach chapters to their respective modules
+    const modulesWithChapters = modules.map(module => ({
+      ...module,
+      chapters: chaptersByModule[module._id.toString()] || []
+    }));
+
+    res.json(modulesWithChapters);
+  } catch (err) {
+    console.error('Error fetching modules with chapters:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Get all modules for a novel (keeping for backward compatibility)
 router.get('/:novelId/modules', async (req, res) => {
   try {
     const modules = await Module.find({ novelId: req.params.novelId })
       .sort('order')
-      .populate('chapters');
+      .populate({
+        path: 'chapters',
+        options: { sort: { order: 1 } }
+      });
     res.json(modules);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -24,7 +65,10 @@ router.get('/:novelId/modules/:moduleId', async (req, res) => {
     const module = await Module.findOne({
       _id: req.params.moduleId,
       novelId: req.params.novelId
-    }).populate('chapters');
+    }).populate({
+      path: 'chapters',
+      options: { sort: { order: 1 } }
+    });
     
     if (!module) {
       return res.status(404).json({ message: 'Module not found' });
@@ -38,97 +82,135 @@ router.get('/:novelId/modules/:moduleId', async (req, res) => {
 
 // Reorder modules - MOVED UP before other module-specific routes
 router.put('/:novelId/modules/reorder', auth, admin, async (req, res) => {
-  try {
-    console.log('Backend - Received reorder request:', {
-      body: req.body,
-      params: req.params
-    });
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
+  try {
     const { moduleId, direction } = req.body;
     const novelId = req.params.novelId;
 
     // Get all modules for this novel
     const modules = await Module.find({ novelId }).sort('order');
-    console.log('Backend - Current modules:', modules.map(m => ({
-      id: m._id.toString(),
-      title: m.title,
-      order: m.order
-    })));
     
     // Find the module to move and its index
     const currentIndex = modules.findIndex(m => m._id.toString() === moduleId);
-    console.log('Backend - Current module index:', currentIndex);
     
     if (currentIndex === -1) {
-      console.log('Backend - Module not found:', moduleId);
-      return res.status(404).json({ message: 'Module not found' });
+      throw new Error('Module not found');
     }
 
     // Calculate target index
     const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-    console.log('Backend - Target index:', targetIndex);
     
     // Check if move is possible
     if (targetIndex < 0 || targetIndex >= modules.length) {
-      console.log('Backend - Invalid move:', { targetIndex, maxIndex: modules.length - 1 });
-      return res.status(400).json({ message: 'Cannot move module further in that direction' });
+      throw new Error('Cannot move module further in that direction');
     }
 
-    // Get the two modules to swap
+    // Get current and target modules
     const moduleToMove = modules[currentIndex];
-    const moduleToSwap = modules[targetIndex];
-    console.log('Backend - Swapping modules:', {
-      moving: { id: moduleToMove._id.toString(), title: moduleToMove.title, order: moduleToMove.order },
-      swapping: { id: moduleToSwap._id.toString(), title: moduleToSwap.title, order: moduleToSwap.order }
+    const otherModule = modules[targetIndex];
+    
+    // Store original order values
+    const originalOrder = moduleToMove.order;
+    const targetOrder = otherModule.order;
+    
+    // STEP 1: First set the moving module to a temporary negative order
+    await Module.findByIdAndUpdate(
+      moduleToMove._id,
+      { $set: { order: -9999 } },
+      { session }
+    );
+    
+    // STEP 2: Update the target module
+    await Module.findByIdAndUpdate(
+      otherModule._id,
+      { $set: { order: originalOrder } },
+      { session }
+    );
+    
+    // STEP 3: Finally, set the moving module to its target position
+    await Module.findByIdAndUpdate(
+      moduleToMove._id,
+      { $set: { order: targetOrder } },
+      { session }
+    );
+
+    // Update novel's timestamp
+    await Novel.findByIdAndUpdate(
+      novelId,
+      { updatedAt: new Date() },
+      { session }
+    );
+
+    // Commit the transaction
+    await session.commitTransaction();
+    
+    // Clear novel caches
+    clearNovelCaches();
+
+    // Return the updated modules order
+    const updatedModules = await Module.find({ novelId }).sort('order');
+    
+    res.json({
+      message: 'Modules reordered successfully',
+      modules: updatedModules
     });
-
-    // Instead of directly swapping orders, we'll use a temporary order value
-    // that's outside the range of existing orders to avoid conflicts
-    const tempOrder = -1; // Temporary order value
-    const originalOrder1 = moduleToMove.order;
-    const originalOrder2 = moduleToSwap.order;
-
-    // First, set one module to the temporary order
-    moduleToMove.order = tempOrder;
-    await moduleToMove.save();
-
-    // Then set the second module to the first module's original order
-    moduleToSwap.order = originalOrder1;
-    await moduleToSwap.save();
-
-    // Finally, set the first module to the second module's original order
-    moduleToMove.order = originalOrder2;
-    await moduleToMove.save();
-
-    console.log('Backend - After swap:', {
-      moving: { id: moduleToMove._id.toString(), title: moduleToMove.title, order: moduleToMove.order },
-      swapping: { id: moduleToSwap._id.toString(), title: moduleToSwap.title, order: moduleToSwap.order }
-    });
-
-    res.json({ message: 'Modules reordered successfully' });
   } catch (err) {
+    await session.abortTransaction();
     console.error('Backend - Error during reorder:', err);
     res.status(400).json({ message: err.message });
+  } finally {
+    session.endSession();
   }
 });
 
 // Create a new module
 router.post('/:novelId/modules', auth, admin, async (req, res) => {
   try {
-    const lastModule = await Module.findOne({ novelId: req.params.novelId })
-      .sort('-order');
-    const order = lastModule ? lastModule.order + 1 : 0;
+    // Find the highest order number for this novel
+    const modules = await Module.find({ novelId: req.params.novelId })
+      .sort('-order')
+      .limit(1)
+      .lean();
+    
+    // Calculate next order number
+    const nextOrder = modules.length > 0 ? modules[0].order + 1 : 0;
 
+    // Create the new module
     const module = new Module({
       novelId: req.params.novelId,
       title: req.body.title,
-      coverImage: req.body.coverImage,
-      order: order
+      illustration: req.body.illustration,
+      order: nextOrder,
+      chapters: []
     });
 
+    // Save the module
     const newModule = await module.save();
+    
+    // Update the novel's timestamp and view count in one operation
+    await Novel.findByIdAndUpdate(
+      req.params.novelId,
+      { 
+        updatedAt: new Date(),
+        $inc: { 'views.total': 1 }
+      }
+    );
+    
+    // Clear novel caches in one operation
+    clearNovelCaches();
+    
+    // Return the created module
     res.status(201).json(newModule);
   } catch (err) {
+    console.error('Error creating module:', err);
+    if (err.code === 11000) {
+      // Handle duplicate key error
+      return res.status(400).json({ 
+        message: 'A module with this order number already exists. Please try again.' 
+      });
+    }
     res.status(400).json({ message: err.message });
   }
 });
@@ -142,9 +224,19 @@ router.put('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
     }
 
     if (req.body.title) module.title = req.body.title;
-    if (req.body.coverImage) module.coverImage = req.body.coverImage;
+    if (req.body.illustration) module.illustration = req.body.illustration;
     
     const updatedModule = await module.save();
+    
+    // Update the novel's updatedAt timestamp to bring it to the top of latest updates
+    await Novel.findByIdAndUpdate(
+      req.params.novelId,
+      { updatedAt: new Date() }
+    );
+    
+    // Clear novel caches to ensure fresh data on next request
+    clearNovelCaches();
+    
     res.json(updatedModule);
   } catch (err) {
     res.status(400).json({ message: err.message });
@@ -154,17 +246,86 @@ router.put('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
 // Delete a module
 router.delete('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
   try {
-    const module = await Module.findByIdAndDelete(req.params.moduleId);
+    // Use findOneAndDelete to ensure we only run one query operation
+    // Also check that the moduleId belongs to the correct novel for security
+    const module = await Module.findOneAndDelete({
+      _id: req.params.moduleId,
+      novelId: req.params.novelId
+    });
+    
     if (!module) {
       return res.status(404).json({ message: 'Module not found' });
     }
-    res.json({ message: 'Module deleted successfully' });
+    
+    // If the module has chapters, update their moduleId or delete them
+    if (module.chapters && module.chapters.length > 0) {
+      // Delete all chapters associated with this module in one operation
+      await Chapter.deleteMany({ 
+        moduleId: req.params.moduleId,
+        novelId: req.params.novelId
+      });
+    }
+    
+    // Update novel updatedAt timestamp and increment view in one operation
+    await Novel.findByIdAndUpdate(
+      req.params.novelId,
+      { 
+        updatedAt: new Date(),
+        // Using $inc for views.total to avoid a separate query
+        $inc: { 'views.total': 1 },
+        // Add a conditional update for daily views
+        $push: {
+          'views.daily': {
+            $cond: {
+              if: {
+                $gt: [
+                  {
+                    $size: {
+                      $filter: {
+                        input: '$views.daily',
+                        as: 'day',
+                        cond: {
+                          $and: [
+                            { $gte: ['$$day.date', new Date(new Date().setHours(0, 0, 0, 0))] },
+                            { $lt: ['$$day.date', new Date(new Date().setHours(23, 59, 59, 999))] }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  0
+                ]
+              },
+              // If entry exists, don't push new one
+              then: { $each: [] },
+              // If no entry for today, add a new one
+              else: {
+                $each: [{ date: new Date(), count: 1 }],
+                $sort: { date: -1 },
+                $slice: 7  // Keep only the last 7 days
+              }
+            }
+          }
+        }
+      },
+      { new: true } // Return the updated document
+    );
+    
+    // Clear novel caches to ensure fresh data on next request
+    clearNovelCaches();
+    
+    // Return success with minimal data to reduce response size
+    res.json({ 
+      message: 'Module deleted successfully',
+      _id: module._id
+    });
   } catch (err) {
+    console.error('Error deleting module:', err);
     res.status(500).json({ message: err.message });
   }
 });
 
-// Add chapter to module
+// Add chapter to module - update to maintain chapters array
 router.post('/:novelId/modules/:moduleId/chapters/:chapterId', auth, admin, async (req, res) => {
   try {
     const module = await Module.findById(req.params.moduleId);
@@ -172,8 +333,26 @@ router.post('/:novelId/modules/:moduleId/chapters/:chapterId', auth, admin, asyn
       return res.status(404).json({ message: 'Module not found' });
     }
 
-    module.chapters.push(req.params.chapterId);
-    const updatedModule = await module.save();
+    // Add chapter to module's chapters array if not already present
+    if (!module.chapters.includes(req.params.chapterId)) {
+      module.chapters.push(req.params.chapterId);
+      await module.save();
+    }
+
+    // Update chapter's moduleId
+    await Chapter.findByIdAndUpdate(req.params.chapterId, {
+      moduleId: req.params.moduleId
+    });
+
+    const updatedModule = await Module.findById(req.params.moduleId)
+      .populate({
+        path: 'chapters',
+        options: { sort: { order: 1 } }
+      });
+
+    // Clear novel caches to ensure fresh data on next request
+    clearNovelCaches();
+
     res.json(updatedModule);
   } catch (err) {
     res.status(400).json({ message: err.message });
@@ -192,73 +371,113 @@ router.delete('/:novelId/modules/:moduleId/chapters/:chapterId', auth, admin, as
       chapter => chapter.toString() !== req.params.chapterId
     );
     const updatedModule = await module.save();
+    
+    // Clear novel caches to ensure fresh data on next request
+    clearNovelCaches();
+    
     res.json(updatedModule);
   } catch (err) {
     res.status(400).json({ message: err.message });
   }
 });
 
-// Reorder chapters within a module
-router.put('/:novelId/modules/:moduleId/chapters/reorder', auth, admin, async (req, res) => {
+// Update the reorder chapters route to maintain chapter order
+router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, admin, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
-    const { chapterId, direction } = req.body;
-    const { moduleId } = req.params;
+    const { direction } = req.body;
+    const { moduleId, chapterId, novelId } = req.params;
 
     // Get all chapters for this module
     const chapters = await Chapter.find({ moduleId }).sort('order');
-
+    
     // Find the chapter to move
     const currentIndex = chapters.findIndex(ch => ch._id.toString() === chapterId);
     if (currentIndex === -1) {
-      return res.status(404).json({ message: 'Chapter not found' });
+      throw new Error('Chapter not found');
     }
 
     // Calculate target index
     const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
     if (targetIndex < 0 || targetIndex >= chapters.length) {
-      return res.status(400).json({ message: 'Invalid move direction' });
+      throw new Error('Cannot move chapter further in that direction');
     }
 
-    // Get the chapters to swap
+    // Get current and target chapters
     const chapterToMove = chapters[currentIndex];
-    const chapterToSwap = chapters[targetIndex];
-
-    // Use a temporary order to avoid conflicts during swap
-    const tempOrder = -1;
-    const orderA = chapterToMove.order;
-    const orderB = chapterToSwap.order;
-
-    // First set one chapter to temp order
-    chapterToMove.order = tempOrder;
-    await chapterToMove.save();
-
-    // Then set the other chapter to first chapter's order
-    chapterToSwap.order = orderA;
-    await chapterToSwap.save();
-
-    // Finally set first chapter to second chapter's original order
-    chapterToMove.order = orderB;
-    await chapterToMove.save();
-
-    // Get updated chapters list with proper sorting
-    const updatedChapters = await Chapter.find({ moduleId }).sort('order');
+    const otherChapter = chapters[targetIndex];
     
-    // Add prev/next chapter information for each chapter
-    const chaptersWithNavigation = updatedChapters.map((chapter, index) => {
-      return {
-        ...chapter.toObject(),
-        prevChapter: index > 0 ? updatedChapters[index - 1] : null,
-        nextChapter: index < updatedChapters.length - 1 ? updatedChapters[index + 1] : null
-      };
-    });
+    // Store original order values
+    const originalOrder = chapterToMove.order;
+    const targetOrder = otherChapter.order;
+    
+    // STEP 1: First set the moving chapter to a temporary negative order to avoid conflicts
+    // This value won't conflict with any existing orders (which are 0 or positive)
+    await Chapter.findByIdAndUpdate(
+      chapterToMove._id,
+      { $set: { order: -9999 } },
+      { session }
+    );
+    
+    // STEP 2: Update the other chapter that's being swapped with
+    await Chapter.findByIdAndUpdate(
+      otherChapter._id,
+      { $set: { order: originalOrder } },
+      { session }
+    );
+    
+    // STEP 3: Finally, set the moving chapter to its final position
+    await Chapter.findByIdAndUpdate(
+      chapterToMove._id,
+      { $set: { order: targetOrder } },
+      { session }
+    );
+
+    // Update the module's chapters array to match the new order
+    // Recompute the new order of chapters after the swap
+    const updatedChapters = [...chapters];
+    [updatedChapters[currentIndex], updatedChapters[targetIndex]] = [updatedChapters[targetIndex], updatedChapters[currentIndex]];
+    
+    await Module.findByIdAndUpdate(
+      moduleId,
+      { 
+        $set: { 
+          chapters: updatedChapters.map(ch => ch._id)
+        }
+      },
+      { session }
+    );
+
+    // Update novel's timestamp
+    await Novel.findByIdAndUpdate(
+      novelId,
+      { updatedAt: new Date() },
+      { session }
+    );
+
+    // Commit the transaction
+    await session.commitTransaction();
+    
+    // Clear novel caches
+    clearNovelCaches();
+
+    // Get updated chapters list
+    const updatedChaptersList = await Chapter.find({ moduleId })
+      .sort('order')
+      .lean();
 
     res.json({
       message: 'Chapters reordered successfully',
-      chapters: chaptersWithNavigation
+      chapters: updatedChaptersList
     });
   } catch (err) {
+    await session.abortTransaction();
     console.error('Error during chapter reorder:', err);
     res.status(500).json({ message: err.message });
+  } finally {
+    session.endSession();
   }
 });
 

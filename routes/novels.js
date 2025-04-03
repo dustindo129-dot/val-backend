@@ -3,8 +3,140 @@ import Novel from "../models/Novel.js";
 import { uploadImage } from "../utils/imageUpload.js";
 import { auth } from "../middleware/auth.js";
 import Chapter from "../models/Chapter.js";
+import Module from "../models/Module.js";
+import { cache, clearNovelCaches, sseClients, notifyAllClients, shouldBypassCache } from '../utils/cacheUtils.js';
+import UserNovelInteraction from '../models/UserNovelInteraction.js';
 
 const router = express.Router();
+
+/**
+ * Updates the daily view count for a novel
+ * @param {string} novelId - The ID of the novel
+ */
+async function updateDailyViewCount(novelId) {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    // Use findOneAndUpdate with MongoDB operators to safely update the view count
+    // without needing to fetch the document first
+    await Novel.updateOne(
+      { _id: novelId },
+      { 
+        // Increment total views
+        $inc: { 'views.total': 1 },
+        
+        // Use aggregation operators to handle the daily views
+        $push: {
+          // First filter out any existing entry for today
+          // Then add the new/incremented entry
+          'views.daily': {
+            $cond: {
+              if: {
+                $gt: [
+                  {
+                    $size: {
+                      $filter: {
+                        input: '$views.daily',
+                        as: 'day',
+                        cond: {
+                          $and: [
+                            { $gte: ['$$day.date', today] },
+                            { $lt: ['$$day.date', new Date(today.getTime() + 24 * 60 * 60 * 1000)] }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  0
+                ]
+              },
+              // If entry exists, use $each with empty array (no push)
+              then: { $each: [] },
+              // If no entry for today, add a new one
+              else: {
+                $each: [{ date: today, count: 1 }],
+                $sort: { date: -1 },
+                $slice: 7  // Keep only the last 7 days
+              }
+            }
+          }
+        }
+      }
+    );
+    
+    // Use a separate query to increment an existing entry for today
+    await Novel.updateOne(
+      { 
+        _id: novelId,
+        'views.daily.date': {
+          $gte: today,
+          $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
+        }
+      },
+      { $inc: { 'views.daily.$.count': 1 } }
+    );
+    
+    // Clear hot novels cache
+    cache.del('hot_novels');
+  } catch (err) {
+    console.error('Error updating daily view count:', err);
+  }
+}
+
+// Server-Sent Events endpoint for real-time updates
+router.get('/sse', (req, res) => {
+  // Set headers for SSE
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*'
+  });
+
+  // Send initial connection message
+  res.write(`data: ${JSON.stringify({ message: 'Connected to novel updates' })}\n\n`);
+
+  // Add client to the set
+  sseClients.add(res);
+  console.log(`New SSE client connected. Total connected: ${sseClients.size}`);
+
+  // Handle client disconnect
+  req.on('close', () => {
+    sseClients.delete(res);
+    console.log(`SSE client disconnected. Total connected: ${sseClients.size}`);
+  });
+});
+
+// Add cache control headers middleware
+const setCacheControlHeaders = (req, res, next) => {
+  // Check if this is a critical path that should bypass cache
+  const isCriticalPath = shouldBypassCache(req.path, req.query);
+  
+  if (isCriticalPath) {
+    // Set the most aggressive no-cache headers possible
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '-1');
+    res.set('Surrogate-Control', 'no-store');
+    // Add a timestamp to make sure browser doesn't use cached response
+    res.set('X-Timestamp', new Date().getTime().toString());
+  } 
+  // For other GET requests, allow minimal caching
+  else if (req.method === 'GET') {
+    res.set('Cache-Control', 'private, max-age=10'); // Only 10 seconds
+  } 
+  // For mutations (POST, PUT, DELETE), prevent caching
+  else {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+  }
+  next();
+};
+
+// Apply cache control headers to all routes
+router.use(setCacheControlHeaders);
 
 /**
  * Search novels by title
@@ -45,30 +177,71 @@ router.get("/search", async (req, res) => {
  */
 router.get("/hot", async (req, res) => {
   try {
+    // Check if we should bypass the cache
+    const bypass = shouldBypassCache(req.path, req.query);
+    
+    // Only check cache if not bypassing
+    const cacheKey = 'hot_novels';
+    const cachedData = bypass ? null : cache.get(cacheKey);
+    
+    if (cachedData && !bypass) {
+      return res.json(cachedData);
+    }
+
+    console.log('Fetching fresh hot novels data from database');
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Get hot novels with optimized query
+    // Get hot novels with chapters in a single aggregation
     const hotNovels = await Novel.aggregate([
       // Unwind daily views array
       { $unwind: "$views.daily" },
       // Match views from today
       {
         $match: {
-          "views.daily.date": {
-            $gte: today,
-          },
-        },
+          "views.daily.date": { $gte: today }
+        }
       },
-      // Sort by today's view count
+      // Group by novel ID to prevent duplicates and sum the view counts
       {
-        $sort: {
-          "views.daily.count": -1,
-        },
+        $group: {
+          _id: "$_id",
+          title: { $first: "$title" },
+          illustration: { $first: "$illustration" },
+          status: { $first: "$status" },
+          updatedAt: { $first: "$updatedAt" },
+          dailyViews: { $sum: "$views.daily.count" }
+        }
       },
+      // Sort by the summed daily views
+      { $sort: { dailyViews: -1 } },
       // Limit to top 5
       { $limit: 5 },
-      // Project only needed fields
+      // Lookup latest chapters
+      {
+        $lookup: {
+          from: 'chapters',
+          let: { novelId: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: { $eq: ['$novelId', '$$novelId'] }
+              }
+            },
+            { $sort: { createdAt: -1 } },
+            { $limit: 1 },
+            {
+              $project: {
+                _id: 1,
+                title: 1,
+                createdAt: 1
+              }
+            }
+          ],
+          as: 'chapters'
+        }
+      },
+      // Project final fields
       {
         $project: {
           _id: 1,
@@ -76,33 +249,24 @@ router.get("/hot", async (req, res) => {
           illustration: 1,
           status: 1,
           updatedAt: 1,
-        },
-      },
+          chapters: 1,
+          dailyViews: 1  // Include view count for debugging
+        }
+      }
     ]);
 
-    // Get latest chapters for each novel in parallel
-    const novelsWithChapters = await Promise.all(
-      hotNovels.map(async (novel) => {
-        const chapters = await Chapter.find({ novelId: novel._id })
-          .sort({ createdAt: -1 })
-          .limit(1)
-          .select("chapterNumber title createdAt")
-          .lean();
-        return {
-          ...novel,
-          chapters,
-        };
-      })
-    );
-
-    // Return a consistent structure with a 'novels' property instead of a direct array
-    res.json({
-      novels: Array.isArray(novelsWithChapters) ? novelsWithChapters : [],
-    });
+    const result = { novels: hotNovels };
+    
+    // Cache the result only if not bypassing
+    if (!bypass) {
+      cache.set(cacheKey, result);
+    }
+    
+    res.json(result);
   } catch (err) {
     res.status(500).json({
       novels: [],
-      error: err.message,
+      error: err.message
     });
   }
 });
@@ -117,138 +281,118 @@ router.get("/", async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
-    // Get total count and novels with optimized query
-    const [total, novels] = await Promise.all([
-      Novel.countDocuments(),
-      Novel.find()
-        .select(
-          "title illustration author status genres alternativeTitles updatedAt createdAt description"
-        )
-        .lean(),
-    ]);
+    // Check if we should bypass cache
+    const bypass = shouldBypassCache(req.path, req.query);
+    console.log(`Novel list request: ${bypass ? 'Bypassing cache' : 'Using cache if available'}`);
 
-    if (!Array.isArray(novels)) {
-      console.error("Novels query did not return an array:", novels);
-      return res.status(500).json({
-        novels: [],
-        pagination: {
-          currentPage: 1,
-          totalPages: 1,
-          totalItems: 0,
-        },
-        error: "Invalid data format received from database",
-      });
+    // Generate cache key based on pagination
+    const cacheKey = `novels_page_${page}_limit_${limit}`;
+    const cachedData = bypass ? null : cache.get(cacheKey);
+    
+    if (cachedData && !bypass) {
+      console.log('Serving novel list from cache');
+      return res.json(cachedData);
     }
 
-    // Get all latest chapters in a single query
-    const latestChapters = await Chapter.aggregate([
+    console.log('Fetching fresh novel list data from database');
+
+    // Get novels and total count in a single aggregation
+    const [result] = await Novel.aggregate([
+      // First get the total count
       {
-        $sort: { createdAt: -1 },
-      },
-      {
-        $group: {
-          _id: "$novelId",
-          chapters: {
-            $push: {
-              _id: "$_id",
-              title: "$title",
-              createdAt: "$createdAt",
+        $facet: {
+          total: [{ $count: 'count' }],
+          novels: [
+            {
+              $project: {
+                title: 1,
+                illustration: 1,
+                author: 1,
+                status: 1,
+                genres: 1,
+                alternativeTitles: 1,
+                updatedAt: 1,
+                createdAt: 1,
+                description: 1,
+                staff: 1
+              }
             },
-          },
-        },
-      },
-      {
-        $project: {
-          chapters: { $slice: ["$chapters", 0, 3] },
-        },
-      },
-    ]).catch((err) => {
-      console.error("Error fetching chapters:", err);
-      return [];
-    });
-
-    // Create a map for quick chapter lookup
-    const chaptersMap = (
-      Array.isArray(latestChapters) ? latestChapters : []
-    ).reduce((acc, item) => {
-      if (item && item._id) {
-        acc[item._id.toString()] = Array.isArray(item.chapters)
-          ? item.chapters
-          : [];
+            // Lookup latest chapters
+            {
+              $lookup: {
+                from: 'chapters',
+                let: { novelId: '$_id' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: ['$novelId', '$$novelId'] }
+                    }
+                  },
+                  { $sort: { createdAt: -1 } },
+                  { $limit: 3 },
+                  {
+                    $project: {
+                      _id: 1,
+                      title: 1,
+                      createdAt: 1
+                    }
+                  }
+                ],
+                as: 'chapters'
+              }
+            },
+            // Calculate latest activity
+            {
+              $addFields: {
+                latestActivity: {
+                  $max: [
+                    '$updatedAt',
+                    { $max: '$chapters.createdAt' }
+                  ]
+                }
+              }
+            },
+            // Sort by latest activity
+            { $sort: { latestActivity: -1 } },
+            // Apply pagination
+            { $skip: skip },
+            { $limit: limit }
+          ]
+        }
       }
-      return acc;
-    }, {});
+    ]);
 
-    // Combine novel data with their chapters
-    const novelsWithChapters = novels
-      .map((novel) => {
-        if (!novel || typeof novel !== "object") {
-          console.error("Invalid novel object:", novel);
-          return null;
-        }
+    const total = result.total[0]?.count || 0;
+    const novels = result.novels;
 
-        const novelId = novel._id?.toString();
-        if (!novelId) {
-          console.error("Novel missing _id:", novel);
-          return null;
-        }
-
-        const moduleChapters = chaptersMap[novelId] || [];
-        const novelChapters = Array.isArray(novel.chapters)
-          ? novel.chapters
-          : [];
-
-        // Combine and sort all chapters
-        const allChapters = [...moduleChapters, ...novelChapters]
-          .filter((chapter) => chapter && chapter.createdAt) // Ensure valid chapters only
-          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-          .slice(0, 3);
-
-        // Calculate latest activity
-        const latestChapter = allChapters[0];
-        const latestActivity = latestChapter
-          ? Math.max(
-              new Date(latestChapter.createdAt).getTime(),
-              new Date(novel.updatedAt || novel.createdAt).getTime()
-            )
-          : new Date(novel.updatedAt || novel.createdAt).getTime();
-
-        return {
-          ...novel,
-          latestActivity,
-          chapters: allChapters,
-        };
-      })
-      .filter(Boolean); // Remove any null entries
-
-    // Sort novels by their latest activity time
-    novelsWithChapters.sort((a, b) => b.latestActivity - a.latestActivity);
-
-    // Apply pagination after sorting
-    const paginatedNovels = novelsWithChapters.slice(skip, skip + limit);
-
-    // Ensure we always return an array, even if empty
     const response = {
-      novels: Array.isArray(paginatedNovels) ? paginatedNovels : [],
+      novels,
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
-        totalItems: total,
-      },
+        totalItems: total
+      }
     };
+
+    // Cache the response only if not bypassing
+    if (!bypass) {
+      cache.set(cacheKey, response);
+      console.log('Cached novel list data');
+    } else {
+      console.log('Not caching novel list per configuration');
+    }
 
     res.json(response);
   } catch (err) {
     console.error("Error in GET /api/novels:", err);
-    // Return a valid response structure even in error case
     res.status(500).json({
       novels: [],
       pagination: {
         currentPage: 1,
         totalPages: 1,
-        totalItems: 0,
+        totalItems: 0
       },
-      error: err.message,
+      error: err.message
     });
   }
 });
@@ -280,9 +424,22 @@ router.post("/", auth, async (req, res) => {
       staff,
       note,
       chapters: [],
+      createdAt: new Date(),
+      updatedAt: new Date() // Explicitly set updatedAt
     });
 
     const newNovel = await novel.save();
+    
+    // Clear all novel-related caches after creating new novel
+    clearNovelCaches();
+    
+    // Explicitly notify clients about the new novel
+    notifyAllClients('new_novel', { 
+      id: newNovel._id,
+      title: newNovel.title,
+      timestamp: new Date().toISOString() 
+    });
+    
     res.status(201).json(newNovel);
   } catch (err) {
     res.status(400).json({ message: err.message });
@@ -295,15 +452,60 @@ router.post("/", auth, async (req, res) => {
  */
 router.get("/:id", async (req, res) => {
   try {
-    const novel = await Novel.findById(req.params.id);
+    // Get novel and modules in parallel with proper projection
+    const [novel, modules] = await Promise.all([
+      Novel.findById(req.params.id)
+        .select('title description alternativeTitles author illustration status staff genres note updatedAt createdAt views')
+        .lean(),
+      Module.find({ novelId: req.params.id })
+        .select('title illustration order chapters')
+        .sort('order')
+        .lean()
+    ]);
+
     if (!novel) {
       return res.status(404).json({ message: "Novel not found" });
     }
 
-    // Increment views
-    await novel.incrementViews();
+    // Get chapters with minimal fields needed
+    const chapters = await Chapter.find({ 
+      novelId: req.params.id 
+    })
+    .select('title moduleId order createdAt updatedAt')
+    .sort('order')
+    .lean();
 
-    res.json(novel);
+    // Organize chapters by module
+    const chaptersByModule = chapters.reduce((acc, chapter) => {
+      const moduleId = chapter.moduleId.toString();
+      if (!acc[moduleId]) {
+        acc[moduleId] = [];
+      }
+      acc[moduleId].push(chapter);
+      return acc;
+    }, {});
+
+    // Attach chapters to their modules
+    const modulesWithChapters = modules.map(module => ({
+      ...module,
+      chapters: chaptersByModule[module._id.toString()] || []
+    }));
+
+    // Increment views in background without blocking
+    Novel.findByIdAndUpdate(req.params.id, {
+      $inc: { 'views.total': 1 }
+    }).exec();
+
+    // Also update daily views count
+    updateDailyViewCount(req.params.id).catch(err => 
+      console.error('Error updating daily view count:', err)
+    );
+
+    // Return combined data
+    res.json({
+      novel,
+      modules: modulesWithChapters
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -325,7 +527,14 @@ router.put("/:id", auth, async (req, res) => {
       status,
       staff,
       note,
+      updatedAt,
     } = req.body;
+
+    // If status is being changed, log it and ensure updatedAt is set
+    const isStatusChange = status !== undefined;
+    if (isStatusChange) {
+      console.log(`Novel ${req.params.id} status changing to: ${status}`);
+    }
 
     const updateData = {
       ...(title && { title }),
@@ -335,8 +544,11 @@ router.put("/:id", auth, async (req, res) => {
       ...(genres && { genres }),
       ...(alternativeTitles && { alternativeTitles }),
       ...(status && { status }),
-      ...(staff && { staff }),
+      ...(staff !== undefined && { staff }),
       ...(note !== undefined && { note }),
+      // Always update the timestamp when changes are made
+      // If client provided a timestamp use it, otherwise use current time
+      updatedAt: updatedAt ? new Date(updatedAt) : new Date()
     };
 
     const novel = await Novel.findByIdAndUpdate(
@@ -349,6 +561,29 @@ router.put("/:id", auth, async (req, res) => {
       return res.status(404).json({ message: "Novel not found" });
     }
 
+    // Clear all novel-related caches for this and related novels
+    clearNovelCaches();
+    
+    // If status was changed, send a more specific notification
+    if (isStatusChange) {
+      notifyAllClients('novel_status_changed', { 
+        id: novel._id,
+        title: novel.title,
+        status: novel.status,
+        updatedAt: novel.updatedAt,
+        timestamp: new Date().toISOString() 
+      });
+    } 
+    // For all updates, send a general update notification
+    else {
+      notifyAllClients('novel_updated', { 
+        id: novel._id,
+        title: novel.title,
+        updatedAt: novel.updatedAt,
+        timestamp: new Date().toISOString() 
+      });
+    }
+    
     res.json(novel);
   } catch (err) {
     res.status(400).json({ message: err.message });
@@ -361,12 +596,31 @@ router.put("/:id", auth, async (req, res) => {
  */
 router.delete("/:id", auth, async (req, res) => {
   try {
+    console.log(`Deleting novel with ID: ${req.params.id}`);
     const novel = await Novel.findByIdAndDelete(req.params.id);
     if (!novel) {
       return res.status(404).json({ message: "Novel not found" });
     }
-    res.json({ message: "Novel deleted" });
+
+    // Also remove all chapters associated with this novel
+    await Chapter.deleteMany({ novelId: req.params.id });
+    
+    // Also remove all modules associated with this novel
+    await Module.deleteMany({ novelId: req.params.id });
+
+    // Clear all novel-related caches after deletion
+    clearNovelCaches();
+    
+    // Send special notification about novel deletion
+    notifyAllClients('novel_deleted', { 
+      id: req.params.id,
+      title: novel.title,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.json({ message: "Novel and all related content deleted successfully" });
   } catch (err) {
+    console.error("Error deleting novel:", err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -479,6 +733,286 @@ router.delete("/:id/chapters/:chapterId", auth, async (req, res) => {
     res.json(novel);
   } catch (err) {
     res.status(400).json({ message: err.message });
+  }
+});
+
+/**
+ * Force refresh all novel data
+ * @route GET /api/novels/refresh
+ */
+router.get("/refresh", auth, async (req, res) => {
+  try {
+    // Clear all novel caches
+    clearNovelCaches();
+    
+    // Notify clients
+    notifyAllClients('refresh', { 
+      timestamp: new Date().toISOString(),
+      message: 'All novel data has been refreshed'
+    });
+    
+    res.json({ 
+      success: true, 
+      message: 'All caches cleared and clients notified' 
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      message: err.message 
+    });
+  }
+});
+
+/**
+ * Force browser refresh timestamp
+ * @route GET /api/novels/browser-refresh
+ */
+router.get("/browser-refresh", async (req, res) => {
+  try {
+    // This endpoint just returns a new timestamp that clients can use
+    // to force their browser to bypass any caching
+    const timestamp = new Date().getTime();
+    
+    // Set aggressive no-cache headers
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '-1');
+    res.set('Surrogate-Control', 'no-store');
+    
+    res.json({ 
+      timestamp,
+      cacheBuster: `_cb=${timestamp}`,
+      message: 'Add this cacheBuster to your API requests to force fresh data'
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      message: err.message 
+    });
+  }
+});
+
+/**
+ * Toggle like status for a novel
+ * Increments/decrements the novel's like count based on user action
+ * @route POST /api/novels/:id/like
+ */
+router.post("/:id/like", auth, async (req, res) => {
+  try {
+    const novelId = req.params.id;
+    const userId = req.user._id;
+
+    // Check if novel exists
+    const novel = await Novel.findById(novelId);
+    if (!novel) {
+      return res.status(404).json({ message: "Novel not found" });
+    }
+
+    // Find existing interaction or create new one
+    let interaction = await UserNovelInteraction.findOne({ userId, novelId });
+    
+    if (!interaction) {
+      // Create new interaction with liked=true
+      interaction = new UserNovelInteraction({
+        userId,
+        novelId,
+        liked: true
+      });
+      await interaction.save();
+      
+      // Increment novel likes count
+      await Novel.findByIdAndUpdate(novelId, { $inc: { likes: 1 } });
+      
+      return res.status(200).json({ 
+        liked: true, 
+        likes: novel.likes + 1 
+      });
+    } else {
+      // Toggle existing interaction
+      const newLikedStatus = !interaction.liked;
+      interaction.liked = newLikedStatus;
+      await interaction.save();
+      
+      // Update novel likes count accordingly
+      const updateVal = newLikedStatus ? 1 : -1;
+      const updatedNovel = await Novel.findByIdAndUpdate(
+        novelId, 
+        { $inc: { likes: updateVal } },
+        { new: true }
+      );
+      
+      return res.status(200).json({ 
+        liked: newLikedStatus, 
+        likes: updatedNovel.likes 
+      });
+    }
+  } catch (err) {
+    console.error("Error toggling like:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Rate a novel
+ * Updates the novel's rating statistics
+ * @route POST /api/novels/:id/rate
+ */
+router.post("/:id/rate", auth, async (req, res) => {
+  try {
+    const novelId = req.params.id;
+    const userId = req.user._id;
+    const { rating } = req.body;
+    
+    // Validate rating
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ message: "Rating must be between 1 and 5" });
+    }
+
+    // Check if novel exists
+    const novel = await Novel.findById(novelId);
+    if (!novel) {
+      return res.status(404).json({ message: "Novel not found" });
+    }
+
+    // Find existing interaction or create new one
+    let interaction = await UserNovelInteraction.findOne({ userId, novelId });
+    let prevRating = 0;
+    
+    if (!interaction) {
+      // Create new interaction with provided rating
+      interaction = new UserNovelInteraction({
+        userId,
+        novelId,
+        rating
+      });
+      
+      // Update novel's rating statistics
+      await Novel.findByIdAndUpdate(novelId, {
+        $inc: {
+          'ratings.total': 1,
+          'ratings.value': rating
+        }
+      });
+    } else {
+      // Get previous rating if exists
+      prevRating = interaction.rating || 0;
+      
+      // Update interaction with new rating
+      interaction.rating = rating;
+      
+      if (prevRating > 0) {
+        // Update rating value by removing previous and adding new
+        await Novel.findByIdAndUpdate(novelId, {
+          $inc: {
+            'ratings.value': (rating - prevRating)
+          }
+        });
+      } else {
+        // First time rating, increment total and add value
+        await Novel.findByIdAndUpdate(novelId, {
+          $inc: {
+            'ratings.total': 1,
+            'ratings.value': rating
+          }
+        });
+      }
+    }
+    
+    await interaction.save();
+    
+    // Get updated novel to calculate average
+    const updatedNovel = await Novel.findById(novelId);
+    const averageRating = updatedNovel.ratings.total > 0 
+      ? (updatedNovel.ratings.value / updatedNovel.ratings.total).toFixed(1) 
+      : '0.0';
+    
+    return res.status(200).json({
+      rating,
+      ratingsCount: updatedNovel.ratings.total,
+      averageRating
+    });
+  } catch (err) {
+    console.error("Error rating novel:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Remove rating from a novel
+ * Updates the novel's rating statistics
+ * @route DELETE /api/novels/:id/rate
+ */
+router.delete("/:id/rate", auth, async (req, res) => {
+  try {
+    const novelId = req.params.id;
+    const userId = req.user._id;
+
+    // Check if novel exists
+    const novel = await Novel.findById(novelId);
+    if (!novel) {
+      return res.status(404).json({ message: "Novel not found" });
+    }
+
+    // Find existing interaction
+    const interaction = await UserNovelInteraction.findOne({ userId, novelId });
+    
+    if (!interaction || !interaction.rating) {
+      return res.status(404).json({ message: "No rating found for this novel" });
+    }
+    
+    const prevRating = interaction.rating;
+    
+    // Remove rating from interaction
+    interaction.rating = null;
+    await interaction.save();
+    
+    // Update novel's rating statistics
+    await Novel.findByIdAndUpdate(novelId, {
+      $inc: {
+        'ratings.total': -1,
+        'ratings.value': -prevRating
+      }
+    });
+    
+    // Get updated novel to calculate average
+    const updatedNovel = await Novel.findById(novelId);
+    const averageRating = updatedNovel.ratings.total > 0 
+      ? (updatedNovel.ratings.value / updatedNovel.ratings.total).toFixed(1) 
+      : '0.0';
+    
+    return res.status(200).json({
+      ratingsCount: updatedNovel.ratings.total,
+      averageRating
+    });
+  } catch (err) {
+    console.error("Error removing rating:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Get user's interaction with a novel (like status and rating)
+ * @route GET /api/novels/:id/interaction
+ */
+router.get("/:id/interaction", auth, async (req, res) => {
+  try {
+    const novelId = req.params.id;
+    const userId = req.user._id;
+
+    // Find interaction
+    const interaction = await UserNovelInteraction.findOne({ userId, novelId });
+    
+    if (!interaction) {
+      return res.json({ liked: false, rating: null });
+    }
+    
+    return res.json({
+      liked: interaction.liked || false,
+      rating: interaction.rating || null
+    });
+  } catch (err) {
+    console.error("Error getting user interaction:", err);
+    res.status(500).json({ message: err.message });
   }
 });
 

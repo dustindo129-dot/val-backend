@@ -9,7 +9,17 @@ const novelSchema = new mongoose.Schema({
   title: { type: String, required: true },
   alternativeTitles: [{ type: String }],
   author: { type: String, required: true },
-  staff: { type: String },
+  illustrator: { type: String },
+  active: {
+    translator: [{ type: String }],
+    editor: [{ type: String }],
+    proofreader: [{ type: String }]
+  },
+  inactive: {
+    translator: [{ type: String }],
+    editor: [{ type: String }],
+    proofreader: [{ type: String }]
+  },
   genres: [{ type: String }],
   description: { type: String, required: true },
   note: { type: String },
@@ -28,6 +38,11 @@ const novelSchema = new mongoose.Schema({
       date: { type: Date, default: Date.now },
       count: { type: Number, default: 0 }
     }]
+  },
+  likes: { type: Number, default: 0 },
+  ratings: {
+    total: { type: Number, default: 0 },
+    value: { type: Number, default: 0 }
   },
   status: {
     type: String,

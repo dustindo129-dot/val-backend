@@ -58,7 +58,13 @@ const corsOptions = {
     : ['http://localhost:5173', 'http://127.0.0.1:5173'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Cache-Control',
+    'Pragma'
+  ],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
   maxAge: 600 // Cache preflight requests for 10 minutes
 };
@@ -95,7 +101,7 @@ app.use('/api/novels', novelRoutes);   // Novel management endpoints
 app.use('/api/comments', commentRoutes); // Comment system endpoints
 app.use('/api/users', userRoutes);      // User management endpoints
 app.use('/api/chapters', chaptersRouter); // Chapter management endpoints
-app.use('/api/novels', moduleRoutes);   // Module management endpoints
+app.use('/api/modules', moduleRoutes);   // Module management endpoints
 
 // Health check endpoint
 app.get('/health', (req, res) => {

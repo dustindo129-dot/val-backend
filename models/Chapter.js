@@ -35,8 +35,8 @@ const chapterSchema = new mongoose.Schema({
 
 // Indexes for faster queries
 chapterSchema.index({ novelId: 1 });
-// Create a compound index for moduleId and order to ensure unique ordering within a module
-chapterSchema.index({ moduleId: 1, order: 1 }, { unique: true });
+// Index for moduleId and order, but not unique across all modules
+chapterSchema.index({ moduleId: 1, order: 1 });
 
 const Chapter = mongoose.model('Chapter', chapterSchema);
 export default Chapter; 

@@ -10,9 +10,8 @@ const moduleSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  coverImage: {
-    type: String,
-    default: 'https://res.cloudinary.com/dvoytcc6b/image/upload/v1743234203/%C6%A0_l%E1%BB%97i_h%C3%ACnh_m%E1%BA%A5t_r%E1%BB%93i_n8zdtv.png'
+  illustration: {
+    type: String
   },
   chapters: [{
     type: mongoose.Schema.Types.ObjectId,
