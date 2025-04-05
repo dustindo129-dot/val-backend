@@ -43,7 +43,7 @@ router.post('/register-admin', async (req, res) => {
 
     // Create token
     const token = jwt.sign(
-      { userId: user._id, role: user.role },
+      { userId: user._id, username: user.username, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -99,7 +99,7 @@ router.post('/signup', async (req, res) => {
     console.log('User saved successfully. ID:', savedUser._id);
 
     const token = jwt.sign(
-      { userId: user._id, role: user.role },
+      { userId: user._id, username: user.username, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -148,9 +148,13 @@ router.post('/login', async (req, res) => {
     user.lastLogin = new Date();
     await user.save();
 
-    // Create token
+    // Create token with both userId and username
     const token = jwt.sign(
-      { userId: user._id, role: user.role },
+      { 
+        userId: user._id, 
+        username: user.username, 
+        role: user.role 
+      },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );

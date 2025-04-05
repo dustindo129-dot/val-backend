@@ -216,15 +216,27 @@ router.get('/:id', async (req, res) => {
     console.log(`Found chapter: ${chapterData.title}`);
     console.log(`Navigation: prev=${chapterData.prevChapter?._id}, next=${chapterData.nextChapter?._id}`);
 
-    // Increment view count in background without blocking response
-    Novel.findByIdAndUpdate(chapterData.novelId, {
-      $inc: { 'views.total': 1 }
-    }).exec();
+    // Check if this chapter view should be counted based on 8-hour window
+    const viewKey = `chapter_${chapterData._id}_last_viewed`;
+    const lastViewed = req.cookies[viewKey];
+    const now = Date.now();
+    const eightHours = 8 * 60 * 60 * 1000; // 8 hours in milliseconds
+    const shouldCountView = !lastViewed || (now - parseInt(lastViewed, 10)) > eightHours;
 
-    // Also update daily views count
-    updateDailyViewCount(chapterData.novelId).catch(err => 
-      console.error('Error updating daily view count:', err)
-    );
+    // Only count the view if 8 hours have passed since last view
+    if (shouldCountView) {
+      // Update daily views count
+      updateDailyViewCount(chapterData.novelId).catch(err => 
+        console.error('Error updating daily view count:', err)
+      );
+      
+      // Set a cookie to track this viewing
+      res.cookie(viewKey, now.toString(), { 
+        maxAge: eightHours,
+        httpOnly: true,
+        sameSite: 'strict'
+      });
+    }
 
     res.json({ chapter: chapterData });
   } catch (err) {
@@ -474,82 +486,88 @@ router.put('/:id', [auth, admin], async (req, res) => {
   }
 });
 
-// Delete a chapter (admin only)
-router.delete('/:id', [auth, admin], async (req, res) => {
-  // Start a session for transaction
+/**
+ * Delete a chapter
+ * @route DELETE /api/chapters/:id
+ */
+router.delete('/:id', auth, async (req, res) => {
   const session = await mongoose.startSession();
+  session.startTransaction();
   
   try {
-    // Start transaction
-    await session.withTransaction(async () => {
-      // Find the chapter with minimal projection to get only what we need
-      const chapter = await Chapter.findById(req.params.id)
-        .select('novelId moduleId order')
-        .session(session);
-        
-      if (!chapter) {
-        throw new Error('Chapter not found');
-      }
+    // Get chapter info before deletion
+    const chapter = await Chapter.findOne(
+      { _id: req.params.id },
+      { novelId: 1, moduleId: 1, order: 1 }
+    ).session(session);
 
-      // Save needed references
-      const { novelId, moduleId, order } = chapter;
+    if (!chapter) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Chapter not found' });
+    }
 
-      // Perform operations in parallel for efficiency
-      await Promise.all([
-        // 1. Remove the chapter reference from module and delete the chapter in one operation
-        Module.findByIdAndUpdate(
-          moduleId,
-          { 
-            $pull: { chapters: chapter._id },
-            updatedAt: new Date()
-          },
-          { session }
-        ),
+    // Remove chapter from module's chapters array
+    await Module.findOneAndUpdate(
+      { _id: chapter.moduleId },
+      {
+        $setOnInsert: { createdAt: new Date() },
+        $set: { updatedAt: new Date() },
+        $pull: { chapters: chapter._id }
+      },
+      { session }
+    );
 
-        // 2. Delete the chapter
-        Chapter.findByIdAndDelete(chapter._id, { session }),
+    // Delete the chapter
+    await Chapter.findOneAndDelete(
+      { _id: req.params.id },
+      { session }
+    );
 
-        // 3. Update order of remaining chapters
-        Chapter.updateMany(
-          { 
-            novelId,
-            moduleId,
-            order: { $gt: order }
-          },
-          { $inc: { order: -1 } },
-          { session }
-        ),
+    // Update order of remaining chapters
+    await Chapter.updateMany(
+      {
+        novelId: chapter.novelId,
+        moduleId: chapter.moduleId,
+        order: { $gt: chapter.order }
+      },
+      { $inc: { order: -1 } },
+      { session }
+    );
 
-        // 4. Update novel's timestamp and view count
-        Novel.findByIdAndUpdate(
-          novelId,
-          { 
-            updatedAt: new Date(),
-            $inc: { 'views.total': 1 }
-          },
-          { session }
-        )
-      ]);
-      
-      // Clear novel caches - keep this outside the Promise.all to ensure it runs after DB operations
-      await clearNovelCaches();
-      
-      // Notify clients about the update - more efficient to do this with the novel ID
-      notifyAllClients('update', { 
-        novelId,
-        type: 'chapter_deleted',
-        chapterId: req.params.id,
-        timestamp: new Date().toISOString()
-      });
+    // Update novel's timestamp and optionally increment view count
+    const shouldSkipViewTracking = req.query.skipViewTracking === 'true';
+    const novelUpdate = {
+      $set: { updatedAt: new Date() }
+    };
+    
+    if (!shouldSkipViewTracking) {
+      novelUpdate.$inc = { 'views.total': 1 };
+    }
+
+    await Novel.findOneAndUpdate(
+      { _id: chapter.novelId },
+      novelUpdate,
+      { session }
+    );
+
+    await session.commitTransaction();
+    
+    // Clear novel caches
+    clearNovelCaches();
+    
+    // Notify clients of update
+    notifyAllClients('update', {
+      type: 'chapter_deleted',
+      novelId: chapter.novelId,
+      chapterId: chapter._id,
+      timestamp: new Date().toISOString()
     });
 
-    // If we get here, the transaction was successful
     res.json({ message: 'Chapter deleted successfully' });
   } catch (err) {
-    console.error('Error deleting chapter:', err);
+    await session.abortTransaction();
     res.status(500).json({ message: err.message });
   } finally {
-    // End the session
     session.endSession();
   }
 });

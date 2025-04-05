@@ -298,7 +298,6 @@ router.get("/", async (req, res) => {
 
     // Get novels and total count in a single aggregation
     const [result] = await Novel.aggregate([
-      // First get the total count
       {
         $facet: {
           total: [{ $count: 'count' }],
@@ -314,7 +313,8 @@ router.get("/", async (req, res) => {
                 updatedAt: 1,
                 createdAt: 1,
                 description: 1,
-                staff: 1
+                active: 1,
+                inactive: 1
               }
             },
             // Lookup latest chapters
@@ -455,7 +455,7 @@ router.get("/:id", async (req, res) => {
     // Get novel and modules in parallel with proper projection
     const [novel, modules] = await Promise.all([
       Novel.findById(req.params.id)
-        .select('title description alternativeTitles author illustration status staff genres note updatedAt createdAt views')
+        .select('title description alternativeTitles author illustration status active inactive genres note updatedAt createdAt views ratings')
         .lean(),
       Module.find({ novelId: req.params.id })
         .select('title illustration order chapters')
@@ -491,15 +491,18 @@ router.get("/:id", async (req, res) => {
       chapters: chaptersByModule[module._id.toString()] || []
     }));
 
-    // Increment views in background without blocking
-    Novel.findByIdAndUpdate(req.params.id, {
-      $inc: { 'views.total': 1 }
-    }).exec();
+    // Only increment views if skipViewTracking is not true
+    if (req.query.skipViewTracking !== 'true') {
+      // Increment views in background without blocking
+      Novel.findByIdAndUpdate(req.params.id, {
+        $inc: { 'views.total': 1 }
+      }).exec();
 
-    // Also update daily views count
-    updateDailyViewCount(req.params.id).catch(err => 
-      console.error('Error updating daily view count:', err)
-    );
+      // Also update daily views count
+      updateDailyViewCount(req.params.id).catch(err => 
+        console.error('Error updating daily view count:', err)
+      );
+    }
 
     // Return combined data
     res.json({
