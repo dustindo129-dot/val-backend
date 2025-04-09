@@ -37,8 +37,49 @@ export const auth = async (req, res, next) => {
  * @param {string} userId - The ID of the user to generate token for
  * @returns {string} JWT token that expires in 7 days
  */
-export const generateToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET, {
-    expiresIn: '7d'
-  });
+export const generateToken = (user) => {
+  return jwt.sign(
+    { userId: user._id, username: user.username, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: '24h' }
+  );
+};
+
+/**
+ * Check if user is banned
+ * Must be used after auth middleware
+ */
+export const checkBan = async (req, res, next) => {
+  try {
+    if (req.user.isBanned) {
+      return res.status(403).json({ 
+        message: 'You are banned from performing this action'
+      });
+    }
+    next();
+  } catch (error) {
+    res.status(500).json({ message: 'Error checking ban status' });
+  }
+};
+
+/**
+ * Check if user has required role
+ * @param {Array} roles - Array of allowed roles
+ * @returns {Function} Middleware function
+ * Must be used after auth middleware
+ */
+export const checkRole = (roles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ message: 'Authentication required' });
+    }
+    
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ 
+        message: 'You do not have permission to perform this action' 
+      });
+    }
+    
+    next();
+  };
 }; 

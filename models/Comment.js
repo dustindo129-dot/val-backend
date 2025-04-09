@@ -64,6 +64,11 @@ const commentSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  parentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Comment',
+    default: null
+  },
   likes: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -76,11 +81,18 @@ const commentSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  adminDeleted: {
+    type: Boolean,
+    default: false
+  },
   createdAt: {
     type: Date,
     default: Date.now
   }
 });
+
+// Add index for faster querying of replies
+commentSchema.index({ parentId: 1 });
 
 // Virtual property to get the count of likes
 commentSchema.virtual('likeCount').get(function() {

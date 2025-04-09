@@ -14,6 +14,10 @@ import commentRoutes from './routes/comments.js';
 import userRoutes from './routes/users.js';
 import chaptersRouter from './routes/chapters.js';
 import moduleRoutes from './routes/modules.js';
+import userChapterInteractionRoutes from './routes/userChapterInteractions.js';
+import userNovelInteractionRoutes from './routes/userNovelInteractions.js';
+import donationRoutes from './routes/donation.js';
+import reportRoutes from './routes/reports.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -102,6 +106,10 @@ app.use('/api/comments', commentRoutes); // Comment system endpoints
 app.use('/api/users', userRoutes);      // User management endpoints
 app.use('/api/chapters', chaptersRouter); // Chapter management endpoints
 app.use('/api/modules', moduleRoutes);   // Module management endpoints
+app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User chapter interactions endpoints
+app.use('/api/usernovelinteractions', userNovelInteractionRoutes); // User novel interactions endpoints
+app.use('/api/donation', donationRoutes); // Donation endpoints
+app.use('/api/reports', reportRoutes); // Report endpoints
 
 // Health check endpoint
 app.get('/health', (req, res) => {

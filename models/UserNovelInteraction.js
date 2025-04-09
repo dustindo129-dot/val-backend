@@ -25,6 +25,10 @@ const userNovelInteractionSchema = new mongoose.Schema({
     max: 5,
     default: null 
   },
+  bookmarked: {
+    type: Boolean,
+    default: false
+  },
   createdAt: { 
     type: Date, 
     default: Date.now 

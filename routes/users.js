@@ -128,8 +128,18 @@ router.put('/:username/password', auth, async (req, res) => {
  */
 router.get('/:username/profile', auth, async (req, res) => {
   try {
-    const user = await User.findOne({ username: req.params.username })
+    let user;
+    const identifier = req.params.username;
+
+    // First try to find by username
+    user = await User.findOne({ username: identifier })
       .select('-password');
+
+    // If not found by username, check if it's a valid ObjectId and try finding by ID
+    if (!user && mongoose.Types.ObjectId.isValid(identifier)) {
+      user = await User.findById(identifier)
+        .select('-password');
+    }
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -171,7 +181,7 @@ router.get('/:username/bookmarks/:novelId', auth, async (req, res) => {
 });
 
 /**
- * Add a novel to user's bookmarks
+ * Add/Remove a novel to/from user's bookmarks
  * @route POST /api/users/:username/bookmarks
  */
 router.post('/:username/bookmarks', auth, async (req, res) => {
@@ -186,21 +196,27 @@ router.post('/:username/bookmarks', auth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid novel ID' });
     }
 
-    const user = await User.findById(req.user._id);
-    if (!user.bookmarks) {
-      user.bookmarks = [];
-    }
-    
-    const bookmarkExists = user.bookmarks.some(id => id.toString() === novelId);
-    if (!bookmarkExists) {
-      user.bookmarks.push(novelId);
-      await user.save();
-    }
+    // Use findOneAndUpdate to do everything in one query
+    const result = await User.findOneAndUpdate(
+      { _id: req.user._id },
+      {
+        $set: { updatedAt: new Date() },
+        [req.user.bookmarks?.some(id => id.toString() === novelId) ? '$pull' : '$addToSet']: {
+          bookmarks: novelId
+        }
+      },
+      { new: true }
+    ).select('bookmarks');
 
-    res.json({ message: 'Novel bookmarked successfully' });
+    const isBookmarked = result.bookmarks.some(id => id.toString() === novelId);
+    
+    res.json({ 
+      message: isBookmarked ? 'Novel bookmarked successfully' : 'Bookmark removed successfully',
+      isBookmarked
+    });
   } catch (error) {
-    console.error('Bookmark add error:', error);
-    res.status(500).json({ message: 'Failed to add bookmark' });
+    console.error('Bookmark toggle error:', error);
+    res.status(500).json({ message: 'Failed to toggle bookmark' });
   }
 });
 
@@ -230,7 +246,10 @@ router.delete('/:username/bookmarks/:novelId', auth, async (req, res) => {
     );
     await user.save();
 
-    res.json({ message: 'Bookmark removed successfully' });
+    res.json({ 
+      message: 'Bookmark removed successfully',
+      isBookmarked: false 
+    });
   } catch (error) {
     console.error('Bookmark remove error:', error);
     res.status(500).json({ message: 'Failed to remove bookmark' });
@@ -238,7 +257,7 @@ router.delete('/:username/bookmarks/:novelId', auth, async (req, res) => {
 });
 
 /**
- * Get all bookmarked novels for a user
+ * Get all bookmarked novels for a user with complete novel details
  * @route GET /api/users/:username/bookmarks
  */
 router.get('/:username/bookmarks', auth, async (req, res) => {
@@ -248,21 +267,56 @@ router.get('/:username/bookmarks', auth, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to view bookmarks' });
     }
 
-    const user = await User.findById(req.user._id)
-      .populate({
-        path: 'bookmarks',
-        select: '_id title' // Only select the fields we need
-      });
-
-    if (!user.bookmarks) {
+    const user = await User.findById(req.user._id);
+    
+    // Initialize bookmarks array if it doesn't exist or is invalid
+    if (!user.bookmarks || !Array.isArray(user.bookmarks)) {
       user.bookmarks = [];
       await user.save();
+      return res.json([]);
     }
 
-    res.json(user.bookmarks);
+    // Only proceed with population if there are bookmarks
+    if (user.bookmarks.length > 0) {
+      // First populate the bookmarks to get the novels
+      const populatedUser = await User.findById(user._id)
+        .populate({
+          path: 'bookmarks',
+          select: '_id title illustration'
+        });
+
+      // Then fetch the latest chapter for each novel
+      const bookmarksWithDetails = await Promise.all(
+        populatedUser.bookmarks.map(async (novel) => {
+          // Find the latest module and its latest chapter
+          const latestModule = await mongoose.model('Module')
+            .findOne({ novelId: novel._id })
+            .sort({ order: -1 })
+            .populate({
+              path: 'chapters',
+              select: 'title order',
+              options: { sort: { order: -1 }, limit: 1 }
+            });
+
+          return {
+            _id: novel._id,
+            title: novel.title || 'Untitled',
+            illustration: novel.illustration || '',
+            latestChapter: latestModule?.chapters?.[0] ? {
+              title: latestModule.chapters[0].title,
+              number: latestModule.chapters[0].order + 1
+            } : null
+          };
+        })
+      );
+
+      return res.json(bookmarksWithDetails);
+    }
+
+    return res.json([]);
   } catch (error) {
     console.error('Bookmarks fetch error:', error);
-    res.status(500).json({ message: 'Failed to fetch bookmarks' });
+    res.status(500).json({ message: 'Failed to fetch bookmarks', error: error.message });
   }
 });
 
@@ -352,6 +406,102 @@ router.get('/:username/blocked', auth, async (req, res) => {
   } catch (error) {
     console.error('Get blocked users error:', error);
     res.status(500).json({ message: 'Failed to get blocked users' });
+  }
+});
+
+/**
+ * Check if user is banned
+ * @route GET /api/users/:username/ban-status
+ */
+router.get('/:username/ban-status', auth, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.params.username });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    res.json({ isBanned: user.isBanned || false });
+  } catch (error) {
+    console.error('Ban status check error:', error);
+    res.status(500).json({ message: 'Failed to check ban status' });
+  }
+});
+
+/**
+ * Ban a user (Admin only)
+ * @route POST /api/users/ban/:username
+ */
+router.post('/ban/:username', auth, async (req, res) => {
+  try {
+    // Check if the requesting user is an admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can ban users' });
+    }
+
+    const userToBan = await User.findOne({ username: req.params.username });
+    if (!userToBan) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Cannot ban another admin
+    if (userToBan.role === 'admin') {
+      return res.status(403).json({ message: 'Cannot ban an admin' });
+    }
+
+    userToBan.isBanned = true;
+    await userToBan.save();
+
+    res.json({ message: 'User banned successfully' });
+  } catch (error) {
+    console.error('Ban user error:', error);
+    res.status(500).json({ message: 'Failed to ban user' });
+  }
+});
+
+/**
+ * Unban a user (Admin only)
+ * @route DELETE /api/users/ban/:username
+ */
+router.delete('/ban/:username', auth, async (req, res) => {
+  try {
+    // Check if the requesting user is an admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can unban users' });
+    }
+
+    const userToUnban = await User.findOne({ username: req.params.username });
+    if (!userToUnban) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    userToUnban.isBanned = false;
+    await userToUnban.save();
+
+    res.json({ message: 'User unbanned successfully' });
+  } catch (error) {
+    console.error('Unban user error:', error);
+    res.status(500).json({ message: 'Failed to unban user' });
+  }
+});
+
+/**
+ * Get all banned users (Admin only)
+ * @route GET /api/users/banned
+ */
+router.get('/banned', auth, async (req, res) => {
+  try {
+    // Check if the requesting user is an admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can view banned users' });
+    }
+
+    const bannedUsers = await User.find({ isBanned: true })
+      .select('username avatar');
+
+    res.json(bannedUsers);
+  } catch (error) {
+    console.error('Get banned users error:', error);
+    res.status(500).json({ message: 'Failed to get banned users' });
   }
 });
 
