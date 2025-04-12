@@ -9,81 +9,6 @@ import UserNovelInteraction from '../models/UserNovelInteraction.js';
 
 const router = express.Router();
 
-/**
- * Updates the daily view count for a novel
- * @param {string} novelId - The ID of the novel
- */
-async function updateDailyViewCount(novelId) {
-  try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    
-    // Use findOneAndUpdate with MongoDB operators to safely update the view count
-    // without needing to fetch the document first
-    await Novel.updateOne(
-      { _id: novelId },
-      { 
-        // Increment total views
-        $inc: { 'views.total': 1 },
-        
-        // Use aggregation operators to handle the daily views
-        $push: {
-          // First filter out any existing entry for today
-          // Then add the new/incremented entry
-          'views.daily': {
-            $cond: {
-              if: {
-                $gt: [
-                  {
-                    $size: {
-                      $filter: {
-                        input: '$views.daily',
-                        as: 'day',
-                        cond: {
-                          $and: [
-                            { $gte: ['$$day.date', today] },
-                            { $lt: ['$$day.date', new Date(today.getTime() + 24 * 60 * 60 * 1000)] }
-                          ]
-                        }
-                      }
-                    }
-                  },
-                  0
-                ]
-              },
-              // If entry exists, use $each with empty array (no push)
-              then: { $each: [] },
-              // If no entry for today, add a new one
-              else: {
-                $each: [{ date: today, count: 1 }],
-                $sort: { date: -1 },
-                $slice: 7  // Keep only the last 7 days
-              }
-            }
-          }
-        }
-      }
-    );
-    
-    // Use a separate query to increment an existing entry for today
-    await Novel.updateOne(
-      { 
-        _id: novelId,
-        'views.daily.date': {
-          $gte: today,
-          $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
-        }
-      },
-      { $inc: { 'views.daily.$.count': 1 } }
-    );
-    
-    // Clear hot novels cache
-    cache.del('hot_novels');
-  } catch (err) {
-    console.error('Error updating daily view count:', err);
-  }
-}
-
 // Server-Sent Events endpoint for real-time updates
 router.get('/sse', (req, res) => {
   // Set headers for SSE
@@ -154,16 +79,58 @@ router.get("/search", async (req, res) => {
     const searchTerms = title.split(" ").filter((term) => term.length > 0);
     const searchPattern = searchTerms.map((term) => `(?=.*${term})`).join("");
 
-    const novels = await Novel.find({
-      $or: [
-        // Match main title
-        { title: { $regex: searchPattern, $options: "i" } },
-        // Match alternative titles if they exist
-        { alternativeTitles: { $regex: searchPattern, $options: "i" } },
-      ],
-    })
-      .select("title illustration author status chapters alternativeTitles")
-      .limit(10);
+    const novels = await Novel.aggregate([
+      {
+        $match: {
+          $or: [
+            // Match main title
+            { title: { $regex: searchPattern, $options: "i" } },
+            // Match alternative titles if they exist
+            { alternativeTitles: { $regex: searchPattern, $options: "i" } },
+          ],
+        }
+      },
+      // Lookup chapters to get accurate count
+      {
+        $lookup: {
+          from: 'chapters',
+          let: { novelId: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: { $eq: ['$novelId', '$$novelId'] }
+              }
+            },
+            {
+              $count: 'total'
+            }
+          ],
+          as: 'chapterCount'
+        }
+      },
+      // Add chapter count field
+      {
+        $addFields: {
+          totalChapters: {
+            $cond: {
+              if: { $gt: [{ $size: '$chapterCount' }, 0] },
+              then: { $arrayElemAt: ['$chapterCount.total', 0] },
+              else: 0
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          title: 1,
+          illustration: 1,
+          author: 1,
+          status: 1,
+          totalChapters: 1
+        }
+      },
+      { $limit: 10 }
+    ]);
 
     res.json(novels);
   } catch (err) {
@@ -298,7 +265,6 @@ router.get("/", async (req, res) => {
 
     // Get novels and total count in a single aggregation
     const [result] = await Novel.aggregate([
-      // First get the total count
       {
         $facet: {
           total: [{ $count: 'count' }],
@@ -308,16 +274,19 @@ router.get("/", async (req, res) => {
                 title: 1,
                 illustration: 1,
                 author: 1,
+                illustrator: 1,
                 status: 1,
                 genres: 1,
                 alternativeTitles: 1,
                 updatedAt: 1,
                 createdAt: 1,
                 description: 1,
-                staff: 1
+                note: 1,
+                active: 1,
+                inactive: 1
               }
             },
-            // Lookup latest chapters
+            // Lookup latest chapters for display
             {
               $lookup: {
                 from: 'chapters',
@@ -341,7 +310,31 @@ router.get("/", async (req, res) => {
                 as: 'chapters'
               }
             },
-            // Calculate latest activity
+            // Lookup first chapter (by order)
+            {
+              $lookup: {
+                from: 'chapters',
+                let: { novelId: '$_id' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: ['$novelId', '$$novelId'] }
+                    }
+                  },
+                  { $sort: { order: 1 } },
+                  { $limit: 1 },
+                  {
+                    $project: {
+                      _id: 1,
+                      title: 1,
+                      order: 1
+                    }
+                  }
+                ],
+                as: 'firstChapter'
+              }
+            },
+            // Calculate latest activity and set first chapter
             {
               $addFields: {
                 latestActivity: {
@@ -349,7 +342,8 @@ router.get("/", async (req, res) => {
                     '$updatedAt',
                     { $max: '$chapters.createdAt' }
                   ]
-                }
+                },
+                firstChapter: { $arrayElemAt: ['$firstChapter', 0] }
               }
             },
             // Sort by latest activity
@@ -405,27 +399,41 @@ router.post("/", auth, async (req, res) => {
   try {
     const {
       title,
-      author,
-      description,
-      illustration,
-      genres,
       alternativeTitles,
-      staff,
+      author,
+      illustrator,
+      active,
+      inactive,
+      genres,
+      description,
       note,
+      illustration,
+      status
     } = req.body;
 
     const novel = new Novel({
       title,
-      author,
-      description,
-      illustration,
-      genres: genres || [],
       alternativeTitles: alternativeTitles || [],
-      staff,
+      author,
+      illustrator,
+      active: {
+        translator: active?.translator || [],
+        editor: active?.editor || [],
+        proofreader: active?.proofreader || []
+      },
+      inactive: {
+        translator: inactive?.translator || [],
+        editor: inactive?.editor || [],
+        proofreader: inactive?.proofreader || []
+      },
+      genres: genres || [],
+      description,
       note,
+      illustration,
+      status: status || 'Ongoing',
       chapters: [],
       createdAt: new Date(),
-      updatedAt: new Date() // Explicitly set updatedAt
+      updatedAt: new Date()
     });
 
     const newNovel = await novel.save();
@@ -455,7 +463,7 @@ router.get("/:id", async (req, res) => {
     // Get novel and modules in parallel with proper projection
     const [novel, modules] = await Promise.all([
       Novel.findById(req.params.id)
-        .select('title description alternativeTitles author illustration status staff genres note updatedAt createdAt views')
+        .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings')
         .lean(),
       Module.find({ novelId: req.params.id })
         .select('title illustration order chapters')
@@ -491,21 +499,28 @@ router.get("/:id", async (req, res) => {
       chapters: chaptersByModule[module._id.toString()] || []
     }));
 
-    // Increment views in background without blocking
-    Novel.findByIdAndUpdate(req.params.id, {
-      $inc: { 'views.total': 1 }
-    }).exec();
-
-    // Also update daily views count
-    updateDailyViewCount(req.params.id).catch(err => 
-      console.error('Error updating daily view count:', err)
-    );
-
     // Return combined data
     res.json({
       novel,
       modules: modulesWithChapters
     });
+
+    // Increment view count after sending response
+    if (req.query.skipViewTracking !== 'true') {
+      Novel.findByIdAndUpdate(
+        req.params.id,
+        { 
+          $inc: { 'views.total': 1 },
+          $push: {
+            'views.daily': {
+              $each: [{ date: new Date(), count: 1 }],
+              $sort: { date: -1 },
+              $slice: 7  // Keep only last 7 days
+            }
+          }
+        }
+      ).exec().catch(err => console.error('Error updating view count:', err));
+    }
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -519,73 +534,56 @@ router.put("/:id", auth, async (req, res) => {
   try {
     const {
       title,
-      author,
-      description,
-      illustration,
-      genres,
       alternativeTitles,
-      status,
-      staff,
+      author,
+      illustrator,
+      active,
+      inactive,
+      genres,
+      description,
       note,
-      updatedAt,
+      illustration,
+      status
     } = req.body;
 
-    // If status is being changed, log it and ensure updatedAt is set
-    const isStatusChange = status !== undefined;
-    if (isStatusChange) {
-      console.log(`Novel ${req.params.id} status changing to: ${status}`);
-    }
-
-    const updateData = {
-      ...(title && { title }),
-      ...(author && { author }),
-      ...(description && { description }),
-      ...(illustration && { illustration }),
-      ...(genres && { genres }),
-      ...(alternativeTitles && { alternativeTitles }),
-      ...(status && { status }),
-      ...(staff !== undefined && { staff }),
-      ...(note !== undefined && { note }),
-      // Always update the timestamp when changes are made
-      // If client provided a timestamp use it, otherwise use current time
-      updatedAt: updatedAt ? new Date(updatedAt) : new Date()
-    };
-
-    const novel = await Novel.findByIdAndUpdate(
-      req.params.id,
-      { $set: updateData },
-      { new: true, runValidators: true }
-    );
-
+    // Find novel and update it
+    const novel = await Novel.findById(req.params.id);
     if (!novel) {
       return res.status(404).json({ message: "Novel not found" });
     }
 
-    // Clear all novel-related caches for this and related novels
+    // Update fields
+    novel.title = title;
+    novel.alternativeTitles = alternativeTitles;
+    novel.author = author;
+    novel.illustrator = illustrator;
+    novel.active = active;
+    novel.inactive = inactive;
+    novel.genres = genres;
+    novel.description = description;
+    novel.note = note;
+    novel.illustration = illustration;
+    novel.status = status;
+    novel.updatedAt = new Date();
+
+    // Save the updated novel
+    const updatedNovel = await novel.save();
+
+    // Clear novel caches
     clearNovelCaches();
-    
-    // If status was changed, send a more specific notification
-    if (isStatusChange) {
-      notifyAllClients('novel_status_changed', { 
-        id: novel._id,
-        title: novel.title,
-        status: novel.status,
-        updatedAt: novel.updatedAt,
-        timestamp: new Date().toISOString() 
-      });
-    } 
-    // For all updates, send a general update notification
-    else {
-      notifyAllClients('novel_updated', { 
-        id: novel._id,
-        title: novel.title,
-        updatedAt: novel.updatedAt,
-        timestamp: new Date().toISOString() 
-      });
-    }
-    
-    res.json(novel);
+
+    // Notify SSE clients about the update
+    notifyAllClients({
+      type: 'novel-updated',
+      data: {
+        novelId: updatedNovel._id,
+        updatedAt: updatedNovel.updatedAt
+      }
+    });
+
+    res.json(updatedNovel);
   } catch (err) {
+    console.error("Error updating novel:", err);
     res.status(400).json({ message: err.message });
   }
 });

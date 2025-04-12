@@ -39,11 +39,6 @@ const novelSchema = new mongoose.Schema({
       count: { type: Number, default: 0 }
     }]
   },
-  likes: { type: Number, default: 0 },
-  ratings: {
-    total: { type: Number, default: 0 },
-    value: { type: Number, default: 0 }
-  },
   status: {
     type: String,
     enum: ['Ongoing', 'Completed', 'Hiatus'],

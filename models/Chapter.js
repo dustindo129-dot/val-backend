@@ -23,6 +23,37 @@ const chapterSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  translator: {
+    type: String,
+    default: ''
+  },
+  editor: {
+    type: String,
+    default: ''
+  },
+  proofreader: {
+    type: String,
+    default: ''
+  },
+  mode: {
+    type: String,
+    enum: ['published', 'draft', 'protected', 'paid'],
+    default: 'published'
+  },
+  views: {
+    type: Number,
+    default: 0
+  },
+  footnotes: [{
+    id: {
+      type: Number,
+      required: true
+    },
+    content: {
+      type: String,
+      required: true
+    }
+  }],
   createdAt: {
     type: Date,
     default: Date.now
@@ -37,6 +68,12 @@ const chapterSchema = new mongoose.Schema({
 chapterSchema.index({ novelId: 1 });
 // Index for moduleId and order, but not unique across all modules
 chapterSchema.index({ moduleId: 1, order: 1 });
+
+// Simplified method to increment views
+chapterSchema.methods.incrementViews = async function() {
+  this.views++;
+  return this.save();
+};
 
 const Chapter = mongoose.model('Chapter', chapterSchema);
 export default Chapter; 

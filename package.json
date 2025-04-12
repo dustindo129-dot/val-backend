@@ -3,28 +3,31 @@
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
+  "engines": {
+    "node": "18.x",
+    "npm": "9.x"
+  },
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
   "dependencies": {
-    "@aws-sdk/client-ses": "^3.777.0",
-    "axios": "^1.8.4",
-    "bcryptjs": "^3.0.2",
-    "cloudinary": "^2.6.0",
-    "cookie-parser": "^1.4.7",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.18.3",
-    "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.2.1",
-    "node-cache": "^5.1.2",
-    "nodemailer": "^6.10.0",
-    "react-dom": "^18.2.0",
-    "react-router-dom": "^6.22.3",
-    "uuid": "^11.1.0"
+    "@aws-sdk/client-ses": "3.777.0",
+    "axios": "1.8.4",
+    "bcryptjs": "3.0.2",
+    "cloudinary": "2.6.0",
+    "cookie-parser": "1.4.7",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.18.3",
+    "express-validator": "7.2.1",
+    "jsonwebtoken": "9.0.2",
+    "mongoose": "8.2.1",
+    "node-cache": "5.1.2",
+    "nodemailer": "6.10.0",
+    "uuid": "11.1.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.0"
+    "nodemon": "3.1.0"
   }
 }

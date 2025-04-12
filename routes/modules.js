@@ -381,26 +381,30 @@ router.delete('/:novelId/modules/:moduleId/chapters/:chapterId', auth, admin, as
   }
 });
 
-// Update the reorder chapters route to maintain chapter order
+// Reorder chapters within a module
 router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, admin, async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
     const { direction } = req.body;
-    const { moduleId, chapterId, novelId } = req.params;
+    const { novelId, moduleId, chapterId } = req.params;
+    const skipUpdateTimestamp = req.query.skipUpdateTimestamp === 'true';
 
     // Get all chapters for this module
     const chapters = await Chapter.find({ moduleId }).sort('order');
     
-    // Find the chapter to move
-    const currentIndex = chapters.findIndex(ch => ch._id.toString() === chapterId);
+    // Find the chapter to move and its index
+    const currentIndex = chapters.findIndex(c => c._id.toString() === chapterId);
+    
     if (currentIndex === -1) {
       throw new Error('Chapter not found');
     }
 
     // Calculate target index
     const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    
+    // Check if move is possible
     if (targetIndex < 0 || targetIndex >= chapters.length) {
       throw new Error('Cannot move chapter further in that direction');
     }
@@ -408,54 +412,55 @@ router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, admi
     // Get current and target chapters
     const chapterToMove = chapters[currentIndex];
     const otherChapter = chapters[targetIndex];
-    
+
     // Store original order values
     const originalOrder = chapterToMove.order;
     const targetOrder = otherChapter.order;
     
-    // STEP 1: First set the moving chapter to a temporary negative order to avoid conflicts
-    // This value won't conflict with any existing orders (which are 0 or positive)
+    // STEP 1: First set the moving chapter to a temporary negative order
     await Chapter.findByIdAndUpdate(
       chapterToMove._id,
       { $set: { order: -9999 } },
       { session }
     );
     
-    // STEP 2: Update the other chapter that's being swapped with
+    // STEP 2: Update the target chapter
     await Chapter.findByIdAndUpdate(
       otherChapter._id,
       { $set: { order: originalOrder } },
       { session }
     );
     
-    // STEP 3: Finally, set the moving chapter to its final position
+    // STEP 3: Finally, set the moving chapter to its target position
     await Chapter.findByIdAndUpdate(
       chapterToMove._id,
       { $set: { order: targetOrder } },
       { session }
     );
 
-    // Update the module's chapters array to match the new order
-    // Recompute the new order of chapters after the swap
-    const updatedChapters = [...chapters];
-    [updatedChapters[currentIndex], updatedChapters[targetIndex]] = [updatedChapters[targetIndex], updatedChapters[currentIndex]];
-    
+    // Update module's chapters array to reflect new order
     await Module.findByIdAndUpdate(
       moduleId,
       { 
         $set: { 
-          chapters: updatedChapters.map(ch => ch._id)
+          chapters: chapters.map(c => 
+            c._id.toString() === chapterToMove._id.toString() ? chapterToMove._id :
+            c._id.toString() === otherChapter._id.toString() ? otherChapter._id :
+            c._id
+          )
         }
       },
       { session }
     );
 
-    // Update novel's timestamp
-    await Novel.findByIdAndUpdate(
-      novelId,
-      { updatedAt: new Date() },
-      { session }
-    );
+    // Only update novel's timestamp if not skipping
+    if (!skipUpdateTimestamp) {
+      await Novel.findByIdAndUpdate(
+        novelId,
+        { updatedAt: new Date() },
+        { session }
+      );
+    }
 
     // Commit the transaction
     await session.commitTransaction();
@@ -464,18 +469,16 @@ router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, admi
     clearNovelCaches();
 
     // Get updated chapters list
-    const updatedChaptersList = await Chapter.find({ moduleId })
-      .sort('order')
-      .lean();
-
+    const updatedChapters = await Chapter.find({ moduleId }).sort('order');
+    
     res.json({
       message: 'Chapters reordered successfully',
-      chapters: updatedChaptersList
+      chapters: updatedChapters
     });
   } catch (err) {
     await session.abortTransaction();
-    console.error('Error during chapter reorder:', err);
-    res.status(500).json({ message: err.message });
+    console.error('Backend - Error during chapter reorder:', err);
+    res.status(400).json({ message: err.message });
   } finally {
     session.endSession();
   }

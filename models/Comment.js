@@ -58,21 +58,26 @@ const commentSchema = new mongoose.Schema({
   contentType: {
     type: String,
     required: true,
-    enum: ['novels', 'chapters']
+    enum: ['novels', 'chapters', 'feedback']
   },
   contentId: {
     type: String,
     required: true
   },
+  parentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Comment',
+    default: null
+  },
   likes: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }],
-  dislikes: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  }],
   isDeleted: {
+    type: Boolean,
+    default: false
+  },
+  adminDeleted: {
     type: Boolean,
     default: false
   },
@@ -82,24 +87,17 @@ const commentSchema = new mongoose.Schema({
   }
 });
 
+// Add index for faster querying of replies
+commentSchema.index({ parentId: 1 });
+
 // Virtual property to get the count of likes
 commentSchema.virtual('likeCount').get(function() {
   return this.likes.length;
 });
 
-// Virtual property to get the count of dislikes
-commentSchema.virtual('dislikeCount').get(function() {
-  return this.dislikes.length;
-});
-
 // Helper method to check if a user has liked a comment
 commentSchema.methods.isLikedBy = function(userId) {
   return this.likes.includes(userId);
-};
-
-// Helper method to check if a user has disliked a comment
-commentSchema.methods.isDislikedBy = function(userId) {
-  return this.dislikes.includes(userId);
 };
 
 const Comment = mongoose.model('Comment', commentSchema);
