@@ -303,4 +303,72 @@ router.post('/bookmark', auth, async (req, res) => {
   }
 });
 
+/**
+ * Get all bookmarked novels for the user
+ * @route GET /api/usernovelinteractions/bookmarks
+ */
+router.get('/bookmarks', auth, async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    // Find all bookmarked interactions for this user
+    const bookmarkedInteractions = await UserNovelInteraction.find({ 
+      userId: userId,
+      bookmarked: true 
+    });
+    
+    if (bookmarkedInteractions.length === 0) {
+      return res.json([]);
+    }
+
+    // Extract novel IDs
+    const novelIds = bookmarkedInteractions.map(interaction => interaction.novelId);
+    
+    // Fetch novel details with more information
+    const novels = await Novel.find(
+      { _id: { $in: novelIds } },
+      { 
+        title: 1, 
+        illustration: 1, 
+        status: 1, 
+        updatedAt: 1,
+        createdAt: 1
+      }
+    );
+    
+    // Get chapter counts for each novel
+    const novelsWithChapterCounts = await Promise.all(
+      novels.map(async (novel) => {
+        const novelObj = novel.toObject();
+        
+        // Count all chapters for this novel
+        const chapterCount = await mongoose.model('Chapter').countDocuments({ 
+          novelId: novel._id 
+        });
+        
+        // Get the latest chapter if available
+        const latestChapter = await mongoose.model('Chapter')
+          .findOne({ novelId: novel._id })
+          .sort({ order: -1 })
+          .select('title order')
+          .lean();
+
+        return {
+          ...novelObj,
+          totalChapters: chapterCount,
+          latestChapter: latestChapter ? {
+            title: latestChapter.title,
+            number: latestChapter.order
+          } : null
+        };
+      })
+    );
+    
+    res.json(novelsWithChapterCounts);
+  } catch (err) {
+    console.error("Error fetching bookmarks:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 export default router; 
