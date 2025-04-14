@@ -4,8 +4,9 @@ import { uploadImage } from "../utils/imageUpload.js";
 import { auth } from "../middleware/auth.js";
 import Chapter from "../models/Chapter.js";
 import Module from "../models/Module.js";
-import { cache, clearNovelCaches, sseClients, notifyAllClients, shouldBypassCache } from '../utils/cacheUtils.js';
+import { cache, clearNovelCaches, notifyAllClients, shouldBypassCache } from '../utils/cacheUtils.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
+import { addClient, removeClient } from '../services/sseService.js';
 
 const router = express.Router();
 
@@ -22,14 +23,15 @@ router.get('/sse', (req, res) => {
   // Send initial connection message
   res.write(`data: ${JSON.stringify({ message: 'Connected to novel updates' })}\n\n`);
 
+  // Create client object with response
+  const client = { res };
+
   // Add client to the set
-  sseClients.add(res);
-  console.log(`New SSE client connected. Total connected: ${sseClients.size}`);
+  addClient(client);
 
   // Handle client disconnect
   req.on('close', () => {
-    sseClients.delete(res);
-    console.log(`SSE client disconnected. Total connected: ${sseClients.size}`);
+    removeClient(client);
   });
 });
 

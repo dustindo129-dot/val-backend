@@ -1,6 +1,7 @@
 import express from 'express';
 import { auth, checkBan } from '../middleware/auth.js';
 import Comment from '../models/Comment.js';
+import { broadcastEvent } from '../services/sseService.js';
 
 const router = express.Router();
 
@@ -94,6 +95,151 @@ router.get('/', async (req, res) => {
 });
 
 /**
+ * Get recent comments from across the website
+ * Fetches the latest comments regardless of content type
+ * @route GET /api/comments/recent
+ */
+router.get('/recent', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+
+    // Get recent comments, excluding replies and deleted comments
+    const recentComments = await Comment.aggregate([
+      {
+        $match: {
+          isDeleted: { $ne: true },
+          adminDeleted: { $ne: true },
+          parentId: null // Only root comments, not replies
+        }
+      },
+      {
+        $sort: { createdAt: -1 } // Newest first
+      },
+      {
+        $limit: limit
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user',
+          foreignField: '_id',
+          pipeline: [
+            { $project: { username: 1, avatar: 1 } }
+          ],
+          as: 'userInfo'
+        }
+      },
+      {
+        $unwind: '$userInfo'
+      },
+      // Lookup for content titles
+      {
+        $lookup: {
+          from: 'novels',
+          let: { contentId: { $toString: '$contentId' }, contentType: '$contentType' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: [{ $toString: '$_id' }, '$$contentId'] },
+                    { $eq: ['$$contentType', 'novels'] }
+                  ]
+                }
+              }
+            },
+            { $project: { title: 1 } }
+          ],
+          as: 'novelInfo'
+        }
+      },
+      {
+        $lookup: {
+          from: 'chapters',
+          let: { 
+            contentIdParts: { $split: ['$contentId', '-'] },
+            contentType: '$contentType'
+          },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$$contentType', 'chapters'] },
+                    { $eq: [{ $toString: '$_id' }, { $arrayElemAt: ['$$contentIdParts', 1] }] }
+                  ]
+                }
+              }
+            },
+            { 
+              $lookup: {
+                from: 'novels',
+                let: { novelId: '$novel' },
+                pipeline: [
+                  { $match: { $expr: { $eq: ['$_id', '$$novelId'] } } },
+                  { $project: { title: 1 } }
+                ],
+                as: 'novelTitle'
+              }
+            },
+            { $unwind: { path: '$novelTitle', preserveNullAndEmptyArrays: true } },
+            { $project: { 
+                novelTitle: '$novelTitle.title', 
+                chapterTitle: '$title' 
+              } 
+            }
+          ],
+          as: 'chapterInfo'
+        }
+      },
+      {
+        $addFields: {
+          contentTitle: {
+            $cond: [
+              { $eq: ['$contentType', 'novels'] },
+              { $arrayElemAt: ['$novelInfo.title', 0] },
+              { $cond: [
+                { $eq: ['$contentType', 'chapters'] },
+                { $arrayElemAt: ['$chapterInfo.novelTitle', 0] },
+                'Feedback'
+              ]}
+            ]
+          },
+          chapterTitle: {
+            $cond: [
+              { $eq: ['$contentType', 'chapters'] },
+              { $arrayElemAt: ['$chapterInfo.chapterTitle', 0] },
+              null
+            ]
+          }
+        }
+      },
+      {
+        $project: {
+          _id: 1,
+          text: 1,
+          contentType: 1,
+          contentId: 1,
+          contentTitle: 1,
+          chapterTitle: 1,
+          createdAt: 1,
+          user: {
+            _id: '$userInfo._id',
+            username: '$userInfo.username',
+            avatar: '$userInfo.avatar'
+          }
+        }
+      }
+    ]);
+
+    res.json(recentComments);
+  } catch (err) {
+    console.error('Error fetching recent comments:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
  * Add a reply to an existing comment
  * @route POST /api/comments/:commentId/replies
  */
@@ -127,6 +273,12 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     
     // Populate user info
     await reply.populate('user', 'username avatar');
+
+    // Notify clients about the new comment via SSE
+    broadcastEvent('new_comment', {
+      commentId: reply._id,
+      username: req.user.username
+    });
 
     res.status(201).json(reply);
   } catch (err) {
@@ -205,6 +357,12 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
 
     await comment.save();
     await comment.populate('user', 'username avatar');
+
+    // Notify clients about the new comment via SSE
+    broadcastEvent('new_comment', {
+      commentId: comment._id,
+      username: req.user.username
+    });
 
     res.status(201).json(comment);
   } catch (err) {

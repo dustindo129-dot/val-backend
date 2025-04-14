@@ -1,76 +1,67 @@
+/**
+ * Cache and SSE Utilities
+ * 
+ * Provides functions for cache management and SSE client notifications
+ */
+
 import NodeCache from 'node-cache';
 
-// Initialize cache with 5 minute TTL
-// This should match the cache in novels.js
-export const cache = new NodeCache({ stdTTL: 300 }); // 5 minutes
+// Initialize cache with 10-minute TTL by default
+export const cache = new NodeCache({ stdTTL: 600 });
 
-// Flag to completely disable homepage caching
-export const DISABLE_HOMEPAGE_CACHE = true;
-
-// Keep track of connected SSE clients
+// Set of active SSE clients
 export const sseClients = new Set();
 
 /**
- * Helper function to check if caching should be bypassed
- * @param {string} path - The route path
- * @returns {boolean} - Whether to bypass cache
+ * Clear all novel-related caches
  */
-export const shouldBypassCache = (path, query = {}) => {
-  // Critical paths that should never be cached
-  const criticalPaths = ['/', '/hot'];
-  
-  // Always bypass for homepage and hot novels
-  if (DISABLE_HOMEPAGE_CACHE && criticalPaths.some(p => path.endsWith(p))) {
-    return true;
-  }
-  
-  // Bypass if cache busting parameters present
-  if (query && (query._cb || query.skipCache || query.refresh)) {
-    return true;
-  }
-  
-  return false;
+export const clearNovelCaches = () => {
+  // Clear hot novels cache
+  cache.del('hot_novels');
+  // Clear novels list cache (all pages)
+  const keys = cache.keys();
+  keys.forEach(key => {
+    if (key.startsWith('novels_page_') || key.startsWith('novel_')) {
+      cache.del(key);
+    }
+  });
+  console.log('Novel caches cleared');
 };
 
 /**
- * Helper function to send updates to all connected clients
- * @param {string} eventType - The type of event (update, new_novel, new_chapter)
- * @param {object} data - Data to send with the event
+ * Send a notification to all connected SSE clients
+ * @param {string} eventName - The name of the event
+ * @param {object} data - The data to send
  */
-export const notifyAllClients = (eventType = 'update', data = {}) => {
-  console.log(`Notifying ${sseClients.size} clients of ${eventType}`);
+export const notifyAllClients = (eventName, data) => {
+  const eventString = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
+  
   sseClients.forEach(client => {
     try {
-      client.write(`event: ${eventType}\n`);
-      client.write(`data: ${JSON.stringify(data)}\n\n`);
+      client.write(eventString);
     } catch (error) {
-      console.error('Error notifying client, removing from set:', error);
+      console.error(`Error sending SSE event to client:`, error);
+      // Remove problematic client
       sseClients.delete(client);
     }
   });
+
+  console.log(`Sent '${eventName}' event to ${sseClients.size} clients`);
 };
 
 /**
- * Helper function to clear all novel-related caches
- * This ensures that after a novel, chapter, or module is updated,
- * users will get fresh data on their next request
+ * Check if the request should bypass cache
+ * @param {string} path - Request path
+ * @param {object} query - Query parameters
+ * @returns {boolean} - Whether to bypass cache
  */
-export const clearNovelCaches = () => {
-  console.log('Clearing novel caches...');
-  // Get all cache keys
-  const keys = cache.keys();
-  
-  // Clear any keys related to novels
-  let clearedCount = 0;
-  keys.forEach(key => {
-    if (key.includes('novels_') || key === 'hot_novels') {
-      cache.del(key);
-      clearedCount++;
-    }
-  });
-  
-  console.log(`Cleared ${clearedCount} cache entries`);
-  
-  // Notify all connected clients about the update
-  notifyAllClients('update', { timestamp: new Date().toISOString() });
+export const shouldBypassCache = (path, query) => {
+  // Bypass cache if explicitly requested via query parameter
+  if (query && (query._cb || query.forceRefresh || query.bypass)) {
+    return true;
+  }
+
+  // Bypass cache for critical paths
+  const criticalPaths = ['/hot', '/api/novels/latest'];
+  return criticalPaths.some(criticalPath => path.includes(criticalPath));
 }; 
