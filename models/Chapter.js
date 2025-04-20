@@ -69,10 +69,21 @@ chapterSchema.index({ novelId: 1 });
 // Index for moduleId and order, but not unique across all modules
 chapterSchema.index({ moduleId: 1, order: 1 });
 
-// Simplified method to increment views
+// Atomic increment operation for views to prevent race conditions
 chapterSchema.methods.incrementViews = async function() {
-  this.views++;
-  return this.save();
+  // Use findOneAndUpdate with $inc for atomic operation
+  const updatedChapter = await mongoose.model('Chapter').findOneAndUpdate(
+    { _id: this._id },
+    { $inc: { views: 1 } },
+    { new: true } // Return the updated document
+  );
+  
+  // Update this instance with the new view count
+  if (updatedChapter) {
+    this.views = updatedChapter.views;
+  }
+  
+  return updatedChapter;
 };
 
 const Chapter = mongoose.model('Chapter', chapterSchema);

@@ -374,6 +374,10 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
 router.post('/view/:chapterId', async (req, res) => {
   try {
     const chapterId = req.params.chapterId;
+    
+    // Get user IP or ID for tracking (if authenticated)
+    const userId = req.user ? req.user._id : req.ip;
+    const viewerIdentifier = req.user ? `user_${userId}` : `ip_${userId}`;
 
     // Check if chapter exists
     const chapter = await Chapter.findById(chapterId);
@@ -381,27 +385,34 @@ router.post('/view/:chapterId', async (req, res) => {
       return res.status(404).json({ message: "Chapter not found" });
     }
 
-    // Check if this chapter view should be counted based on 8-hour window
-    const viewKey = `chapter_${chapterId}_last_viewed`;
+    // Check if this chapter view should be counted based on time window
+    // Use both cookie and server timestamp for additional verification
+    const viewKey = `chapter_${chapterId}_${viewerIdentifier}_last_viewed`;
     const lastViewed = req.cookies[viewKey];
     const now = Date.now();
-    const eightHours = 8 * 60 * 60 * 1000; // 8 hours in milliseconds
-    const shouldCountView = !lastViewed || (now - parseInt(lastViewed, 10)) > eightHours;
+    const fourHours = 4 * 60 * 60 * 1000; // 4 hours in milliseconds (matching client side)
+    const shouldCountView = !lastViewed || (now - parseInt(lastViewed, 10)) > fourHours;
 
-    // Only increment views if 8 hours have passed since last view
+    // Only increment views if time window has passed since last view
     if (shouldCountView) {
-      // Increment chapter views
-      await chapter.incrementViews();
-      
-      // We're no longer updating novel view counts here
-      // This prevents novel views from incrementing on chapter refreshes
-      
-      // Set a cookie to track this viewing
-      res.cookie(viewKey, now.toString(), { 
-        maxAge: eightHours,
-        httpOnly: true,
-        sameSite: 'strict'
-      });
+      try {
+        // Use the atomic increment operation we defined in the model
+        // This avoids race conditions when multiple users view simultaneously
+        await chapter.incrementViews();
+        
+        // Set a cookie to track this viewing
+        res.cookie(viewKey, now.toString(), { 
+          maxAge: fourHours,
+          httpOnly: true,
+          sameSite: 'strict',
+          // Secure flag should be true in production
+          secure: process.env.NODE_ENV === 'production'
+        });
+      } catch (incrementError) {
+        console.error("Error incrementing view count:", incrementError);
+        // Still return success to client, but log the error
+        // We don't want to block page loading for view count issues
+      }
     }
 
     return res.json({ 
@@ -410,7 +421,12 @@ router.post('/view/:chapterId', async (req, res) => {
     });
   } catch (err) {
     console.error("Error recording view:", err);
-    res.status(500).json({ message: err.message });
+    // Still return some data to prevent client-side errors
+    res.status(200).json({ 
+      views: 0,
+      counted: false,
+      error: "Error recording view"
+    });
   }
 });
 
