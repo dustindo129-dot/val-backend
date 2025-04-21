@@ -6,6 +6,11 @@ import mongoose from 'mongoose';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import compression from 'compression';
+import { renderPage } from 'vite-plugin-ssr/server';
+import { createServer } from 'vite';
+import isBot from './utils/isBot.js';
+import sirv from 'sirv';
 
 // Import route handlers
 import authRoutes from './routes/auth.js';
@@ -29,6 +34,8 @@ const __dirname = path.dirname(__filename);
 // Initialize Express application
 const app = express();
 const port = process.env.PORT || 5000;
+const isProduction = process.env.NODE_ENV === 'production';
+const root = path.join(__dirname, '..');
 
 // Configure body parsers with large limits BEFORE other middleware
 app.use(express.json({
@@ -45,6 +52,9 @@ app.use(express.urlencoded({
   parameterLimit: 100000
 }));
 
+// Add compression for performance
+app.use(compression());
+
 // Add request size logging middleware
 app.use((req, res, next) => {
   if (req.headers['content-length']) {
@@ -59,14 +69,18 @@ app.use((req, res, next) => {
 const corsOptions = {
   origin: process.env.NODE_ENV === 'production' 
     ? process.env.FRONTEND_URL 
-    : ['http://localhost:5173', 'http://127.0.0.1:5173'],
+    : ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173'],
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
-    'Content-Type', 
-    'Authorization', 
+    'Content-Type',
+    'Authorization',
     'X-Requested-With',
-    'Cache-Control',
+    'Accept',
+    'Origin',
+    'Access-Control-Allow-Headers',
+    'Access-Control-Allow-Origin',
+    'Access-Control-Allow-Methods',
     'Pragma'
   ],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
@@ -99,6 +113,29 @@ app.use(cookieParser());  // Parse Cookie header and populate req.cookies
 // This is used for any local image storage (if needed)
 app.use('/images', express.static(path.join(__dirname, 'public', 'images')));
 
+// Set up Vite server in middleware mode for development
+let viteDevServer;
+if (!isProduction) {
+  const initViteServer = async () => {
+    viteDevServer = await createServer({
+      root,
+      server: { 
+        middlewareMode: true,
+        hmr: {
+          port: 24678  // Different port for backend HMR
+        }
+      }
+    });
+    app.use(viteDevServer.middlewares);
+  };
+  
+  // Immediately invoke the function
+  initViteServer().catch(console.error);
+} else {
+  // In production, serve pre-built client files
+  app.use(sirv(`${root}/dist/client`));
+}
+
 // Register API routes
 app.use('/api/auth', authRoutes);      // Authentication endpoints
 app.use('/api/novels', novelRoutes);   // Novel management endpoints
@@ -120,6 +157,52 @@ app.get('/health', (req, res) => {
     res.status(200).json({ status: 'healthy', mongodb: 'connected' });
   } else {
     res.status(503).json({ status: 'unhealthy', mongodb: 'disconnected' });
+  }
+});
+
+// SSR handler for vite-plugin-ssr (handle non-API routes)
+app.use('*', async (req, res, next) => {
+  const url = req.originalUrl;
+  
+  // Skip API routes - they're handled separately
+  if (url.startsWith('/api/')) {
+    return next();
+  }
+  
+  // Only use SSR for bots, regular users get CSR
+  const userAgent = req.headers['user-agent'] || '';
+  const shouldPrerender = isBot(userAgent);
+  
+  // For development, always use CSR unless testing bot mode with query param
+  const forceSsr = req.query.ssr === 'true';
+  const forceClient = !isProduction && !forceSsr;
+  
+  try {
+    const pageContextInit = {
+      urlOriginal: url,
+      userAgent,
+      isBot: shouldPrerender,
+      forceClient
+    };
+    
+    const pageContext = await renderPage(pageContextInit);
+    
+    if (pageContext.httpResponse === null) {
+      return next();
+    }
+    
+    const { statusCode, contentType, earlyHints } = pageContext.httpResponse;
+    
+    if (res.writeEarlyHints) {
+      res.writeEarlyHints({ link: earlyHints.map((e) => e.earlyHintLink) });
+    }
+    
+    res.status(statusCode).type(contentType);
+    pageContext.httpResponse.pipe(res);
+  } catch (error) {
+    viteDevServer?.ssrFixStacktrace(error);
+    console.error(error.stack);
+    res.status(500).send('Server Error');
   }
 });
 
