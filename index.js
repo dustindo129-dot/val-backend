@@ -145,7 +145,21 @@ if (!isProduction) {
     const exists = fs.existsSync(p);
     console.log(`- ${p} (${exists ? 'exists' : 'not found'})`);
     if (exists) {
-      app.use(sirv(p));
+      // Use sirv with better settings for production
+      app.use(sirv(p, {
+        dev: false,
+        etag: true,
+        maxAge: 31536000, // 1 year in seconds
+        immutable: true,
+        setHeaders: (res, path) => {
+          // Set proper Cache-Control headers
+          if (path.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache');
+          } else if (path.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/)) {
+            res.setHeader('Cache-Control', 'public,max-age=31536000,immutable');
+          }
+        }
+      }));
     }
   });
   
@@ -179,6 +193,87 @@ app.get('/health', (req, res) => {
     res.status(503).json({ status: 'unhealthy', mongodb: 'disconnected' });
   }
 });
+
+// Special handler for bundled assets in production
+// This must come BEFORE the SSR handler to catch static asset requests
+if (isProduction) {
+  app.get('*', (req, res, next) => {
+    const url = req.originalUrl;
+    
+    // Skip API routes and non-static asset requests
+    if (url.startsWith('/api/') || !(
+      url.endsWith('.js') || 
+      url.endsWith('.css') || 
+      url.endsWith('.ico') || 
+      url.endsWith('.png') || 
+      url.endsWith('.jpg') || 
+      url.endsWith('.svg') ||
+      url.endsWith('.json') ||
+      url.endsWith('.woff') ||
+      url.endsWith('.woff2') ||
+      url.endsWith('.ttf') ||
+      url.includes('assets/')
+    )) {
+      return next();
+    }
+    
+    // For static assets, try all possible paths
+    const possiblePaths = [
+      path.resolve(__dirname, '../dist/client' + url),
+      path.resolve(__dirname, '../../dist/client' + url),
+      '/app/dist/client' + url
+    ];
+    
+    for (const assetPath of possiblePaths) {
+      if (fs.existsSync(assetPath)) {
+        return res.sendFile(assetPath);
+      }
+    }
+    
+    // If we get here, the asset wasn't found
+    console.warn(`Static asset not found: ${url}`);
+    next();
+  });
+  
+  // SPA fallback route - handle client-side routing by serving index.html
+  // This comes AFTER static asset handler but BEFORE SSR handler
+  app.get('*', (req, res, next) => {
+    const url = req.originalUrl;
+    
+    // Skip API routes and static assets
+    if (url.startsWith('/api/') || 
+        url.endsWith('.js') || 
+        url.endsWith('.css') || 
+        url.endsWith('.ico') || 
+        url.endsWith('.png') || 
+        url.endsWith('.jpg') || 
+        url.endsWith('.svg')) {
+      return next();
+    }
+    
+    // Only handle non-bot requests here (bots will go to SSR)
+    const userAgent = req.headers['user-agent'] || '';
+    if (isBot(userAgent)) {
+      return next();
+    }
+    
+    // For SPA routes, find and serve index.html
+    const possibleIndexPaths = [
+      path.resolve(__dirname, '../dist/client/index.html'),
+      path.resolve(__dirname, '../../dist/client/index.html'),
+      '/app/dist/client/index.html'
+    ];
+    
+    for (const indexPath of possibleIndexPaths) {
+      if (fs.existsSync(indexPath)) {
+        return res.sendFile(indexPath);
+      }
+    }
+    
+    // If no index.html was found, continue to SSR as fallback
+    next();
+  });
+}
 
 // SSR handler for vite-plugin-ssr (handle non-API routes)
 app.use('*', async (req, res, next) => {
