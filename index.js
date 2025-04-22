@@ -11,6 +11,7 @@ import { renderPage } from 'vite-plugin-ssr/server';
 import { createServer } from 'vite';
 import isBot from './utils/isBot.js';
 import sirv from 'sirv';
+import fs from 'fs';
 
 // Import route handlers
 import authRoutes from './routes/auth.js';
@@ -132,8 +133,27 @@ if (!isProduction) {
   // Immediately invoke the function
   initViteServer().catch(console.error);
 } else {
-  // In production, serve pre-built client files
-  app.use(sirv(`${root}/dist/client`));
+  // In production, try to serve static files from multiple possible paths
+  const possiblePaths = [
+    path.resolve(__dirname, '../dist/client'),  // When server is in its own directory
+    path.resolve(__dirname, '../../dist/client'), // Fallback path
+    '/app/dist/client'  // Docker path
+  ];
+  
+  console.log('Possible static file paths:');
+  possiblePaths.forEach(p => {
+    const exists = fs.existsSync(p);
+    console.log(`- ${p} (${exists ? 'exists' : 'not found'})`);
+    if (exists) {
+      app.use(sirv(p));
+    }
+  });
+  
+  // If none of the paths exist, log a warning
+  const anyPathExists = possiblePaths.some(p => fs.existsSync(p));
+  if (!anyPathExists) {
+    console.warn('WARNING: No static file paths found. Frontend may not be served correctly.');
+  }
 }
 
 // Register API routes
