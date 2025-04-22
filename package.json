@@ -1,13 +1,16 @@
 {
   "name": "val-server",
   "version": "1.0.0",
+  "type": "module",
   "main": "index.js",
   "engines": {
     "node": "18.x || 20.x",
     "npm": "9.x || 10.x"
   },
   "scripts": {
+    "prestart": "node fix-mongoose.js",
     "start": "node -r dotenv/config index.js",
+    "predev": "node fix-mongoose.js",
     "dev": "nodemon -r dotenv/config index.js"
   },
   "dependencies": {
