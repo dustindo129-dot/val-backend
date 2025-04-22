@@ -8,6 +8,7 @@ import express from "express";
 import cors from "cors";
 import donationRoutes from './routes/donation.js';
 import reportRoutes from './routes/reports.js';
+import uploadRoutes from './routes/uploadRoutes.js';
 
 // Initialize Express application
 const app = express();
@@ -38,3 +39,4 @@ app.use("/api/users", userRoutes); // User profile and management routes
 app.use("/api", moduleRoutes); // Module management routes (mounted at root /api)
 app.use('/api/donation', donationRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/upload', uploadRoutes); // File upload routes for bunny.net
