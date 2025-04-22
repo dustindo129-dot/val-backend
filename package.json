@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "build": "npm install --production"
   },
   "dependencies": {
     "@aws-sdk/client-ses": "3.777.0",
@@ -24,8 +25,8 @@
     "express": "4.18.3",
     "express-validator": "7.2.1",
     "jsonwebtoken": "9.0.2",
-    "mongodb": "6.16.0",
-    "mongoose": "8.13.2",
+    "mongodb": "5.9.2",
+    "mongoose": "7.5.3",
     "node-cache": "5.1.2",
     "nodemailer": "6.10.0",
     "path-to-regexp": "6.3.0",

@@ -2,6 +2,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import mongoose from 'mongoose';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -10,8 +11,6 @@ import { renderPage } from 'vite-plugin-ssr/server';
 import { createServer } from 'vite';
 import isBot from './utils/isBot.js';
 import sirv from 'sirv';
-// Import our mongoose bridge using ES modules
-import { mongoose, connection } from './db.js';
 
 // Import route handlers
 import authRoutes from './routes/auth.js';
@@ -152,7 +151,7 @@ app.use('/api/reports', reportRoutes); // Report endpoints
 // Health check endpoint
 app.get('/health', (req, res) => {
   // Check MongoDB connection
-  const isMongoConnected = connection.readyState === 1;
+  const isMongoConnected = mongoose.connection.readyState === 1;
   
   if (isMongoConnected) {
     res.status(200).json({ status: 'healthy', mongodb: 'connected' });
@@ -272,6 +271,25 @@ app.use((err, req, res, next) => {
     error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
+
+// Connect to MongoDB database
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => {
+    console.log('Connected to MongoDB');
+  })
+  .catch((error) => {
+    console.error('MongoDB connection error:', error);
+    process.exit(1);  // Exit if database connection fails
+  });
+
+// Enable MongoDB debug mode in development
+// This will log all database operations to the console
+if (process.env.NODE_ENV === 'development') {
+  mongoose.set('debug', { 
+    color: true,  // Enable colored output
+    shell: true   // Use shell syntax for queries
+  });
+}
 
 // Start the server
 app.listen(port, () => {

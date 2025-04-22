@@ -1,4 +1,5 @@
-FROM node:20-slim
+# Use a specific version of Node.js
+FROM node:20.18.3-slim
 
 # Create app directory
 WORKDIR /app
@@ -9,7 +10,7 @@ COPY package*.json ./
 
 # Install dependencies with clean npm install
 RUN npm cache clean --force && \
-    npm install
+    npm install --production
 
 # Bundle app source
 COPY . .
