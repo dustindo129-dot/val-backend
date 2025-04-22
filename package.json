@@ -30,7 +30,8 @@
     "nodemailer": "6.10.0",
     "path-to-regexp": "6.3.0",
     "sirv": "3.0.1",
-    "uuid": "11.1.0"
+    "uuid": "11.1.0",
+    "vite-plugin-ssr": "0.4.142"
   },
   "devDependencies": {
     "nodemon": "3.1.0"
