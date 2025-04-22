@@ -12,6 +12,9 @@ import { createServer } from 'vite';
 import isBot from './utils/isBot.js';
 import sirv from 'sirv';
 
+// Import database connection
+import { connectDB } from './db.cjs';
+
 // Import route handlers
 import authRoutes from './routes/auth.js';
 import novelRoutes from './routes/novels.js';
@@ -36,6 +39,9 @@ const app = express();
 const port = process.env.PORT || 5000;
 const isProduction = process.env.NODE_ENV === 'production';
 const root = path.join(__dirname, '..');
+
+// Connect to MongoDB
+connectDB();
 
 // Configure body parsers with large limits BEFORE other middleware
 app.use(express.json({
