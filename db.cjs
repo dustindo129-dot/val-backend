@@ -1,22 +1,38 @@
+'use strict';
+
 const mongoose = require('mongoose');
-require('dotenv').config();
+const dotenv = require('dotenv');
 
-// Database connection function
-const connectDB = async () => {
-  try {
-    await mongoose.connect(process.env.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
+// Load environment variables
+dotenv.config();
+
+// MongoDB connection function
+function connectToDatabase() {
+  mongoose.connect(process.env.MONGODB_URI)
+    .then(() => {
+      console.log('Connected to MongoDB');
+    })
+    .catch((error) => {
+      console.error('MongoDB connection error:', error);
+      process.exit(1);  // Exit if database connection fails
     });
-    console.log('MongoDB connected successfully');
-  } catch (error) {
-    console.error('MongoDB connection error:', error);
-    process.exit(1);
-  }
-};
 
-// Export the connection and mongoose instance
+  // Enable MongoDB debug mode in development
+  if (process.env.NODE_ENV === 'development') {
+    mongoose.set('debug', { 
+      color: true,  // Enable colored output
+      shell: true   // Use shell syntax for queries
+    });
+  }
+
+  return mongoose;
+}
+
+// Initialize connection
+const mongooseInstance = connectToDatabase();
+
+// Export the mongoose instance and connection
 module.exports = {
-  mongoose,
-  connectDB
+  mongoose: mongooseInstance,
+  connection: mongooseInstance.connection
 }; 
