@@ -20,17 +20,54 @@ router.get('/sse', (req, res) => {
     'Access-Control-Allow-Origin': '*'
   });
 
-  // Send initial connection message
-  res.write(`data: ${JSON.stringify({ message: 'Connected to novel updates' })}\n\n`);
+  // Store client IP, user agent and tab ID to help identify unique clients
+  const clientInfo = {
+    ip: req.ip || req.socket.remoteAddress,
+    userAgent: req.headers['user-agent'] || 'unknown',
+    tabId: req.query.tabId || `manual_${Date.now()}`,
+    timestamp: Date.now()
+  };
 
-  // Create client object with response
-  const client = { res };
+  // Send initial connection message with client ID
+  const client = { res, info: clientInfo };
+  const clientId = addClient(client);
+  
+  res.write(`data: ${JSON.stringify({ 
+    message: 'Connected to novel updates',
+    clientId: clientId,
+    tabId: clientInfo.tabId,
+    timestamp: Date.now() 
+  })}\n\n`);
 
-  // Add client to the set
-  addClient(client);
+  // Set a timeout to close idle connections
+  const timeout = setTimeout(() => {
+    // Try to close connection after 5 minutes of inactivity
+    try {
+      res.end();
+      removeClient(client);
+    } catch (error) {
+      // Connection might already be closed
+      removeClient(client);
+    }
+  }, 5 * 60 * 1000); // 5 minutes
+
+  // Send a ping every 20 seconds to keep the connection alive
+  const pingInterval = setInterval(() => {
+    try {
+      // Include client ID and tab ID in the ping to help with debugging
+      res.write(`: ping ${clientId}:${clientInfo.tabId}\n\n`);
+    } catch (error) {
+      // Connection is already closed
+      clearInterval(pingInterval);
+      clearTimeout(timeout);
+      removeClient(client);
+    }
+  }, 20000);
 
   // Handle client disconnect
   req.on('close', () => {
+    clearInterval(pingInterval);
+    clearTimeout(timeout);
     removeClient(client);
   });
 });

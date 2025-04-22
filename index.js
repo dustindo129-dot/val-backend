@@ -12,6 +12,7 @@ import { createServer } from 'vite';
 import isBot from './utils/isBot.js';
 import sirv from 'sirv';
 import fs from 'fs';
+import { cleanupStaleConnections, listConnectedClients } from './services/sseService.js';
 
 // Import route handlers
 import authRoutes from './routes/auth.js';
@@ -240,22 +241,18 @@ if (isProduction) {
   app.get('*', (req, res, next) => {
     const url = req.originalUrl;
     
-    // Skip API routes and static assets
-    if (url.startsWith('/api/') || 
-        url.endsWith('.js') || 
-        url.endsWith('.css') || 
-        url.endsWith('.ico') || 
-        url.endsWith('.png') || 
-        url.endsWith('.jpg') || 
-        url.endsWith('.svg')) {
+    // Skip API routes
+    if (url.startsWith('/api/')) {
       return next();
     }
     
-    // Only handle non-bot requests here (bots will go to SSR)
+    // Only use SSR for bots, regular users get CSR with index.html
     const userAgent = req.headers['user-agent'] || '';
     if (isBot(userAgent)) {
-      return next();
+      return next(); // Let bots go to SSR
     }
+    
+    console.log(`Serving SPA for non-bot direct navigation: ${url}`);
     
     // For SPA routes, find and serve index.html
     const possibleIndexPaths = [
@@ -411,4 +408,16 @@ app.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log('Frontend URL:', process.env.FRONTEND_URL);
   console.log('Environment:', process.env.NODE_ENV);
+  
+  // Set up periodic cleanup of stale SSE connections
+  setInterval(() => {
+    cleanupStaleConnections();
+  }, 30000); // Check every 30 seconds
+  
+  // Periodically list all connected clients (for debugging)
+  setInterval(() => {
+    if (process.env.NODE_ENV !== 'production') {
+      listConnectedClients();
+    }
+  }, 60000); // List every minute in development
 }); 
