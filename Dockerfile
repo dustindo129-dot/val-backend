@@ -7,10 +7,14 @@ WORKDIR /app
 # Install app dependencies
 # A wildcard is used to ensure both package.json AND package-lock.json are copied
 COPY package*.json ./
+COPY deploy.sh ./
+COPY fix-mongoose.js ./
 
-# Install dependencies with clean npm install
-RUN npm cache clean --force && \
-    npm install --production
+# Make deploy script executable
+RUN chmod +x deploy.sh
+
+# Install dependencies and apply mongoose patch
+RUN ./deploy.sh
 
 # Bundle app source
 COPY . .
@@ -18,6 +22,7 @@ COPY . .
 # Set environment variables
 ENV NODE_ENV=production
 ENV PORT=8080
+ENV NODE_OPTIONS="--experimental-specifier-resolution=node"
 
 # Create a health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
