@@ -40,6 +40,10 @@ const chapterSchema = new mongoose.Schema({
     enum: ['published', 'draft', 'protected', 'paid'],
     default: 'published'
   },
+  chapterBalance: {
+    type: Number,
+    default: 0
+  },
   views: {
     type: Number,
     default: 0

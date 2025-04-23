@@ -171,7 +171,8 @@ router.post('/', [auth, admin], async (req, res) => {
       editor,
       proofreader,
       mode,
-      footnotes
+      footnotes,
+      chapterBalance
     } = req.body;
     
     // Use aggregation to get the module and determine order in a single query
@@ -221,7 +222,8 @@ router.post('/', [auth, admin], async (req, res) => {
       proofreader,
       mode: mode || 'published',
       views: 0,
-      footnotes: footnotes || []
+      footnotes: footnotes || [],
+      chapterBalance: mode === 'paid' ? (chapterBalance || 0) : 0
     });
 
     // Save the chapter
@@ -277,7 +279,8 @@ router.put('/:id', [auth, admin], async (req, res) => {
       translator,
       editor,
       proofreader,
-      footnotes
+      footnotes,
+      chapterBalance
     } = req.body;
     const chapterId = req.params.id;
     
@@ -351,6 +354,7 @@ router.put('/:id', [auth, admin], async (req, res) => {
                   proofreader: proofreader,
                   mode: req.body.mode,
                   footnotes: footnotes || [],
+                  chapterBalance: req.body.mode === 'paid' ? (chapterBalance || 0) : 0,
                   updatedAt: new Date()
                 }
               },
@@ -396,10 +400,16 @@ router.put('/:id', [auth, admin], async (req, res) => {
         ...(proofreader && { proofreader }),
         ...(req.body.mode && { mode: req.body.mode }),
         ...(footnotes && { footnotes }),
+        ...(req.body.mode === 'paid' ? { chapterBalance: chapterBalance || 0 } : {}),
         // Only update timestamp if content or title changes, not just mode
         ...(title || content ? { updatedAt: new Date() } : {})
       }
     };
+
+    // Reset chapterBalance to 0 if mode is not paid
+    if (req.body.mode && req.body.mode !== 'paid') {
+      updateData.$set.chapterBalance = 0;
+    }
 
     const updatedChapter = await Chapter.findByIdAndUpdate(
       chapterId,

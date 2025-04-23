@@ -36,7 +36,7 @@ app.use("/api/auth", authRoutes); // Authentication routes (login, register, etc
 app.use("/api/novels", novelRoutes); // Novel management routes
 app.use("/api/comments", commentRoutes); // Comment system routes
 app.use("/api/users", userRoutes); // User profile and management routes
-app.use("/api", moduleRoutes); // Module management routes (mounted at root /api)
+app.use("/api/modules", moduleRoutes); // Module management routes (mounted at /api/modules)
 app.use('/api/donation', donationRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/upload', uploadRoutes); // File upload routes for bunny.net

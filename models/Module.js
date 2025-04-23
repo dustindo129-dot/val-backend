@@ -20,6 +20,15 @@ const moduleSchema = new mongoose.Schema({
   order: {
     type: Number,
     required: true
+  },
+  mode: {
+    type: String,
+    enum: ['published', 'paid'],
+    default: 'published'
+  },
+  moduleBalance: {
+    type: Number,
+    default: 0
   }
 }, {
   timestamps: true

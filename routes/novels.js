@@ -505,7 +505,7 @@ router.get("/:id", async (req, res) => {
         .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings')
         .lean(),
       Module.find({ novelId: req.params.id })
-        .select('title illustration order chapters')
+        .select('title illustration order chapters mode moduleBalance')
         .sort('order')
         .lean()
     ]);

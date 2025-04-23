@@ -183,7 +183,9 @@ router.post('/:novelId/modules', auth, admin, async (req, res) => {
       title: req.body.title,
       illustration: req.body.illustration,
       order: nextOrder,
-      chapters: []
+      chapters: [],
+      mode: req.body.mode || 'published',
+      moduleBalance: req.body.mode === 'paid' ? (req.body.moduleBalance || 0) : 0
     });
 
     // Save the module
@@ -218,15 +220,23 @@ router.post('/:novelId/modules', auth, admin, async (req, res) => {
 // Update a module
 router.put('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
   try {
-    const module = await Module.findById(req.params.moduleId);
-    if (!module) {
+    const updateData = {
+      title: req.body.title,
+      illustration: req.body.illustration,
+      mode: req.body.mode || 'published',
+      moduleBalance: req.body.mode === 'paid' ? (req.body.moduleBalance || 0) : 0,
+      updatedAt: new Date()
+    };
+
+    const updatedModule = await Module.findByIdAndUpdate(
+      req.params.moduleId,
+      { $set: updateData },
+      { new: true }
+    );
+
+    if (!updatedModule) {
       return res.status(404).json({ message: 'Module not found' });
     }
-
-    if (req.body.title) module.title = req.body.title;
-    if (req.body.illustration) module.illustration = req.body.illustration;
-    
-    const updatedModule = await module.save();
     
     // Update the novel's updatedAt timestamp to bring it to the top of latest updates
     await Novel.findByIdAndUpdate(
