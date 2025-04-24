@@ -327,6 +327,65 @@ router.post('/:requestId/decline', auth, async (req, res) => {
 });
 
 /**
+ * Withdraw request (user withdraws their own request)
+ * @route POST /api/requests/:requestId/withdraw
+ */
+router.post('/:requestId/withdraw', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    const { requestId } = req.params;
+    const userId = req.user._id;
+    
+    // Find request
+    const request = await Request.findById(requestId).session(session);
+    if (!request) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Request not found' });
+    }
+    
+    // Verify this is the user's own request
+    if (request.user.toString() !== userId.toString()) {
+      await session.abortTransaction();
+      return res.status(403).json({ message: 'You can only withdraw your own requests' });
+    }
+    
+    // Check if request is already processed
+    if (request.status !== 'pending') {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'This request cannot be withdrawn' });
+    }
+    
+    // Find user to refund deposit
+    const user = await User.findById(userId).session(session);
+    if (!user) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Refund deposit to user
+    user.balance += request.deposit;
+    await user.save({ session });
+    
+    // Delete the request
+    await Request.findByIdAndDelete(requestId).session(session);
+    
+    await session.commitTransaction();
+    res.json({ 
+      message: 'Request withdrawn successfully',
+      refundAmount: request.deposit
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Failed to withdraw request:', error);
+    res.status(500).json({ message: 'Failed to withdraw request' });
+  } finally {
+    session.endSession();
+  }
+});
+
+/**
  * Get user request history 
  * @route GET /api/requests/history
  */
