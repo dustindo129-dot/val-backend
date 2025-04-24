@@ -518,7 +518,7 @@ router.get("/:id", async (req, res) => {
     const chapters = await Chapter.find({ 
       novelId: req.params.id 
     })
-    .select('title moduleId order createdAt updatedAt mode')
+    .select('title moduleId order createdAt updatedAt mode chapterBalance')
     .sort('order')
     .lean();
 

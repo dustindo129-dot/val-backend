@@ -386,6 +386,48 @@ router.post('/:requestId/withdraw', auth, async (req, res) => {
 });
 
 /**
+ * Get all request history (admin and moderator only)
+ * @route GET /api/requests/all
+ */
+router.get('/all', auth, async (req, res) => {
+  try {
+    // Verify user is admin or moderator
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      return res.status(403).json({ message: 'Access denied. Admin or moderator only.' });
+    }
+    
+    // Get query parameters for filtering
+    const { status, type, limit = 100 } = req.query;
+    
+    // Build query
+    const query = {};
+    
+    // Add status filter if specified
+    if (status && ['pending', 'approved', 'declined'].includes(status)) {
+      query.status = status;
+    }
+    
+    // Add type filter if specified
+    if (type && ['new', 'open'].includes(type)) {
+      query.type = type;
+    }
+    
+    // Query all requests matching filters
+    const requests = await Request.find(query)
+      .populate('user', 'username avatar role')
+      .populate('novel', 'title _id')
+      .sort({ createdAt: -1 })
+      .limit(Number(limit))
+      .lean();
+    
+    return res.json(requests);
+  } catch (error) {
+    console.error('Failed to fetch request history:', error);
+    return res.status(500).json({ message: 'Failed to fetch request history' });
+  }
+});
+
+/**
  * Get user request history 
  * @route GET /api/requests/history
  */
