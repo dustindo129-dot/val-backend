@@ -26,6 +26,8 @@ import userNovelInteractionRoutes from './routes/userNovelInteractions.js';
 import donationRoutes from './routes/donation.js';
 import reportRoutes from './routes/reports.js';
 import uploadRoutes from './routes/uploadRoutes.js';
+import requestRoutes from './routes/requests.js';
+import topupRoutes from './routes/topup.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -184,6 +186,8 @@ app.use('/api/usernovelinteractions', userNovelInteractionRoutes); // User novel
 app.use('/api/donation', donationRoutes); // Donation endpoints
 app.use('/api/reports', reportRoutes); // Report endpoints
 app.use('/api/upload', uploadRoutes); // File upload endpoints
+app.use('/api/requests', requestRoutes); // Request system endpoints
+app.use('/api/topup', topupRoutes); // Top-up transaction endpoints
 
 // Health check endpoint
 app.get('/health', (req, res) => {

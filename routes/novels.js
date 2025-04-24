@@ -502,7 +502,7 @@ router.get("/:id", async (req, res) => {
     // Get novel and modules in parallel with proper projection
     const [novel, modules] = await Promise.all([
       Novel.findById(req.params.id)
-        .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings')
+        .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings novelBalance')
         .lean(),
       Module.find({ novelId: req.params.id })
         .select('title illustration order chapters mode moduleBalance')
@@ -770,6 +770,48 @@ router.delete("/:id/chapters/:chapterId", auth, async (req, res) => {
     res.json(novel);
   } catch (err) {
     res.status(400).json({ message: err.message });
+  }
+});
+
+/**
+ * Update a novel's balance without affecting updatedAt timestamp
+ * @route PATCH /api/novels/:id/balance
+ */
+router.patch("/:id/balance", auth, async (req, res) => {
+  try {
+    // Verify user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: "Only admins can update novel balance" });
+    }
+
+    const { novelBalance } = req.body;
+    
+    // Validate balance
+    if (novelBalance === undefined || isNaN(novelBalance) || novelBalance < 0) {
+      return res.status(400).json({ message: "Valid novel balance is required" });
+    }
+
+    // Find the novel and update only the novelBalance
+    // Use { timestamps: false } option to prevent updating the timestamps
+    const novel = await Novel.findByIdAndUpdate(
+      req.params.id,
+      { $set: { novelBalance: Number(novelBalance) } },
+      { new: true, timestamps: false }
+    );
+
+    if (!novel) {
+      return res.status(404).json({ message: "Novel not found" });
+    }
+
+    // Return the updated novel
+    res.json({ 
+      _id: novel._id,
+      title: novel.title,
+      novelBalance: novel.novelBalance 
+    });
+  } catch (err) {
+    console.error("Error updating novel balance:", err);
+    res.status(500).json({ message: err.message });
   }
 });
 

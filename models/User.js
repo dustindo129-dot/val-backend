@@ -32,6 +32,11 @@ const userSchema = new mongoose.Schema({
     enum: ['user', 'admin', 'moderator'],
     default: 'user'
   },
+  balance: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   isBanned: {
     type: Boolean,
     default: false

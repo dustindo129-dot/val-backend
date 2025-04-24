@@ -9,6 +9,8 @@ import cors from "cors";
 import donationRoutes from './routes/donation.js';
 import reportRoutes from './routes/reports.js';
 import uploadRoutes from './routes/uploadRoutes.js';
+import requestRoutes from './routes/requests.js';
+import topupRoutes from './routes/topup.js';
 
 // Initialize Express application
 const app = express();
@@ -40,3 +42,5 @@ app.use("/api/modules", moduleRoutes); // Module management routes (mounted at /
 app.use('/api/donation', donationRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/upload', uploadRoutes); // File upload routes for bunny.net
+app.use('/api/requests', requestRoutes); // Request system routes
+app.use('/api/topup', topupRoutes); // Top-up transaction routes

@@ -505,4 +505,31 @@ router.get('/banned', auth, async (req, res) => {
   }
 });
 
+/**
+ * Search for users
+ * @route GET /api/users/search
+ */
+router.get('/search', auth, async (req, res) => {
+  try {
+    const { query } = req.query;
+    
+    if (!query || query.length < 2) {
+      return res.status(400).json({ message: 'Search query must be at least 2 characters' });
+    }
+    
+    // Search for users by username or email
+    const users = await User.find({
+      $or: [
+        { username: { $regex: query, $options: 'i' } },
+        { email: { $regex: query, $options: 'i' } }
+      ]
+    }).select('username avatar balance');
+    
+    res.json(users);
+  } catch (error) {
+    console.error('User search failed:', error);
+    res.status(500).json({ message: 'Failed to search users' });
+  }
+});
+
 export default router; 

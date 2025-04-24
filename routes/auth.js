@@ -177,14 +177,14 @@ router.post('/login', async (req, res) => {
 
 /**
  * Sign out user by clearing the token cookie
- * @route POST /api/auth/signout
+ * @route POST /api/auth/logout
  */
-router.post('/signout', (req, res) => {
+router.post('/logout', (req, res) => {
   res.cookie('token', '', {
     httpOnly: true,
     expires: new Date(0)
   });
-  res.json({ message: 'Signed out successfully' });
+  res.json({ message: 'Logged out successfully' });
 });
 
 /**
