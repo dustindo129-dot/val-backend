@@ -7,6 +7,8 @@ import Module from "../models/Module.js";
 import { cache, clearNovelCaches, notifyAllClients, shouldBypassCache } from '../utils/cacheUtils.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
 import { addClient, removeClient } from '../services/sseService.js';
+import Request from '../models/Request.js';
+import Contribution from '../models/Contribution.js';
 
 const router = express.Router();
 
@@ -17,7 +19,9 @@ router.get('/sse', (req, res) => {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*'
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
   });
 
   // Store client IP, user agent and tab ID to help identify unique clients
@@ -39,27 +43,12 @@ router.get('/sse', (req, res) => {
     timestamp: Date.now() 
   })}\n\n`);
 
-  // Set a timeout to close idle connections
-  const timeout = setTimeout(() => {
-    // Try to close connection after 5 minutes of inactivity
-    try {
-      res.end();
-      removeClient(client);
-    } catch (error) {
-      // Connection might already be closed
-      removeClient(client);
-    }
-  }, 5 * 60 * 1000); // 5 minutes
-
   // Send a ping every 20 seconds to keep the connection alive
   const pingInterval = setInterval(() => {
     try {
-      // Include client ID and tab ID in the ping to help with debugging
       res.write(`: ping ${clientId}:${clientInfo.tabId}\n\n`);
     } catch (error) {
-      // Connection is already closed
       clearInterval(pingInterval);
-      clearTimeout(timeout);
       removeClient(client);
     }
   }, 20000);
@@ -67,7 +56,6 @@ router.get('/sse', (req, res) => {
   // Handle client disconnect
   req.on('close', () => {
     clearInterval(pingInterval);
-    clearTimeout(timeout);
     removeClient(client);
   });
 });
@@ -178,49 +166,90 @@ router.get("/search", async (req, res) => {
 });
 
 /**
- * Get hot novels (most viewed in last 24 hours)
+ * Get hot novels (most viewed in specific time range)
  * @route GET /api/novels/hot
  */
 router.get("/hot", async (req, res) => {
   try {
+    const timeRange = req.query.timeRange || 'today';
+    
     // Check if we should bypass the cache
     const bypass = shouldBypassCache(req.path, req.query);
     
     // Only check cache if not bypassing
-    const cacheKey = 'hot_novels';
+    const cacheKey = `hot_novels_${timeRange}`;
     const cachedData = bypass ? null : cache.get(cacheKey);
     
     if (cachedData && !bypass) {
       return res.json(cachedData);
     }
 
-    console.log('Fetching fresh hot novels data from database');
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    console.log(`Fetching fresh hot novels data for ${timeRange} from database`);
+    
+    // Set date range based on timeRange parameter
+    const now = new Date();
+    let startDate;
+    
+    if (timeRange === 'today') {
+      startDate = new Date();
+      startDate.setHours(0, 0, 0, 0);
+    } else if (timeRange === 'week') {
+      startDate = new Date();
+      startDate.setDate(startDate.getDate() - 7);
+    }
+    
+    // For 'alltime', we don't need startDate filtering
 
-    // Get hot novels with chapters in a single aggregation
-    const hotNovels = await Novel.aggregate([
-      // Unwind daily views array
-      { $unwind: "$views.daily" },
-      // Match views from today
-      {
-        $match: {
-          "views.daily.date": { $gte: today }
+    // Base aggregation pipeline
+    let pipeline = [];
+    
+    if (timeRange === 'today' || timeRange === 'week') {
+      // For today and week, use daily views
+      pipeline = [
+        // Unwind daily views array
+        { $unwind: "$views.daily" },
+        // Match views from selected time range
+        {
+          $match: {
+            "views.daily.date": { $gte: startDate }
+          }
+        },
+        // Group by novel ID to prevent duplicates and sum the view counts
+        {
+          $group: {
+            _id: "$_id",
+            title: { $first: "$title" },
+            illustration: { $first: "$illustration" },
+            status: { $first: "$status" },
+            updatedAt: { $first: "$updatedAt" },
+            dailyViews: { $sum: "$views.daily.count" }
+          }
+        },
+        // Sort by the summed daily views
+        { $sort: { dailyViews: -1 } }
+      ];
+    } else {
+      // For alltime, use total views
+      pipeline = [
+        // Sort by total views
+        { $sort: { "views.total": -1 } },
+        // Project needed fields
+        {
+          $project: {
+            _id: 1,
+            title: 1,
+            illustration: 1,
+            status: 1,
+            updatedAt: 1,
+            dailyViews: "$views.total"
+          }
         }
-      },
-      // Group by novel ID to prevent duplicates and sum the view counts
-      {
-        $group: {
-          _id: "$_id",
-          title: { $first: "$title" },
-          illustration: { $first: "$illustration" },
-          status: { $first: "$status" },
-          updatedAt: { $first: "$updatedAt" },
-          dailyViews: { $sum: "$views.daily.count" }
-        }
-      },
-      // Sort by the summed daily views
-      { $sort: { dailyViews: -1 } },
+      ];
+    }
+    
+    // Add limit and lookup stages to the pipeline
+    pipeline = [
+      ...pipeline,
       // Limit to top 5
       { $limit: 5 },
       // Lookup latest chapters
@@ -259,7 +288,10 @@ router.get("/hot", async (req, res) => {
           dailyViews: 1  // Include view count for debugging
         }
       }
-    ]);
+    ];
+
+    // Execute the aggregation
+    const hotNovels = await Novel.aggregate(pipeline);
 
     const result = { novels: hotNovels };
     
@@ -1092,6 +1124,59 @@ router.get("/:id/interaction", auth, async (req, res) => {
   } catch (err) {
     console.error("Error getting user interaction:", err);
     res.status(500).json({ message: err.message });
+  }
+});
+
+// Add this route to get approved contributions and requests for a novel
+router.get('/:novelId/contributions', async (req, res) => {
+  try {
+    const novelId = req.params.novelId;
+    
+    // Find the novel
+    const novel = await Novel.findById(novelId);
+    if (!novel) {
+      return res.status(404).json({ message: 'Novel not found' });
+    }
+    
+    // PART 1: Find approved contributions
+    // Find requests for this novel
+    const requests = await Request.find({ novel: novelId, type: 'open' })
+      .select('_id')
+      .lean();
+    
+    let contributions = [];
+    if (requests && requests.length > 0) {
+      // Get request IDs
+      const requestIds = requests.map(req => req._id);
+      
+      // Find approved contributions for these requests
+      contributions = await Contribution.find({ 
+        request: { $in: requestIds },
+        status: 'approved'
+      })
+      .populate('user', 'username avatar')
+      .sort({ updatedAt: -1 })
+      .lean();
+    }
+    
+    // PART 2: Find approved requests for this novel
+    const approvedRequests = await Request.find({ 
+      novel: novelId, 
+      type: 'open',
+      status: 'approved'
+    })
+    .populate('user', 'username avatar')
+    .sort({ updatedAt: -1 })
+    .lean();
+    
+    // Return both types of data
+    return res.json({ 
+      contributions: contributions,
+      requests: approvedRequests
+    });
+  } catch (error) {
+    console.error('Error fetching novel contributions:', error);
+    return res.status(500).json({ message: 'Failed to fetch contributions' });
   }
 });
 

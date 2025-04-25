@@ -30,6 +30,8 @@ router.get('/', async (req, res) => {
     const requests = await Request.find({ status: 'pending' })
       .populate('user', 'username avatar role')
       .populate('novel', 'title _id')
+      .populate('module', 'title _id')
+      .populate('chapter', 'title _id')
       .sort(sortCriteria)
       .lean();
     
@@ -56,7 +58,7 @@ router.post('/', auth, async (req, res) => {
   session.startTransaction();
   
   try {
-    const { type, text, novelId, deposit } = req.body;
+    const { type, text, novelId, moduleId, chapterId, deposit, note } = req.body;
     
     // Validate deposit amount
     if (!deposit || isNaN(deposit) || deposit <= 0) {
@@ -80,9 +82,14 @@ router.post('/', auth, async (req, res) => {
     const requestData = {
       user: req.user._id,
       type,
-      text,
+      text: text || "", // Provide default empty string if text is not provided
       deposit
     };
+    
+    // Add note if provided
+    if (note) {
+      requestData.note = note;
+    }
     
     // Add novel reference if request type is 'open'
     if (type === 'open') {
@@ -91,6 +98,15 @@ router.post('/', auth, async (req, res) => {
         return res.status(400).json({ message: 'Novel ID is required for open requests' });
       }
       requestData.novel = novelId;
+      
+      // Add module and chapter if provided
+      if (moduleId) {
+        requestData.module = moduleId;
+      }
+      
+      if (chapterId) {
+        requestData.chapter = chapterId;
+      }
     }
     
     // Create request
@@ -105,6 +121,15 @@ router.post('/', auth, async (req, res) => {
     await newRequest.populate('user', 'username avatar role');
     if (type === 'open') {
       await newRequest.populate('novel', 'title _id');
+      
+      // Populate module and chapter if they exist
+      if (moduleId) {
+        await newRequest.populate('module', 'title _id');
+      }
+      
+      if (chapterId) {
+        await newRequest.populate('chapter', 'title _id');
+      }
     }
     
     await session.commitTransaction();
@@ -158,51 +183,6 @@ router.post('/:requestId/like', auth, async (req, res) => {
   } catch (error) {
     console.error('Failed to like/unlike request:', error);
     res.status(500).json({ message: 'Failed to process like' });
-  }
-});
-
-/**
- * Add reply to request
- * @route POST /api/requests/:requestId/replies
- */
-router.post('/:requestId/replies', auth, async (req, res) => {
-  try {
-    const { requestId } = req.params;
-    const { text } = req.body;
-    
-    if (!text || !text.trim()) {
-      return res.status(400).json({ message: 'Reply text is required' });
-    }
-    
-    // Find the request
-    const request = await Request.findById(requestId);
-    if (!request) {
-      return res.status(404).json({ message: 'Request not found' });
-    }
-    
-    // Add reply
-    const reply = {
-      user: req.user._id,
-      text: text.trim(),
-      createdAt: new Date()
-    };
-    
-    request.replies.push(reply);
-    await request.save();
-    
-    // Populate user info for the new reply
-    const populatedRequest = await Request.findById(requestId)
-      .populate({
-        path: 'replies.user',
-        select: 'username avatar role'
-      });
-    
-    const newReply = populatedRequest.replies[populatedRequest.replies.length - 1];
-    
-    res.status(201).json(newReply);
-  } catch (error) {
-    console.error('Failed to add reply:', error);
-    res.status(500).json({ message: 'Failed to add reply' });
   }
 });
 
@@ -416,6 +396,8 @@ router.get('/all', auth, async (req, res) => {
     const requests = await Request.find(query)
       .populate('user', 'username avatar role')
       .populate('novel', 'title _id')
+      .populate('module', 'title _id')
+      .populate('chapter', 'title _id')
       .sort({ createdAt: -1 })
       .limit(Number(limit))
       .lean();
@@ -437,6 +419,8 @@ router.get('/history', auth, async (req, res) => {
     const requests = await Request.find({ user: req.user._id })
       .populate('user', 'username avatar')
       .populate('novel', 'title _id')
+      .populate('module', 'title _id')
+      .populate('chapter', 'title _id')
       .sort({ createdAt: -1 });
     
     res.json(requests);

@@ -18,7 +18,10 @@ const requestSchema = new mongoose.Schema({
   },
   text: {
     type: String,
-    required: true,
+    trim: true
+  },
+  note: {
+    type: String,
     trim: true
   },
   novel: {
@@ -27,6 +30,14 @@ const requestSchema = new mongoose.Schema({
     required: function() {
       return this.type === 'open';
     }
+  },
+  module: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Module'
+  },
+  chapter: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Chapter'
   },
   deposit: {
     type: Number,
@@ -41,22 +52,6 @@ const requestSchema = new mongoose.Schema({
   likes: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
-  }],
-  replies: [{
-    user: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true
-    },
-    text: {
-      type: String,
-      required: true,
-      trim: true
-    },
-    createdAt: {
-      type: Date,
-      default: Date.now
-    }
   }]
 }, {
   timestamps: true

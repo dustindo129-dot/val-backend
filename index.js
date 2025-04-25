@@ -28,6 +28,7 @@ import reportRoutes from './routes/reports.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import requestRoutes from './routes/requests.js';
 import topupRoutes from './routes/topup.js';
+import contributionRoutes from './routes/contributions.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -73,7 +74,7 @@ app.use((req, res, next) => {
 // Configure CORS
 const corsOptions = {
   origin: process.env.NODE_ENV === 'production' 
-    ? process.env.FRONTEND_URL 
+    ? [process.env.FRONTEND_URL]
     : ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
@@ -188,6 +189,7 @@ app.use('/api/reports', reportRoutes); // Report endpoints
 app.use('/api/upload', uploadRoutes); // File upload endpoints
 app.use('/api/requests', requestRoutes); // Request system endpoints
 app.use('/api/topup', topupRoutes); // Top-up transaction endpoints
+app.use('/api/contributions', contributionRoutes); // Contribution endpoints
 
 // Health check endpoint
 app.get('/health', (req, res) => {

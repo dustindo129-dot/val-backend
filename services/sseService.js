@@ -4,6 +4,8 @@
  * Manages SSE connections and event broadcasting to clients
  */
 
+import { v4 as uuidv4 } from 'uuid';
+
 // Store active SSE clients
 export const sseClients = new Set();
 
@@ -165,4 +167,29 @@ export const broadcastEvent = (eventName, data) => {
   
   // Clean up failed clients after iteration
   failedClients.forEach(client => removeClient(client));
+};
+
+// For backward compatibility - alias broadcastEvent to broadcastMessage
+export const broadcastMessage = broadcastEvent;
+
+// Send message to specific client (by client ID)
+export const sendMessageToClient = (clientId, event, data) => {
+  // Find the client by its ID
+  let targetClient = null;
+  for (const client of sseClients) {
+    if (clientIds.get(client) === clientId) {
+      targetClient = client;
+      break;
+    }
+  }
+  
+  if (targetClient) {
+    try {
+      const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+      targetClient.res.write(message);
+    } catch (error) {
+      console.error(`Error sending message to client ${clientId}:`, error);
+      removeClient(targetClient);
+    }
+  }
 }; 
