@@ -29,6 +29,9 @@ import uploadRoutes from './routes/uploadRoutes.js';
 import requestRoutes from './routes/requests.js';
 import topupRoutes from './routes/topup.js';
 import contributionRoutes from './routes/contributions.js';
+import topuptransactionRoutes from './routes/topuptransaction.js';
+import webhookRoutes from './routes/webhook.js';
+import { initScheduler } from './scheduler.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -190,6 +193,8 @@ app.use('/api/upload', uploadRoutes); // File upload endpoints
 app.use('/api/requests', requestRoutes); // Request system endpoints
 app.use('/api/topup', topupRoutes); // Top-up transaction endpoints
 app.use('/api/contributions', contributionRoutes); // Contribution endpoints
+app.use('/api/topuptransaction', topuptransactionRoutes);
+app.use('/api/webhook', webhookRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -428,4 +433,7 @@ app.listen(port, () => {
       listConnectedClients();
     }
   }, 60000); // List every minute in development
-}); 
+});
+
+// Initialize scheduled tasks
+initScheduler(); 

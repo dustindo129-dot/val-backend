@@ -1,138 +1,398 @@
 import express from 'express';
 import { auth } from '../middleware/auth.js';
 import User from '../models/User.js';
-import TopUpTransaction from '../models/TopUpTransaction.js';
+import TopUpRequest from '../models/TopUpRequest.js';
 import mongoose from 'mongoose';
+import { createMomoPayment, createZaloPayPayment } from '../integrations/ewallet.js';
+import { validatePrepaidCard } from '../integrations/cardProvider.js';
+import { getBankAccountInfo } from '../utils/paymentUtils.js';
+import paymentConfig from '../config/paymentConfig.js';
 
 const router = express.Router();
 
 /**
- * Create a top-up transaction (Admin only)
- * @route POST /api/topup
+ * User-initiated top-up request
+ * @route POST /api/topup/request
+ * @description Users can request to top up their account balance
  */
-router.post('/', auth, async (req, res) => {
+router.post('/request', auth, async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
   
   try {
-    // Verify user is admin
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Only admins can create top-up transactions' });
+    const { amount, balance, paymentMethod, subMethod, details } = req.body;
+    
+    // Validate request data
+    if (!amount || !balance || !paymentMethod) {
+      return res.status(400).json({ message: 'Missing required fields' });
     }
     
-    const { username, amount } = req.body;
-    
-    // Validate amount
-    if (!amount || isNaN(amount) || amount <= 0) {
-      return res.status(400).json({ message: 'Invalid amount' });
-    }
-    
-    // Find user by username
-    const user = await User.findOne({ username }).session(session);
-    if (!user) {
-      await session.abortTransaction();
-      return res.status(404).json({ message: 'User not found' });
-    }
-    
-    // Create transaction
-    const transaction = new TopUpTransaction({
-      user: user._id,
-      admin: req.user._id,
-      amount,
+    // Calculate bonus (10% for first-time top-up)
+    const userTopups = await TopUpRequest.countDocuments({ 
+      user: req.user._id,
       status: 'Completed'
     });
     
-    await transaction.save({ session });
+    const isFirstTime = userTopups === 0;
+    const bonus = isFirstTime ? Math.floor(balance * 0.1) : 0;
     
-    // Update user balance
-    user.balance = (user.balance || 0) + amount;
-    await user.save({ session });
+    // Create top-up request
+    const topUpRequest = new TopUpRequest({
+      user: req.user._id,
+      amount,
+      balance,
+      bonus,
+      paymentMethod,
+      status: 'Pending'
+    });
     
-    // Populate user and admin information
-    await transaction.populate('user', 'username');
-    await transaction.populate('admin', 'username');
-    
-    await session.commitTransaction();
-    
-    res.status(201).json(transaction);
+    // Handle different payment methods
+    if (paymentMethod === 'ewallet') {
+      if (!subMethod || !details || !details.phoneNumber) {
+        return res.status(400).json({ message: 'Missing e-wallet details' });
+      }
+      
+      topUpRequest.subMethod = subMethod;
+      topUpRequest.details = {
+        phoneNumber: details.phoneNumber
+      };
+      
+      // Save the request first to get an ID
+      await topUpRequest.save({ session });
+      
+      // Generate payment URL based on the selected e-wallet
+      let paymentResult;
+      
+      if (subMethod === 'momo') {
+        paymentResult = await createMomoPayment(
+          req.user._id.toString(),
+          topUpRequest._id.toString(),
+          amount,
+          `Top-up ${amount}VND to account ${req.user.username}`
+        );
+      } else if (subMethod === 'zalopay') {
+        paymentResult = await createZaloPayPayment(
+          req.user._id.toString(),
+          topUpRequest._id.toString(),
+          amount,
+          `Top-up ${amount}VND to account ${req.user.username}`
+        );
+      } else {
+        await session.abortTransaction();
+        return res.status(400).json({ message: 'Invalid e-wallet method' });
+      }
+      
+      if (!paymentResult.success) {
+        await session.abortTransaction();
+        return res.status(500).json({ message: paymentResult.error || 'Failed to create payment' });
+      }
+      
+      // Update request with payment information
+      topUpRequest.details.requestId = paymentResult.requestId;
+      topUpRequest.details.paymentUrl = paymentResult.paymentUrl;
+      await topUpRequest.save({ session });
+      
+      await session.commitTransaction();
+      
+      return res.status(200).json({
+        message: 'Please complete your payment',
+        paymentUrl: paymentResult.paymentUrl,
+        requestId: topUpRequest._id,
+        bonus: isFirstTime ? bonus : 0
+      });
+    } else if (paymentMethod === 'bank') {
+      if (!details || !details.accountNumber || !details.accountName || !details.bankName) {
+        return res.status(400).json({ message: 'Missing bank transfer details' });
+      }
+      
+      // Generate a reference code if not provided
+      const transferContent = details.transferContent || `Topup-${req.user.username}`;
+      
+      topUpRequest.details = {
+        bankName: details.bankName,
+        accountName: details.accountName,
+        accountNumber: details.accountNumber,
+        transferContent
+      };
+      
+      // Get bank account information for display
+      const bankAccount = getBankAccountInfo();
+      
+      // Save the request
+      await topUpRequest.save({ session });
+      await session.commitTransaction();
+      
+      return res.status(200).json({ 
+        message: 'Top-up request received. Please complete the bank transfer with the exact amount and reference.',
+        requestId: topUpRequest._id,
+        status: 'Pending',
+        transferDetails: {
+          amount: amount,
+          reference: transferContent,
+          bankName: bankAccount.bank,
+          accountNumber: bankAccount.accountNumber,
+          accountName: bankAccount.accountName
+        },
+        bonus: isFirstTime ? `You'll receive a ${bonus} balance bonus as a first-time user!` : null
+      });
+    } else if (paymentMethod === 'prepaidCard') {
+      if (!details || !details.cardNumber || !details.cardPin || !details.provider) {
+        return res.status(400).json({ message: 'Missing prepaid card details' });
+      }
+      
+      topUpRequest.details = {
+        provider: details.provider,
+        cardNumber: details.cardNumber,
+        cardPin: details.cardPin
+      };
+      
+      // Validate the card immediately
+      const validationResult = await validatePrepaidCard(
+        details.provider,
+        details.cardNumber,
+        details.cardPin
+      );
+      
+      // Store masked card number for security
+      topUpRequest.details.cardNumber = validationResult.cardNumber;
+      
+      if (!validationResult.valid) {
+        // Save the failed request for record keeping
+        topUpRequest.status = 'Failed';
+        topUpRequest.notes = validationResult.message;
+        await topUpRequest.save({ session });
+        await session.commitTransaction();
+        
+        return res.status(400).json({ 
+          message: validationResult.message || 'Invalid card details',
+          requestId: topUpRequest._id,
+          status: 'Failed'
+        });
+      }
+      
+      // If card value doesn't match expected amount, adjust or reject
+      if (validationResult.amount !== amount) {
+        // Option 2: Reject the card
+        topUpRequest.status = 'Failed';
+        topUpRequest.notes = `Card value (${validationResult.amount}) does not match expected amount (${amount})`;
+        await topUpRequest.save({ session });
+        await session.commitTransaction();
+        
+        return res.status(400).json({
+          message: `Card value (${validationResult.amount}) does not match expected amount (${amount})`,
+          requestId: topUpRequest._id,
+          status: 'Failed'
+        });
+      }
+      
+      // Card is valid, update request and user balance
+      topUpRequest.status = 'Completed';
+      topUpRequest.completedAt = new Date();
+      await topUpRequest.save({ session });
+      
+      // Update user balance
+      await User.findByIdAndUpdate(
+        req.user._id,
+        { $inc: { balance: topUpRequest.balance + topUpRequest.bonus } },
+        { session }
+      );
+      
+      await session.commitTransaction();
+      
+      return res.status(200).json({ 
+        message: 'Card accepted and balance added to your account',
+        requestId: topUpRequest._id,
+        status: 'Completed',
+        balanceAdded: topUpRequest.balance + topUpRequest.bonus,
+        bonus: topUpRequest.bonus
+      });
+    } else {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'Invalid payment method' });
+    }
   } catch (error) {
     await session.abortTransaction();
-    console.error('Top-up transaction failed:', error);
-    res.status(500).json({ message: 'Failed to process top-up' });
+    console.error('Top-up request failed:', error);
+    res.status(500).json({ message: 'Failed to process top-up request' });
   } finally {
     session.endSession();
   }
 });
 
 /**
- * Get all top-up transactions (Admin only)
- * @route GET /api/topup/transactions
+ * Get user's pending top-up requests
+ * @route GET /api/topup/pending
+ * @description Users can view their pending top-up requests
  */
-router.get('/transactions', auth, async (req, res) => {
+router.get('/pending', auth, async (req, res) => {
   try {
-    // Verify user is admin
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Only admins can view all transactions' });
-    }
+    const pendingRequests = await TopUpRequest.find({
+      user: req.user._id,
+      status: 'Pending'
+    }).sort({ createdAt: -1 });
     
-    const transactions = await TopUpTransaction.find()
-      .populate('user', 'username')
-      .populate('admin', 'username')
-      .sort({ createdAt: -1 });
+    // Format response for different payment methods
+    const formattedRequests = pendingRequests.map(request => {
+      let formattedRequest = {
+        _id: request._id,
+        amount: request.amount,
+        balance: request.balance,
+        bonus: request.bonus,
+        paymentMethod: request.paymentMethod,
+        status: request.status,
+        createdAt: request.createdAt
+      };
+      
+      // Add payment method specific details
+      if (request.paymentMethod === 'ewallet') {
+        formattedRequest.subMethod = request.subMethod;
+        formattedRequest.paymentUrl = request.details.paymentUrl;
+      } else if (request.paymentMethod === 'bank') {
+        formattedRequest.bankInfo = {
+          transferContent: request.details.transferContent
+        };
+        
+        // Add bank account info for convenience
+        formattedRequest.ourBankAccount = getBankAccountInfo();
+      }
+      
+      return formattedRequest;
+    });
     
-    res.json(transactions);
+    res.json(formattedRequests);
   } catch (error) {
-    console.error('Failed to fetch transactions:', error);
-    res.status(500).json({ message: 'Failed to fetch transactions' });
+    console.error('Failed to fetch pending requests:', error);
+    res.status(500).json({ message: 'Failed to fetch pending requests' });
   }
 });
 
 /**
- * Get top-up transactions for current user
+ * Get user's top-up history
  * @route GET /api/topup/history
+ * @description Users can view their top-up history
  */
 router.get('/history', auth, async (req, res) => {
   try {
-    const transactions = await TopUpTransaction.find({ user: req.user._id })
-      .populate('admin', 'username')
-      .sort({ createdAt: -1 });
+    const history = await TopUpRequest.find({
+      user: req.user._id
+    }).sort({ createdAt: -1 });
     
-    res.json(transactions);
+    // Mask sensitive data
+    const formattedHistory = history.map(item => {
+      const formattedItem = {
+        _id: item._id,
+        amount: item.amount,
+        balance: item.balance,
+        bonus: item.bonus,
+        paymentMethod: item.paymentMethod,
+        subMethod: item.subMethod,
+        status: item.status,
+        createdAt: item.createdAt,
+        completedAt: item.completedAt
+      };
+      
+      // Add payment method specific details but mask sensitive info
+      if (item.paymentMethod === 'prepaidCard' && item.details) {
+        formattedItem.cardInfo = {
+          provider: item.details.provider,
+          cardNumber: item.details.cardNumber // Already masked during processing
+        };
+      } else if (item.paymentMethod === 'bank' && item.details) {
+        formattedItem.bankInfo = {
+          bankName: item.details.bankName,
+          transferContent: item.details.transferContent
+        };
+      } else if (item.paymentMethod === 'ewallet' && item.details) {
+        formattedItem.ewalletInfo = {
+          provider: item.subMethod
+        };
+      }
+      
+      return formattedItem;
+    });
+    
+    res.json(formattedHistory);
   } catch (error) {
-    console.error('Failed to fetch transaction history:', error);
-    res.status(500).json({ message: 'Failed to fetch transaction history' });
+    console.error('Failed to fetch top-up history:', error);
+    res.status(500).json({ message: 'Failed to fetch top-up history' });
   }
 });
 
 /**
- * Search for users (Admin only)
- * @route GET /api/users/search
+ * Cancel a pending top-up request
+ * @route DELETE /api/topup/request/:requestId
+ * @description Users can cancel their pending top-up requests
  */
-router.get('/search-users', auth, async (req, res) => {
+router.delete('/request/:requestId', auth, async (req, res) => {
   try {
-    // Verify user is admin
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Only admins can search users' });
+    const requestId = req.params.requestId;
+    
+    // Find the request and ensure it belongs to the user
+    const request = await TopUpRequest.findOne({
+      _id: requestId,
+      user: req.user._id,
+      status: 'Pending'
+    });
+    
+    if (!request) {
+      return res.status(404).json({ 
+        message: 'Request not found or cannot be cancelled' 
+      });
     }
     
-    const { query } = req.query;
+    // For e-wallet payments, we should check the status with the provider
+    // before allowing cancellation, but we'll skip that for simplicity
     
-    if (!query || query.length < 2) {
-      return res.status(400).json({ message: 'Search query must be at least 2 characters' });
-    }
+    // Update request status
+    request.status = 'Cancelled';
+    request.notes = 'Cancelled by user';
+    await request.save();
     
-    // Search for users by username or email
-    const users = await User.find({
-      $or: [
-        { username: { $regex: query, $options: 'i' } },
-        { email: { $regex: query, $options: 'i' } }
-      ]
-    }).select('username avatar balance');
-    
-    res.json(users);
+    res.json({ 
+      message: 'Request cancelled successfully',
+      requestId
+    });
   } catch (error) {
-    console.error('User search failed:', error);
-    res.status(500).json({ message: 'Failed to search users' });
+    console.error('Failed to cancel request:', error);
+    res.status(500).json({ message: 'Failed to cancel request' });
+  }
+});
+
+/**
+ * Get pricing options
+ * @route GET /api/topup/pricing
+ * @description Get available pricing options for top-up
+ */
+router.get('/pricing', async (req, res) => {
+  try {
+    // In a real implementation, these might come from a database
+    const pricingOptions = [
+      { price: 12000, balance: 100, bonus: 10, note: "Good start! Try our service." },
+      { price: 20000, balance: 200, bonus: 20, note: "Smart pick for regular readers!" },
+      { price: 50000, balance: 550, bonus: 55, note: "Best value for unlocking more!" },
+      { price: 250000, balance: 2800, bonus: 280, note: "Perfect for full volumes!" },
+      { price: 350000, balance: 4000, bonus: 400, note: "For serious readers — huge savings!" }
+    ];
+    
+    res.json(pricingOptions);
+  } catch (error) {
+    console.error('Failed to fetch pricing options:', error);
+    res.status(500).json({ message: 'Failed to fetch pricing options' });
+  }
+});
+
+/**
+ * Get bank account information
+ * @route GET /api/topup/bank-info
+ * @description Get bank account information for bank transfers
+ */
+router.get('/bank-info', async (req, res) => {
+  try {
+    const bankAccount = getBankAccountInfo();
+    res.json(bankAccount);
+  } catch (error) {
+    console.error('Failed to fetch bank information:', error);
+    res.status(500).json({ message: 'Failed to fetch bank information' });
   }
 });
 
