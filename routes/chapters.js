@@ -363,12 +363,6 @@ router.put('/:id', [auth, admin], async (req, res) => {
                 session }
             ),
             
-            // 5. Update novel's timestamp and view count
-            Novel.findByIdAndUpdate(
-              chapter.novelId,
-              { updatedAt: new Date() },
-              { session }
-            )
           ]);
           
           // Commit transaction
@@ -423,11 +417,6 @@ router.put('/:id', [auth, admin], async (req, res) => {
 
     // Only update novel if content or title changes, not just mode
     if (title || content) {
-      await Novel.findByIdAndUpdate(
-        updatedChapter.novelId,
-        { updatedAt: new Date() }
-      );
-      
       // Clear novel caches
       clearNovelCaches();
     }
@@ -489,21 +478,7 @@ router.delete('/:id', auth, async (req, res) => {
 
     // Update novel's timestamp and optionally increment view count
     const shouldSkipViewTracking = req.query.skipViewTracking === 'true';
-    const novelUpdate = {
-      $set: { updatedAt: new Date() }
-    };
-    
-    // Removing view count increment completely
-    // if (!shouldSkipViewTracking) {
-    //   novelUpdate.$inc = { 'views.total': 1 };
-    // }
-
-    await Novel.findOneAndUpdate(
-      { _id: chapter.novelId },
-      novelUpdate,
-      { session }
-    );
-
+  
     await session.commitTransaction();
     
     // Clear novel caches
