@@ -578,19 +578,14 @@ router.get("/:id", async (req, res) => {
 
     // Increment view count after sending response
     if (req.query.skipViewTracking !== 'true') {
-      Novel.findByIdAndUpdate(
-        req.params.id,
-        { 
-          $inc: { 'views.total': 1 },
-          $push: {
-            'views.daily': {
-              $each: [{ date: new Date(), count: 1 }],
-              $sort: { date: -1 },
-              $slice: 7  // Keep only last 7 days
-            }
+      // Find the full document (not lean) and use the model method
+      Novel.findById(req.params.id)
+        .then(fullNovel => {
+          if (fullNovel) {
+            return fullNovel.incrementViews();
           }
-        }
-      ).exec().catch(err => console.error('Error updating view count:', err));
+        })
+        .catch(err => console.error('Error updating view count:', err));
     }
   } catch (err) {
     res.status(500).json({ message: err.message });
