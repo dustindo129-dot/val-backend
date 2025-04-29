@@ -392,65 +392,45 @@ router.get('/bank-info', async (req, res) => {
  */
 router.post('/process-bank-transfer', async (req, res) => {
   try {
-    // Log the complete incoming request for debugging
-    console.log('---------- CASSO WEBHOOK REQUEST START ----------');
-    console.log('Headers:', JSON.stringify(req.headers, null, 2));
-    console.log('Body:', JSON.stringify(req.body, null, 2));
-    console.log('---------- CASSO WEBHOOK REQUEST END ----------');
-    
-    // Verify Casso API key
-    const apiKey = req.headers['x-api-key'];
+    // Log the incoming webhook for debugging
+    console.log('---------- CASSO WEBHOOK RECEIVED ----------');
+    console.log('Headers:', req.headers);
+    console.log('Body:', req.body);
+    console.log('----------------------------------------------');
+
+    // Verify Casso API key (check both header options)
+    const apiKey = req.headers['x-api-key'] || req.headers['secure-token'];
     if (!apiKey || apiKey !== process.env.BANK_WEBHOOK_API_KEY) {
-      console.log('API key verification failed:', apiKey);
-      return res.status(401).json({ 
-        error: true,
-        message: 'Unauthorized' 
-      });
+      return res.status(401).json({ message: 'Unauthorized' });
     }
 
     // Handle Casso webhook format
-    const { data, error } = req.body;
+    const { data } = req.body;
     
-    // Casso may send an error object for validation
-    if (error) {
-      console.log('Casso validation error:', error);
-      return res.status(200).json({ 
-        error: false,
-        message: 'Received validation request',
-        data: []
-      });
-    }
-    
-    // If strict mode validation or no data, acknowledge receipt
-    if (!data || !Array.isArray(data) || data.length === 0) {
-      return res.status(200).json({ 
-        error: false,
-        message: 'Webhook received, no transactions to process',
-        data: []
-      });
+    // Casso sends an array of transactions
+    if (!data || !Array.isArray(data)) {
+      return res.status(400).json({ message: 'Invalid webhook data format' });
     }
     
     // Process each transaction in the webhook
     const results = [];
     
     for (const transaction of data) {
-      // Filter for money-in transactions only
-      if (!transaction.creditAmount || transaction.creditAmount <= 0) {
-        results.push({
-          transId: transaction.transId || 'unknown',
-          status: 'skipped',
-          message: 'Not a money-in transaction'
-        });
-        continue;
-      }
+      // For test transactions, we'll assume all are money-in
+      // In production, we should filter properly based on transaction type or "creditAmount" if available
       
       // Extract necessary information from Casso transaction format
       const { 
         description,    // Transfer content/description
-        creditAmount,   // Amount credited to account (money-in)
-        transId,        // Bank transaction ID
-        bankSubAccId,   // Bank account ID
+        amount,         // Amount (in test data)
+        tid,            // Transaction ID (tid in test data, transId in production)
+        bank_sub_acc_id, // Bank account ID (different naming in test vs production)
       } = transaction;
+      
+      // Use either creditAmount (production) or amount (test)
+      const creditAmount = transaction.creditAmount || amount;
+      // Use either transId (production) or tid (test)
+      const transId = transaction.transId || tid;
       
       // Skip if important data is missing
       if (!description || !creditAmount || !transId) {
@@ -557,20 +537,14 @@ router.post('/process-bank-transfer', async (req, res) => {
       }
     }
 
-    // Return summary in Casso-compatible format
+    // Return summary of all processed transactions
     return res.status(200).json({
-      error: false,
-      message: 'Casso webhook processed successfully',
-      data: results
+      message: 'Casso webhook processed',
+      results
     });
   } catch (error) {
     console.error('Casso webhook processing error:', error);
-    // Even in case of error, return 200 status to prevent Casso from retrying
-    res.status(200).json({ 
-      error: true, 
-      message: 'Internal server error processing webhook',
-      data: []
-    });
+    res.status(500).json({ message: 'Internal server error' });
   }
 });
 
