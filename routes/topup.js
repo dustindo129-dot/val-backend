@@ -392,35 +392,68 @@ router.get('/bank-info', async (req, res) => {
  */
 router.post('/process-bank-transfer', async (req, res) => {
   try {
+    // Log the complete incoming request for debugging
+    console.log('---------- CASSO WEBHOOK REQUEST START ----------');
+    console.log('Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+    console.log('---------- CASSO WEBHOOK REQUEST END ----------');
+    
     // Verify Casso API key
     const apiKey = req.headers['x-api-key'];
     if (!apiKey || apiKey !== process.env.BANK_WEBHOOK_API_KEY) {
-      return res.status(401).json({ message: 'Unauthorized' });
+      console.log('API key verification failed:', apiKey);
+      return res.status(401).json({ 
+        error: true,
+        message: 'Unauthorized' 
+      });
     }
 
     // Handle Casso webhook format
-    const { data } = req.body;
+    const { data, error } = req.body;
     
-    // Casso sends an array of transactions
-    if (!data || !Array.isArray(data)) {
-      return res.status(400).json({ message: 'Invalid webhook data format' });
+    // Casso may send an error object for validation
+    if (error) {
+      console.log('Casso validation error:', error);
+      return res.status(200).json({ 
+        error: false,
+        message: 'Received validation request',
+        data: []
+      });
+    }
+    
+    // If strict mode validation or no data, acknowledge receipt
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      return res.status(200).json({ 
+        error: false,
+        message: 'Webhook received, no transactions to process',
+        data: []
+      });
     }
     
     // Process each transaction in the webhook
     const results = [];
     
     for (const transaction of data) {
+      // Filter for money-in transactions only
+      if (!transaction.creditAmount || transaction.creditAmount <= 0) {
+        results.push({
+          transId: transaction.transId || 'unknown',
+          status: 'skipped',
+          message: 'Not a money-in transaction'
+        });
+        continue;
+      }
+      
       // Extract necessary information from Casso transaction format
       const { 
         description,    // Transfer content/description
-        amount,         // Transaction amount
+        creditAmount,   // Amount credited to account (money-in)
         transId,        // Bank transaction ID
         bankSubAccId,   // Bank account ID
-        creditAmount    // Amount credited
       } = transaction;
       
       // Skip if important data is missing
-      if (!description || !amount || !transId) {
+      if (!description || !creditAmount || !transId) {
         results.push({
           transId: transId || 'unknown',
           status: 'failed',
@@ -453,7 +486,7 @@ router.post('/process-bank-transfer', async (req, res) => {
 
       // If no pending request with this transfer content, log for manual review
       if (!pendingRequest) {
-        console.log(`Unmatched bank transfer: ${description}, amount: ${amount}, transaction: ${transId}`);
+        console.log(`Unmatched bank transfer: ${description}, amount: ${creditAmount}, transaction: ${transId}`);
         results.push({
           transId,
           status: 'pending_review',
@@ -463,7 +496,7 @@ router.post('/process-bank-transfer', async (req, res) => {
       }
 
       // Verify the amount matches (allowing for minor differences)
-      const amountDifference = Math.abs(pendingRequest.amount - amount);
+      const amountDifference = Math.abs(pendingRequest.amount - creditAmount);
       const isDifferent = amountDifference > 100; // Allow for small variance (e.g., 100 VND)
 
       // Start a transaction for data consistency
@@ -473,7 +506,7 @@ router.post('/process-bank-transfer', async (req, res) => {
       try {
         if (isDifferent) {
           // If amount doesn't match, add a note but still process
-          pendingRequest.notes = `Auto-processed with amount mismatch. Expected: ${pendingRequest.amount}, Received: ${amount}`;
+          pendingRequest.notes = `Auto-processed with amount mismatch. Expected: ${pendingRequest.amount}, Received: ${creditAmount}`;
         }
 
         // Update the request
@@ -482,6 +515,7 @@ router.post('/process-bank-transfer', async (req, res) => {
         pendingRequest.details.bankReference = transId;
         pendingRequest.details.autoProcessed = true;
         pendingRequest.details.cassoProcessed = true;
+        pendingRequest.details.actualAmount = creditAmount;
         
         await pendingRequest.save({ session });
 
@@ -523,14 +557,20 @@ router.post('/process-bank-transfer', async (req, res) => {
       }
     }
 
-    // Return summary of all processed transactions
+    // Return summary in Casso-compatible format
     return res.status(200).json({
-      message: 'Casso webhook processed',
-      results
+      error: false,
+      message: 'Casso webhook processed successfully',
+      data: results
     });
   } catch (error) {
     console.error('Casso webhook processing error:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    // Even in case of error, return 200 status to prevent Casso from retrying
+    res.status(200).json({ 
+      error: true, 
+      message: 'Internal server error processing webhook',
+      data: []
+    });
   }
 });
 
