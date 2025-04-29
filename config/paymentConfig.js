@@ -56,7 +56,7 @@ const paymentConfig = {
   app: {
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
     backendUrl: process.env.BACKEND_URL || 'http://localhost:5000',
-    serviceName: 'Val-JS Reading Platform'
+    serviceName: 'Valvrareteam'
   }
 };
 

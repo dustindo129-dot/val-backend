@@ -23,7 +23,6 @@ import chaptersRouter from './routes/chapters.js';
 import moduleRoutes from './routes/modules.js';
 import userChapterInteractionRoutes from './routes/userChapterInteractions.js';
 import userNovelInteractionRoutes from './routes/userNovelInteractions.js';
-import donationRoutes from './routes/donation.js';
 import reportRoutes from './routes/reports.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import requestRoutes from './routes/requests.js';
@@ -185,16 +184,15 @@ app.use('/api/comments', commentRoutes); // Comment system endpoints
 app.use('/api/users', userRoutes);      // User management endpoints
 app.use('/api/chapters', chaptersRouter); // Chapter management endpoints
 app.use('/api/modules', moduleRoutes);   // Module management endpoints
-app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User chapter interactions endpoints
-app.use('/api/usernovelinteractions', userNovelInteractionRoutes); // User novel interactions endpoints
-app.use('/api/donation', donationRoutes); // Donation endpoints
+app.use('/api/user-chapter-interactions', userChapterInteractionRoutes); // User chapter interactions endpoints
+app.use('/api/user-novel-interactions', userNovelInteractionRoutes); // User novel interactions endpoints
 app.use('/api/reports', reportRoutes); // Report endpoints
 app.use('/api/upload', uploadRoutes); // File upload endpoints
 app.use('/api/requests', requestRoutes); // Request system endpoints
 app.use('/api/topup', topupRoutes); // Top-up transaction endpoints
 app.use('/api/contributions', contributionRoutes); // Contribution endpoints
-app.use('/api/topuptransaction', topuptransactionRoutes);
-app.use('/api/webhook', webhookRoutes);
+app.use('/api/topup-admin', topuptransactionRoutes);
+app.use('/api/webhooks', webhookRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

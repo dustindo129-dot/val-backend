@@ -27,21 +27,12 @@ router.post('/request', auth, async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
     
-    // Calculate bonus (10% for first-time top-up)
-    const userTopups = await TopUpRequest.countDocuments({ 
-      user: req.user._id,
-      status: 'Completed'
-    });
-    
-    const isFirstTime = userTopups === 0;
-    const bonus = isFirstTime ? Math.floor(balance * 0.1) : 0;
-    
-    // Create top-up request
+    // Create top-up request (removed bonus calculation)
     const topUpRequest = new TopUpRequest({
       user: req.user._id,
       amount,
       balance,
-      bonus,
+      bonus: 0, // Set bonus to 0 for all requests
       paymentMethod,
       status: 'Pending'
     });
@@ -97,8 +88,7 @@ router.post('/request', auth, async (req, res) => {
       return res.status(200).json({
         message: 'Please complete your payment',
         paymentUrl: paymentResult.paymentUrl,
-        requestId: topUpRequest._id,
-        bonus: isFirstTime ? bonus : 0
+        requestId: topUpRequest._id
       });
     } else if (paymentMethod === 'bank') {
       if (!details || !details.accountNumber || !details.accountName || !details.bankName) {
@@ -132,8 +122,7 @@ router.post('/request', auth, async (req, res) => {
           bankName: bankAccount.bank,
           accountNumber: bankAccount.accountNumber,
           accountName: bankAccount.accountName
-        },
-        bonus: isFirstTime ? `You'll receive a ${bonus} balance bonus as a first-time user!` : null
+        }
       });
     } else if (paymentMethod === 'prepaidCard') {
       if (!details || !details.cardNumber || !details.cardPin || !details.provider) {
@@ -190,10 +179,10 @@ router.post('/request', auth, async (req, res) => {
       topUpRequest.completedAt = new Date();
       await topUpRequest.save({ session });
       
-      // Update user balance
+      // Update user balance (no bonus)
       await User.findByIdAndUpdate(
         req.user._id,
-        { $inc: { balance: topUpRequest.balance + topUpRequest.bonus } },
+        { $inc: { balance: topUpRequest.balance } },
         { session }
       );
       
@@ -203,8 +192,7 @@ router.post('/request', auth, async (req, res) => {
         message: 'Card accepted and balance added to your account',
         requestId: topUpRequest._id,
         status: 'Completed',
-        balanceAdded: topUpRequest.balance + topUpRequest.bonus,
-        bonus: topUpRequest.bonus
+        balanceAdded: topUpRequest.balance
       });
     } else {
       await session.abortTransaction();
@@ -367,11 +355,11 @@ router.get('/pricing', async (req, res) => {
   try {
     // In a real implementation, these might come from a database
     const pricingOptions = [
-      { price: 12000, balance: 100, bonus: 10, note: "Good start! Try our service." },
-      { price: 20000, balance: 200, bonus: 20, note: "Smart pick for regular readers!" },
-      { price: 50000, balance: 550, bonus: 55, note: "Best value for unlocking more!" },
-      { price: 250000, balance: 2800, bonus: 280, note: "Perfect for full volumes!" },
-      { price: 350000, balance: 4000, bonus: 400, note: "For serious readers — huge savings!" }
+      { price: 12000, balance: 100, note: "Chỉ với 12.000đ mỗi tháng bạn sẽ không bao giờ thấy bất kì quảng cáo nào trên page trong cuộc đời này" },
+      { price: 20000, balance: 200, note: "Gói bình dân hạt dẻ" },
+      { price: 50000, balance: 550, note: "Thêm tí bonus gọi là" },
+      { price: 250000, balance: 2800, note: "Với gói này phú hào có thể unlock ngay một tập truyện dịch từ Eng" },
+      { price: 350000, balance: 4000, note: "Với gói này đại gia đủ sức bao trọn một tập truyện bất kì dịch từ Jap" }
     ];
     
     res.json(pricingOptions);
@@ -393,6 +381,156 @@ router.get('/bank-info', async (req, res) => {
   } catch (error) {
     console.error('Failed to fetch bank information:', error);
     res.status(500).json({ message: 'Failed to fetch bank information' });
+  }
+});
+
+/**
+ * Automatic bank transfer processing API for Casso
+ * @route POST /api/topup/process-bank-transfer
+ * @description Automatically process a bank transfer when payment is received via Casso
+ * @access Private - Should only be accessible by the Casso webhook
+ */
+router.post('/process-bank-transfer', async (req, res) => {
+  try {
+    // Verify Casso API key
+    const apiKey = req.headers['x-api-key'];
+    if (!apiKey || apiKey !== process.env.BANK_WEBHOOK_API_KEY) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    // Handle Casso webhook format
+    const { data } = req.body;
+    
+    // Casso sends an array of transactions
+    if (!data || !Array.isArray(data)) {
+      return res.status(400).json({ message: 'Invalid webhook data format' });
+    }
+    
+    // Process each transaction in the webhook
+    const results = [];
+    
+    for (const transaction of data) {
+      // Extract necessary information from Casso transaction format
+      const { 
+        description,    // Transfer content/description
+        amount,         // Transaction amount
+        transId,        // Bank transaction ID
+        bankSubAccId,   // Bank account ID
+        creditAmount    // Amount credited
+      } = transaction;
+      
+      // Skip if important data is missing
+      if (!description || !amount || !transId) {
+        results.push({
+          transId: transId || 'unknown',
+          status: 'failed',
+          message: 'Missing required transaction data'
+        });
+        continue;
+      }
+
+      // Check if this transaction has already been processed (idempotency)
+      const existingTransaction = await TopUpRequest.findOne({
+        'details.bankReference': transId
+      });
+
+      if (existingTransaction && existingTransaction.status === 'Completed') {
+        results.push({
+          transId,
+          status: 'skipped',
+          message: 'Transaction already processed',
+          requestId: existingTransaction._id
+        });
+        continue;
+      }
+
+      // Find pending topup request with matching transfer content
+      const pendingRequest = await TopUpRequest.findOne({
+        'details.transferContent': description,
+        'status': 'Pending',
+        'paymentMethod': 'bank'
+      });
+
+      // If no pending request with this transfer content, log for manual review
+      if (!pendingRequest) {
+        console.log(`Unmatched bank transfer: ${description}, amount: ${amount}, transaction: ${transId}`);
+        results.push({
+          transId,
+          status: 'pending_review',
+          message: 'No matching topup request found'
+        });
+        continue;
+      }
+
+      // Verify the amount matches (allowing for minor differences)
+      const amountDifference = Math.abs(pendingRequest.amount - amount);
+      const isDifferent = amountDifference > 100; // Allow for small variance (e.g., 100 VND)
+
+      // Start a transaction for data consistency
+      const session = await mongoose.startSession();
+      session.startTransaction();
+
+      try {
+        if (isDifferent) {
+          // If amount doesn't match, add a note but still process
+          pendingRequest.notes = `Auto-processed with amount mismatch. Expected: ${pendingRequest.amount}, Received: ${amount}`;
+        }
+
+        // Update the request
+        pendingRequest.status = 'Completed';
+        pendingRequest.completedAt = new Date();
+        pendingRequest.details.bankReference = transId;
+        pendingRequest.details.autoProcessed = true;
+        pendingRequest.details.cassoProcessed = true;
+        
+        await pendingRequest.save({ session });
+
+        // Update user balance
+        const user = await User.findById(pendingRequest.user).session(session);
+        if (!user) {
+          await session.abortTransaction();
+          results.push({
+            transId,
+            status: 'failed',
+            message: 'User not found'
+          });
+          continue;
+        }
+
+        user.balance = (user.balance || 0) + pendingRequest.balance;
+        await user.save({ session });
+
+        await session.commitTransaction();
+
+        results.push({
+          transId,
+          status: 'success',
+          message: 'Bank transfer processed successfully',
+          requestId: pendingRequest._id,
+          username: user.username,
+          balanceAdded: pendingRequest.balance
+        });
+      } catch (error) {
+        await session.abortTransaction();
+        console.error('Error processing bank transfer:', error);
+        results.push({
+          transId,
+          status: 'failed',
+          message: 'Failed to process bank transfer'
+        });
+      } finally {
+        session.endSession();
+      }
+    }
+
+    // Return summary of all processed transactions
+    return res.status(200).json({
+      message: 'Casso webhook processed',
+      results
+    });
+  } catch (error) {
+    console.error('Casso webhook processing error:', error);
+    res.status(500).json({ message: 'Internal server error' });
   }
 });
 

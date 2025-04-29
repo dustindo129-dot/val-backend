@@ -2,13 +2,14 @@ import express from 'express';
 import { auth } from '../middleware/auth.js';
 import User from '../models/User.js';
 import TopUpTransaction from '../models/TopUpTransaction.js';
+import TopUpRequest from '../models/TopUpRequest.js';
 import mongoose from 'mongoose';
 
 const router = express.Router();
 
 /**
  * Create a top-up transaction (Admin only)
- * @route POST /api/topup
+ * @route POST /api/topup-admin
  */
 router.post('/', auth, async (req, res) => {
   const session = await mongoose.startSession();
@@ -66,7 +67,7 @@ router.post('/', auth, async (req, res) => {
 
 /**
  * Get all top-up transactions (Admin only)
- * @route GET /api/topup/transactions
+ * @route GET /api/topup-admin/transactions
  */
 router.get('/transactions', auth, async (req, res) => {
   try {
@@ -88,8 +89,145 @@ router.get('/transactions', auth, async (req, res) => {
 });
 
 /**
+ * Get all pending top-up requests (Admin only)
+ * @route GET /api/topup-admin/pending-requests
+ */
+router.get('/pending-requests', auth, async (req, res) => {
+  try {
+    // Verify user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Unauthorized' });
+    }
+    
+    const pendingRequests = await TopUpRequest.find({ status: 'Pending' })
+      .populate('user', 'username')
+      .sort({ createdAt: -1 });
+    
+    res.json(pendingRequests);
+  } catch (error) {
+    console.error('Failed to fetch pending requests:', error);
+    res.status(500).json({ message: 'Failed to fetch pending requests' });
+  }
+});
+
+/**
+ * Process a pending top-up request (Admin only)
+ * @route POST /api/topup-admin/process-request/:requestId
+ */
+router.post('/process-request/:requestId', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    // Verify user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Unauthorized' });
+    }
+    
+    const { requestId } = req.params;
+    const { action, adjustedBalance } = req.body;
+    
+    if (!['confirm', 'decline'].includes(action)) {
+      return res.status(400).json({ message: 'Invalid action' });
+    }
+    
+    // Find the request
+    const request = await TopUpRequest.findById(requestId).session(session);
+    if (!request) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Request not found' });
+    }
+    
+    if (request.status !== 'Pending') {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'Request is not pending' });
+    }
+    
+    if (action === 'confirm') {
+      // Get the user
+      const user = await User.findById(request.user).session(session);
+      if (!user) {
+        await session.abortTransaction();
+        return res.status(404).json({ message: 'User not found' });
+      }
+      
+      // Update request
+      request.status = 'Completed';
+      request.completedAt = new Date();
+      request.adminId = req.user._id;
+      
+      // If balance was adjusted, update it
+      const finalBalance = adjustedBalance || request.balance;
+      
+      // Add notes if amount was adjusted
+      if (adjustedBalance && adjustedBalance !== request.balance) {
+        request.notes = `Balance adjusted from ${request.balance} to ${adjustedBalance} by admin`;
+        request.balance = adjustedBalance;
+      }
+      
+      // Add to user balance (removed bonus)
+      user.balance = (user.balance || 0) + finalBalance;
+      
+      await request.save({ session });
+      await user.save({ session });
+      
+      await session.commitTransaction();
+      
+      return res.status(200).json({ 
+        message: 'Request confirmed successfully',
+        request
+      });
+    } else {
+      // Decline the request
+      request.status = 'Failed';
+      request.notes = 'Declined by admin';
+      request.adminId = req.user._id;
+      
+      await request.save({ session });
+      await session.commitTransaction();
+      
+      return res.status(200).json({ 
+        message: 'Request declined successfully',
+        request
+      });
+    }
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Failed to process request:', error);
+    res.status(500).json({ message: 'Failed to process request' });
+  } finally {
+    session.endSession();
+  }
+});
+
+/**
+ * Get all completed/failed top-up requests (Admin only)
+ * @route GET /api/topup-admin/completed-requests
+ */
+router.get('/completed-requests', auth, async (req, res) => {
+  try {
+    // Verify user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Unauthorized' });
+    }
+    
+    const completedRequests = await TopUpRequest.find({ 
+      status: { $in: ['Completed', 'Failed'] } 
+    })
+      .populate('user', 'username')
+      .populate('adminId', 'username')
+      .sort({ completedAt: -1 });
+    
+    res.json(completedRequests);
+  } catch (error) {
+    console.error('Failed to fetch completed requests:', error);
+    res.status(500).json({ message: 'Failed to fetch completed requests' });
+  }
+});
+
+/**
  * Get top-up transactions for current user
- * @route GET /api/topup/history
+ * @route GET /api/topup-admin/history
  */
 router.get('/history', auth, async (req, res) => {
   try {
@@ -106,7 +244,7 @@ router.get('/history', auth, async (req, res) => {
 
 /**
  * Search for users (Admin only)
- * @route GET /api/users/search
+ * @route GET /api/topup-admin/search-users
  */
 router.get('/search-users', auth, async (req, res) => {
   try {
