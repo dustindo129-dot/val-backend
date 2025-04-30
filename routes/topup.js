@@ -442,6 +442,9 @@ router.post('/process-bank-transfer', async (req, res) => {
         continue;
       }
 
+      // Extract the actual transfer content (last part after hyphen)
+      const actualTransferContent = description.split('-').pop();
+
       // Check if this transaction has already been processed (idempotency)
       const existingTransaction = await TopUpRequest.findOne({
         'details.bankReference': transId
@@ -459,7 +462,7 @@ router.post('/process-bank-transfer', async (req, res) => {
 
       // Find pending topup request with matching transfer content
       const pendingRequest = await TopUpRequest.findOne({
-        'details.transferContent': description,
+        'details.transferContent': actualTransferContent,
         'status': 'Pending',
         'paymentMethod': 'bank'
       });
