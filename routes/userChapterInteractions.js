@@ -3,8 +3,14 @@ import mongoose from 'mongoose';
 import { auth } from '../middleware/auth.js';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import Chapter from '../models/Chapter.js';
+import { getCacheValue, setCacheValue, deleteCacheValue, deleteByPattern } from '../utils/redisClient.js';
 
 const router = express.Router();
+
+// Cache keys constants
+const CACHE_TTL = 300; // 5 minutes in seconds
+const getUserInteractionCacheKey = (userId, chapterId) => `user:${userId}:chapter:${chapterId}:interaction`;
+const getChapterStatsCacheKey = (chapterId) => `chapter:${chapterId}:stats`;
 
 /**
  * Get chapter interaction statistics
@@ -13,6 +19,14 @@ const router = express.Router();
 router.get('/stats/:chapterId', async (req, res) => {
   try {
     const chapterId = req.params.chapterId;
+    
+    // Try to get from cache first
+    const cacheKey = getChapterStatsCacheKey(chapterId);
+    const cachedStats = await getCacheValue(cacheKey);
+    
+    if (cachedStats) {
+      return res.json(cachedStats);
+    }
     
     // Aggregate interactions data
     const [stats] = await UserChapterInteraction.aggregate([
@@ -36,23 +50,24 @@ router.get('/stats/:chapterId', async (req, res) => {
     ]);
 
     // If no interactions exist yet, return default values
-    if (!stats) {
-      return res.json({
-        totalLikes: 0,
-        totalRatings: 0,
-        averageRating: '0.0'
-      });
-    }
+    const result = stats 
+      ? {
+          totalLikes: stats.totalLikes,
+          totalRatings: stats.totalRatings,
+          averageRating: stats.totalRatings > 0 
+            ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
+            : '0.0'
+        }
+      : {
+          totalLikes: 0,
+          totalRatings: 0,
+          averageRating: '0.0'
+        };
+    
+    // Cache the result
+    await setCacheValue(cacheKey, result, CACHE_TTL);
 
-    const averageRating = stats.totalRatings > 0 
-      ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
-      : '0.0';
-
-    res.json({
-      totalLikes: stats.totalLikes,
-      totalRatings: stats.totalRatings,
-      averageRating
-    });
+    res.json(result);
   } catch (err) {
     console.error('Error getting chapter interactions:', err);
     res.status(500).json({ message: err.message });
@@ -68,25 +83,50 @@ router.get('/user/:chapterId', auth, async (req, res) => {
     const chapterId = req.params.chapterId;
     const userId = req.user._id;
 
-    // Get user's interaction
-    const interaction = await UserChapterInteraction.findOne({ userId, chapterId });
+    // Validate IDs to prevent invalid ObjectId errors
+    if (!mongoose.Types.ObjectId.isValid(chapterId)) {
+      return res.status(400).json({ message: "Invalid chapter ID format" });
+    }
     
-    if (!interaction) {
-      return res.json({
-        liked: false,
-        rating: null,
-        bookmarked: false
-      });
+    // Try to get from cache first
+    const cacheKey = getUserInteractionCacheKey(userId, chapterId);
+    const cachedInteraction = await getCacheValue(cacheKey);
+    
+    if (cachedInteraction) {
+      return res.json(cachedInteraction);
     }
 
-    return res.json({
-      liked: interaction.liked || false,
-      rating: interaction.rating || null,
-      bookmarked: interaction.bookmarked || false
-    });
+    // Use lean() for better performance and only select needed fields
+    const interaction = await UserChapterInteraction.findOne(
+      { userId, chapterId },
+      { liked: 1, rating: 1, bookmarked: 1, _id: 0 }  // Only select needed fields
+    )
+    .lean()
+    .maxTimeMS(2000);  // Set timeout to prevent long-running queries
+    
+    // Default response
+    const result = {
+      liked: interaction?.liked || false,
+      rating: interaction?.rating || null,
+      bookmarked: interaction?.bookmarked || false
+    };
+    
+    // Cache the result
+    await setCacheValue(cacheKey, result, CACHE_TTL);
+    
+    return res.json(result);
   } catch (err) {
     console.error("Error getting user interaction:", err);
-    res.status(500).json({ message: err.message });
+    // Return default values instead of error for better UX
+    if (err.name === 'MongooseError' || err.name === 'MongoError') {
+      return res.json({
+        liked: false, 
+        rating: null, 
+        bookmarked: false,
+        error: "Database error, using default values"
+      });
+    }
+    res.status(500).json({ message: "Server error", error: err.message });
   }
 });
 
@@ -136,10 +176,16 @@ router.post('/like', auth, async (req, res) => {
       { $group: { _id: null, totalLikes: { $sum: 1 } } }
     ]);
     
-    return res.json({ 
+    const result = { 
       liked: interaction.liked,
       totalLikes: stats?.totalLikes || 0
-    });
+    };
+    
+    // Invalidate related caches
+    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
+    await deleteCacheValue(getChapterStatsCacheKey(chapterId));
+    
+    return res.json(result);
   } catch (err) {
     console.error("Error toggling like:", err);
     res.status(500).json({ message: err.message });
@@ -206,11 +252,17 @@ router.post('/rate', auth, async (req, res) => {
       ? (stats.ratingSum / totalRatings).toFixed(1) 
       : '0.0';
 
-    return res.json({
+    const result = {
       rating,
       totalRatings,
       averageRating
-    });
+    };
+    
+    // Invalidate related caches
+    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
+    await deleteCacheValue(getChapterStatsCacheKey(chapterId));
+    
+    return res.json(result);
   } catch (err) {
     console.error("Error rating chapter:", err);
     res.status(500).json({ message: err.message });
@@ -259,10 +311,16 @@ router.delete('/rate/:chapterId', auth, async (req, res) => {
       ? (stats.ratingSum / totalRatings).toFixed(1) 
       : '0.0';
 
-    return res.json({
+    const result = {
       totalRatings,
       averageRating
-    });
+    };
+    
+    // Invalidate related caches
+    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
+    await deleteCacheValue(getChapterStatsCacheKey(chapterId));
+    
+    return res.json(result);
   } catch (err) {
     console.error("Error removing rating:", err);
     res.status(500).json({ message: err.message });
@@ -311,6 +369,9 @@ router.post('/bookmark', auth, async (req, res) => {
           $set: { bookmarked: false }
         }
       );
+      
+      // Invalidate all bookmark caches for this user and novel
+      await deleteByPattern(`user:${userId}:chapter:*:interaction`);
     }
 
     // Update or create interaction for this chapter
@@ -325,11 +386,17 @@ router.post('/bookmark', auth, async (req, res) => {
       interaction.bookmarked = !currentlyBookmarked;
     }
     await interaction.save();
-
-    return res.json({ 
+    
+    const result = { 
       bookmarked: interaction.bookmarked,
       chapterId: interaction.bookmarked ? chapterId : null
-    });
+    };
+    
+    // Invalidate related caches
+    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
+    await deleteCacheValue(`user:${userId}:novel:${chapter.novelId}:bookmark`);
+    
+    return res.json(result);
   } catch (err) {
     console.error("Error toggling bookmark:", err);
     res.status(500).json({ message: err.message });
@@ -354,6 +421,14 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
     if (!userId) {
       return res.status(401).json({ message: "User authentication required" });
     }
+    
+    // Try to get from cache first
+    const cacheKey = `user:${userId}:novel:${novelId}:bookmark`;
+    const cachedBookmark = await getCacheValue(cacheKey);
+    
+    if (cachedBookmark) {
+      return res.json(cachedBookmark);
+    }
 
     // First try to find the interaction without populating to check if it exists
     const interactionExists = await UserChapterInteraction.findOne({
@@ -363,7 +438,9 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
     });
 
     if (!interactionExists) {
-      return res.json({ bookmarkedChapter: null });
+      const result = { bookmarkedChapter: null };
+      await setCacheValue(cacheKey, result, CACHE_TTL);
+      return res.json(result);
     }
     
     // If the interaction exists, now try to populate with error handling
@@ -381,18 +458,27 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
           interaction._id,
           { bookmarked: false } // Unmark the bookmark if chapter doesn't exist
         );
-        return res.json({ bookmarkedChapter: null });
+        
+        const result = { bookmarkedChapter: null };
+        await setCacheValue(cacheKey, result, CACHE_TTL);
+        return res.json(result);
       }
       
-      return res.json({
+      const result = {
         bookmarkedChapter: {
           id: interaction.chapterId._id,
           title: interaction.chapterId.title
         }
-      });
+      };
+      
+      // Cache the result
+      await setCacheValue(cacheKey, result, CACHE_TTL);
+      
+      return res.json(result);
     } catch (populateErr) {
-      console.error("Error populating chapter reference:", populateErr);
-      return res.json({ bookmarkedChapter: null });
+      const result = { bookmarkedChapter: null };
+      await setCacheValue(cacheKey, result, CACHE_TTL);
+      return res.json(result);
     }
   } catch (err) {
     console.error("Error getting bookmarked chapter:", err);

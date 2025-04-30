@@ -1,10 +1,15 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import { getCacheValue, setCacheValue } from '../utils/redisClient.js';
+
+// Cache TTL for user data (1 hour)
+const USER_CACHE_TTL = 3600;
 
 /**
  * Authentication middleware to verify user's JWT token
  * Extracts token from cookies or Authorization header
  * Verifies token and attaches user object to request
+ * Uses Redis caching to reduce database load
  */
 export const auth = async (req, res, next) => {
   try {
@@ -16,18 +21,44 @@ export const auth = async (req, res, next) => {
     }
 
     // Verify token and decode user ID
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    // Find user by ID and exclude password from result
-    const user = await User.findById(decoded.userId).select('-password');
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (tokenError) {
+      console.error('Token verification failed:', tokenError.message);
+      return res.status(401).json({ message: 'Invalid or expired token' });
+    }
 
-    if (!user) {
-      throw new Error('User not found');
+    // Try to get user from cache first
+    const cacheKey = `user:${decoded.userId}`;
+    const cachedUser = await getCacheValue(cacheKey);
+
+    let user;
+    if (cachedUser) {
+      // Use cached user data
+      user = cachedUser;
+    } else {
+      // Find user by ID and exclude password from result
+      try {
+        user = await User.findById(decoded.userId).select('-password').lean();
+      
+        if (!user) {
+          throw new Error('User not found');
+        }
+      
+        // Cache user data
+        await setCacheValue(cacheKey, user, USER_CACHE_TTL);
+      } catch (dbError) {
+        console.error('Database error in auth middleware:', dbError);
+        return res.status(500).json({ message: 'Server error during authentication' });
+      }
     }
 
     // Attach user object to request for use in route handlers
     req.user = user;
     next();
   } catch (error) {
+    console.error('Auth middleware error:', error.message);
     res.status(401).json({ message: 'Please authenticate' });
   }
 };

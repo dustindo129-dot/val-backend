@@ -14,10 +14,13 @@ import sirv from 'sirv';
 import fs from 'fs';
 import { cleanupStaleConnections, listConnectedClients } from './services/sseService.js';
 
-// Increase connection limits to prevent ENOBUFS errors
-require('events').EventEmitter.defaultMaxListeners = 20;
-require('http').globalAgent.maxSockets = 50;
-require('https').globalAgent.maxSockets = 50;
+// Increase buffer limits and thread pool size
+process.env.UV_THREADPOOL_SIZE = 128; 
+
+// Increase network buffer limits if not in production (requires root in production)
+if (process.env.NODE_ENV !== 'production') {
+  require('net').Socket.prototype.setNoDelay(true); // Disable Nagle's algorithm
+}
 
 // Import route handlers
 import authRoutes from './routes/auth.js';
@@ -192,7 +195,7 @@ app.use('/api/comments', commentRoutes); // Comment system endpoints
 app.use('/api/users', userRoutes);      // User management endpoints
 app.use('/api/chapters', chaptersRouter); // Chapter management endpoints
 app.use('/api/modules', moduleRoutes);   // Module management endpoints
-app.use('/api/user-chapter-interactions', userChapterInteractionRoutes); // User chapter interactions endpoints
+app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User chapter interactions endpoints
 app.use('/api/user-novel-interactions', userNovelInteractionRoutes); // User novel interactions endpoints
 app.use('/api/reports', reportRoutes); // Report endpoints
 app.use('/api/upload', uploadRoutes); // File upload endpoints

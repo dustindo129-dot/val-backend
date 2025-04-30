@@ -11,9 +11,27 @@ import reportRoutes from './routes/reports.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import requestRoutes from './routes/requests.js';
 import topupRoutes from './routes/topup.js';
+import chapterRoutes from './routes/chapters.js';
+import userChapterInteractionRoutes from './routes/userChapterInteractions.js';
+import redisClient, { getRedisStatus } from './utils/redisClient.js';
+import { auth } from './middleware/auth.js';
+import admin from './middleware/admin.js';
 
 // Initialize Express application
 const app = express();
+
+// Check Redis connection
+(async () => {
+  try {
+    if (!redisClient.isOpen) {
+      await redisClient.connect();
+    }
+    console.log('Redis connection established successfully');
+  } catch (err) {
+    console.warn('Redis connection failed, continuing without caching:', err.message);
+    console.log('Application will function without Redis caching');
+  }
+})();
 
 // Enable CORS for cross-origin requests
 app.use(
@@ -32,6 +50,19 @@ app.use(express.json({ limit: "10mb" }));
 // Parse URL-encoded request bodies with a 10MB size limit
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
+// Redis status endpoint (admin only)
+app.get('/api/system/redis-status', [auth, admin], async (req, res) => {
+  try {
+    const status = await getRedisStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: error.message 
+    });
+  }
+});
+
 // Register API routes
 // Each route is prefixed with /api for versioning and organization
 app.use("/api/auth", authRoutes); // Authentication routes (login, register, etc.)
@@ -44,3 +75,5 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/upload', uploadRoutes); // File upload routes for bunny.net
 app.use('/api/requests', requestRoutes); // Request system routes
 app.use('/api/topup', topupRoutes); // Top-up transaction routes
+app.use('/api/chapters', chapterRoutes); // Chapter routes
+app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User chapter interactions
