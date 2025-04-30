@@ -58,7 +58,7 @@ router.post('/', auth, async (req, res) => {
   session.startTransaction();
   
   try {
-    const { type, text, novelId, moduleId, chapterId, deposit, note } = req.body;
+    const { type, text, novelId, moduleId, chapterId, deposit, note, autoApproveWebRecommendation } = req.body;
     
     // Validate deposit amount
     if (!deposit || isNaN(deposit) || deposit <= 0) {
@@ -109,6 +109,11 @@ router.post('/', auth, async (req, res) => {
       }
     }
     
+    // Handle web recommendations with auto-approval
+    if (autoApproveWebRecommendation && user.role === 'admin') {
+      requestData.status = 'approved'; // Auto-approve web recommendations by admin
+    }
+    
     // Create request
     const newRequest = new Request(requestData);
     await newRequest.save({ session });
@@ -116,6 +121,16 @@ router.post('/', auth, async (req, res) => {
     // Deduct deposit from user balance
     user.balance -= deposit;
     await user.save({ session });
+    
+    // If this is an auto-approved web recommendation, add deposit to novel balance
+    if (autoApproveWebRecommendation && user.role === 'admin' && type === 'open' && novelId) {
+      const Novel = mongoose.model('Novel');
+      await Novel.findByIdAndUpdate(
+        novelId,
+        { $inc: { novelBalance: deposit } },
+        { session }
+      );
+    }
     
     // Populate user and novel data before sending response
     await newRequest.populate('user', 'username avatar role');
