@@ -345,25 +345,62 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
     const novelId = req.params.novelId;
     const userId = req.user._id;
 
-    const interaction = await UserChapterInteraction.findOne({
+    // Verify the novelId is valid
+    if (!mongoose.Types.ObjectId.isValid(novelId)) {
+      return res.status(400).json({ message: "Invalid novel ID format" });
+    }
+
+    // Handle missing user ID
+    if (!userId) {
+      return res.status(401).json({ message: "User authentication required" });
+    }
+
+    // First try to find the interaction without populating to check if it exists
+    const interactionExists = await UserChapterInteraction.findOne({
       userId,
       novelId,
       bookmarked: true
-    }).populate('chapterId', 'title');
+    });
 
-    if (!interaction) {
+    if (!interactionExists) {
       return res.json({ bookmarkedChapter: null });
     }
-
-    return res.json({
-      bookmarkedChapter: {
-        id: interaction.chapterId._id,
-        title: interaction.chapterId.title
+    
+    // If the interaction exists, now try to populate with error handling
+    try {
+      const interaction = await UserChapterInteraction.findOne({
+        userId,
+        novelId,
+        bookmarked: true
+      }).populate('chapterId', 'title');
+      
+      // Check if chapter reference is valid
+      if (!interaction.chapterId || typeof interaction.chapterId === 'string') {
+        // The chapter reference is invalid or missing - update the record
+        await UserChapterInteraction.findByIdAndUpdate(
+          interaction._id,
+          { bookmarked: false } // Unmark the bookmark if chapter doesn't exist
+        );
+        return res.json({ bookmarkedChapter: null });
       }
-    });
+      
+      return res.json({
+        bookmarkedChapter: {
+          id: interaction.chapterId._id,
+          title: interaction.chapterId.title
+        }
+      });
+    } catch (populateErr) {
+      console.error("Error populating chapter reference:", populateErr);
+      return res.json({ bookmarkedChapter: null });
+    }
   } catch (err) {
     console.error("Error getting bookmarked chapter:", err);
-    res.status(500).json({ message: err.message });
+    // Return a graceful error instead of 500
+    return res.json({ 
+      bookmarkedChapter: null,
+      error: "Error retrieving bookmark information"
+    });
   }
 });
 
@@ -375,49 +412,22 @@ router.post('/view/:chapterId', async (req, res) => {
   try {
     const chapterId = req.params.chapterId;
     
-    // Get user IP or ID for tracking (if authenticated)
-    const userId = req.user ? req.user._id : req.ip;
-    const viewerIdentifier = req.user ? `user_${userId}` : `ip_${userId}`;
-
-    // Check if chapter exists
-    const chapter = await Chapter.findById(chapterId);
-    if (!chapter) {
+    // Use a direct atomic update instead of loading the entire chapter first
+    // This is much faster and avoids race conditions
+    const updateResult = await Chapter.findByIdAndUpdate(
+      chapterId,
+      { $inc: { views: 1 } },
+      { new: true, select: 'views' } // Return just the updated views field
+    );
+    
+    if (!updateResult) {
       return res.status(404).json({ message: "Chapter not found" });
     }
-
-    // Check if this chapter view should be counted based on time window
-    // Use both cookie and server timestamp for additional verification
-    const viewKey = `chapter_${chapterId}_${viewerIdentifier}_last_viewed`;
-    const lastViewed = req.cookies[viewKey];
-    const now = Date.now();
-    const fourHours = 4 * 60 * 60 * 1000; // 4 hours in milliseconds (matching client side)
-    const shouldCountView = !lastViewed || (now - parseInt(lastViewed, 10)) > fourHours;
-
-    // Only increment views if time window has passed since last view
-    if (shouldCountView) {
-      try {
-        // Use the atomic increment operation we defined in the model
-        // This avoids race conditions when multiple users view simultaneously
-        await chapter.incrementViews();
-        
-        // Set a cookie to track this viewing
-        res.cookie(viewKey, now.toString(), { 
-          maxAge: fourHours,
-          httpOnly: true,
-          sameSite: 'strict',
-          // Secure flag should be true in production
-          secure: process.env.NODE_ENV === 'production'
-        });
-      } catch (incrementError) {
-        console.error("Error incrementing view count:", incrementError);
-        // Still return success to client, but log the error
-        // We don't want to block page loading for view count issues
-      }
-    }
-
+    
+    // Return the updated view count
     return res.json({ 
-      views: chapter.views,
-      counted: shouldCountView
+      views: updateResult.views,
+      counted: true
     });
   } catch (err) {
     console.error("Error recording view:", err);

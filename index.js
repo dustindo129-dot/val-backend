@@ -14,6 +14,11 @@ import sirv from 'sirv';
 import fs from 'fs';
 import { cleanupStaleConnections, listConnectedClients } from './services/sseService.js';
 
+// Increase connection limits to prevent ENOBUFS errors
+require('events').EventEmitter.defaultMaxListeners = 20;
+require('http').globalAgent.maxSockets = 50;
+require('https').globalAgent.maxSockets = 50;
+
 // Import route handlers
 import authRoutes from './routes/auth.js';
 import novelRoutes from './routes/novels.js';
@@ -51,13 +56,16 @@ app.use(express.json({
   parameterLimit: 100000,
   verify: (req, res, buf) => {
     req.rawBody = buf;
-  }
+  },
+  strict: false, // Allow non-strict JSON
+  type: 'application/json' // Only parse JSON content type
 }));
 
 app.use(express.urlencoded({
   limit: '50mb',
   extended: true,
-  parameterLimit: 100000
+  parameterLimit: 100000,
+  type: 'application/x-www-form-urlencoded' // Only parse URL-encoded content type
 }));
 
 // Add compression for performance
