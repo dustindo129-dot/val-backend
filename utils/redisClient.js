@@ -5,11 +5,11 @@ let isRedisAvailable = false;
 
 // Create a Redis client with error handling
 const redisClient = createClient({
-  username: 'default',
-  password: 'Mrnp6tm2tczqlViKyZUaU4Fnf1N7q0a3',
+  username: process.env.REDIS_USERNAME || 'default',
+  password: process.env.REDIS_PASSWORD,
   socket: {
-    host: 'redis-11614.crce178.ap-east-1-1.ec2.redns.redis-cloud.com',
-    port: 11614,
+    host: process.env.REDIS_HOST,
+    port: parseInt(process.env.REDIS_PORT || '6379'),
     reconnectStrategy: (retries) => {
       // Exponential backoff with max 10 second delay
       const delay = Math.min(Math.pow(2, retries) * 100, 10000);
