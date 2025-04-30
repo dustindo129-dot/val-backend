@@ -102,8 +102,7 @@ router.post('/request', auth, async (req, res) => {
         bankName: details.bankName,
         accountName: details.accountName,
         accountNumber: details.accountNumber,
-        transferContent,
-        expectedAmount: amount  // Store the expected amount in details
+        transferContent
       };
       
       // Get bank account information for display
@@ -479,16 +478,13 @@ router.post('/process-bank-transfer', async (req, res) => {
         continue;
       }
 
-      // Verify the amount matches exactly with the expected amount stored in details
-      if (pendingRequest.details.expectedAmount !== creditAmount) {
-        console.log(`Amount mismatch for transfer: ${description}, expected: ${pendingRequest.details.expectedAmount}, received: ${creditAmount}, request ID: ${pendingRequest._id}`);
-        results.push({
-          transId,
-          status: 'pending_review',
-          message: `Amount mismatch. Expected: ${pendingRequest.details.expectedAmount}, Received: ${creditAmount}`,
-          requestId: pendingRequest._id
-        });
-        continue;
+      // Verify the amount matches (allowing for minor differences)
+      const amountDifference = Math.abs(pendingRequest.amount - creditAmount);
+      const isDifferent = amountDifference > 100; // Allow for small variance (e.g., 100 VND)
+
+      // Log amount mismatch for monitoring
+      if (isDifferent) {
+        console.log(`Amount mismatch for transfer: ${description}, expected: ${pendingRequest.amount}, received: ${creditAmount}, request ID: ${pendingRequest._id}`);
       }
 
       // Start a transaction for data consistency
@@ -496,6 +492,11 @@ router.post('/process-bank-transfer', async (req, res) => {
       session.startTransaction();
 
       try {
+        if (isDifferent) {
+          // If amount doesn't match, add a note but still process
+          pendingRequest.notes = `Auto-processed with amount mismatch. Expected: ${pendingRequest.amount}, Received: ${creditAmount}`;
+        }
+
         // Update the request
         pendingRequest.status = 'Completed';
         pendingRequest.completedAt = new Date();

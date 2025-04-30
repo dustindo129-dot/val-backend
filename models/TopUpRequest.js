@@ -36,7 +36,10 @@ const topUpRequestSchema = new mongoose.Schema({
   },
   details: {
     type: mongoose.Schema.Types.Mixed,
-    required: true
+    required: true,
+    default: {
+      actualAmount: 0
+    }
   },
   status: {
     type: String,
