@@ -1,3 +1,7 @@
+// Load environment variables directly in this file to ensure they're available
+import dotenv from 'dotenv';
+dotenv.config();
+
 import { createClient } from 'redis';
 
 // Track connection status
@@ -8,7 +12,7 @@ const redisClient = createClient({
   username: process.env.REDIS_USERNAME || 'default',
   password: process.env.REDIS_PASSWORD,
   socket: {
-    host: process.env.REDIS_HOST,
+    host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379'),
     reconnectStrategy: (retries) => {
       // Exponential backoff with max 10 second delay

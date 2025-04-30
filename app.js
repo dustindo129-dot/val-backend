@@ -1,3 +1,7 @@
+// Load environment variables from .env file
+import dotenv from 'dotenv';
+dotenv.config();
+
 // Import route handlers
 import novelRoutes from "./routes/novels.js";
 import userRoutes from "./routes/users.js";

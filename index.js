@@ -1,7 +1,10 @@
+// Load environment variables from .env file
+import dotenv from 'dotenv';
+dotenv.config();
+
 // Import required dependencies
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import cookieParser from 'cookie-parser';
 import path from 'path';
@@ -39,9 +42,6 @@ import contributionRoutes from './routes/contributions.js';
 import topuptransactionRoutes from './routes/topuptransaction.js';
 import webhookRoutes from './routes/webhook.js';
 import { initScheduler } from './scheduler.js';
-
-// Load environment variables from .env file
-dotenv.config();
 
 // Configure ES modules __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
