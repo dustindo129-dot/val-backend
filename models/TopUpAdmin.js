@@ -1,10 +1,10 @@
 import mongoose from 'mongoose';
 
 /**
- * TopUpTransaction Schema
+ * TopUpAdmin Schema
  * Represents a transaction where an admin adds balance to a user's account
  */
-const topUpTransactionSchema = new mongoose.Schema({
+const topUpAdminSchema = new mongoose.Schema({
   user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -33,10 +33,10 @@ const topUpTransactionSchema = new mongoose.Schema({
 });
 
 // Create index for more efficient queries
-topUpTransactionSchema.index({ user: 1, createdAt: -1 });
-topUpTransactionSchema.index({ admin: 1, createdAt: -1 });
-topUpTransactionSchema.index({ status: 1 });
+topUpAdminSchema.index({ user: 1, createdAt: -1 });
+topUpAdminSchema.index({ admin: 1, createdAt: -1 });
+topUpAdminSchema.index({ status: 1 });
 
-const TopUpTransaction = mongoose.model('TopUpTransaction', topUpTransactionSchema);
+const TopUpAdmin = mongoose.model('TopUpAdmin', topUpAdminSchema);
 
-export default TopUpTransaction; 
+export default TopUpAdmin; 

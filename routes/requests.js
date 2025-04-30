@@ -3,6 +3,7 @@ import { auth } from '../middleware/auth.js';
 import Request from '../models/Request.js';
 import User from '../models/User.js';
 import mongoose from 'mongoose';
+import { createTransaction } from './userTransaction.js';
 
 const router = express.Router();
 
@@ -118,9 +119,28 @@ router.post('/', auth, async (req, res) => {
     const newRequest = new Request(requestData);
     await newRequest.save({ session });
     
+    // Store old balance for transaction record
+    const oldBalance = user.balance;
+    
     // Deduct deposit from user balance
     user.balance -= deposit;
     await user.save({ session });
+    
+    // Record the transaction in UserTransaction ledger
+    const description = type === 'open' 
+      ? `Yêu cầu mở chương truyện` 
+      : `Yêu cầu truyện mới`;
+    
+    await createTransaction({
+      userId: user._id,
+      amount: -deposit, // Negative amount for deductions
+      type: 'request',
+      description,
+      sourceId: newRequest._id,
+      sourceModel: 'Request',
+      performedById: null, // User initiated
+      balanceAfter: user.balance
+    }, session);
     
     // If this is an auto-approved web recommendation, add deposit to novel balance
     if (autoApproveWebRecommendation && user.role === 'admin' && type === 'open' && novelId) {
@@ -246,6 +266,18 @@ router.post('/:requestId/approve', auth, async (req, res) => {
         { session }
       );
       
+      // Record the transaction in UserTransaction ledger - no balance change since deposit was already deducted
+      await createTransaction({
+        userId: request.user,
+        amount: 0, // No balance change as deposit was already deducted when request was created
+        type: 'request',
+        description: `Yêu cầu mở chương được admin chấp nhận`,
+        sourceId: request._id,
+        sourceModel: 'Request',
+        performedById: req.user._id, // Admin initiated
+        balanceAfter: (await User.findById(request.user).session(session)).balance || 0
+      }, session);
+      
       await session.commitTransaction();
       res.json({ 
         message: 'Request approved successfully. Deposit added to novel balance.',
@@ -254,6 +286,19 @@ router.post('/:requestId/approve', auth, async (req, res) => {
       });
     } else {
       // For new novel requests, deposit is kept (not returned to user)
+      
+      // Record the transaction in UserTransaction ledger - no balance change since deposit was already deducted
+      await createTransaction({
+        userId: request.user,
+        amount: 0, // No balance change as deposit was already deducted when request was created
+        type: 'request',
+        description: `Yêu cầu truyện mới được admin chấp nhận`,
+        sourceId: request._id,
+        sourceModel: 'Request',
+        performedById: req.user._id, // Admin initiated
+        balanceAfter: (await User.findById(request.user).session(session)).balance || 0
+      }, session);
+      
       await session.commitTransaction();
       res.json({ message: 'Request approved successfully' });
     }
@@ -277,7 +322,7 @@ router.post('/:requestId/decline', auth, async (req, res) => {
   try {
     // Verify user is admin
     if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Only admins can decline requests' });
+      return res.status(403).json({ message: 'Chỉ admin mới có thể từ chối yêu cầu' });
     }
     
     const { requestId } = req.params;
@@ -286,21 +331,24 @@ router.post('/:requestId/decline', auth, async (req, res) => {
     const request = await Request.findById(requestId).session(session);
     if (!request) {
       await session.abortTransaction();
-      return res.status(404).json({ message: 'Request not found' });
+      return res.status(404).json({ message: 'Yêu cầu không tồn tại' });
     }
     
     // Check if request is already processed
     if (request.status !== 'pending') {
       await session.abortTransaction();
-      return res.status(400).json({ message: 'Request has already been processed' });
+      return res.status(400).json({ message: 'Yêu cầu đã được xử lý' });
     }
     
     // Find user to refund deposit
     const user = await User.findById(request.user).session(session);
     if (!user) {
       await session.abortTransaction();
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(404).json({ message: 'Người dùng không tồn tại' });
     }
+    
+    // Store old balance for transaction record
+    const oldBalance = user.balance;
     
     // Update request status
     request.status = 'declined';
@@ -310,12 +358,24 @@ router.post('/:requestId/decline', auth, async (req, res) => {
     user.balance += request.deposit;
     await user.save({ session });
     
+    // Record the refund transaction in UserTransaction ledger
+    await createTransaction({
+      userId: user._id,
+      amount: request.deposit, // Positive amount for refunds
+      type: 'refund',
+      description: `Hoàn tiền do admin từ chối yêu cầu`,
+      sourceId: request._id,
+      sourceModel: 'Request',
+      performedById: req.user._id, // Admin initiated
+      balanceAfter: user.balance
+    }, session);
+    
     await session.commitTransaction();
-    res.json({ message: 'Request declined and deposit refunded' });
+    res.json({ message: 'Yêu cầu đã được từ chối và 🌾 gửi đã được hoàn trả' });
   } catch (error) {
     await session.abortTransaction();
     console.error('Failed to decline request:', error);
-    res.status(500).json({ message: 'Failed to decline request' });
+    res.status(500).json({ message: 'Lỗi khi từ chối yêu cầu' });
   } finally {
     session.endSession();
   }
@@ -337,44 +397,59 @@ router.post('/:requestId/withdraw', auth, async (req, res) => {
     const request = await Request.findById(requestId).session(session);
     if (!request) {
       await session.abortTransaction();
-      return res.status(404).json({ message: 'Request not found' });
+      return res.status(404).json({ message: 'Yêu cầu không tồn tại' });
     }
     
     // Verify this is the user's own request
     if (request.user.toString() !== userId.toString()) {
       await session.abortTransaction();
-      return res.status(403).json({ message: 'You can only withdraw your own requests' });
+      return res.status(403).json({ message: 'Bạn chỉ có thể rút lại yêu cầu của chính mình' });
     }
     
     // Check if request is already processed
     if (request.status !== 'pending') {
       await session.abortTransaction();
-      return res.status(400).json({ message: 'This request cannot be withdrawn' });
+      return res.status(400).json({ message: 'Yêu cầu không thể được rút lại' });
     }
     
     // Find user to refund deposit
     const user = await User.findById(userId).session(session);
     if (!user) {
       await session.abortTransaction();
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(404).json({ message: 'Người dùng không tồn tại' });
     }
+    
+    // Store old balance for transaction record
+    const oldBalance = user.balance;
     
     // Refund deposit to user
     user.balance += request.deposit;
     await user.save({ session });
+    
+    // Record the refund transaction in UserTransaction ledger
+    await createTransaction({
+      userId: user._id,
+      amount: request.deposit, // Positive amount for refunds
+      type: 'refund',
+      description: `Hoàn tiền từ việc rút lại yêu cầu`,
+      sourceId: request._id,
+      sourceModel: 'Request',
+      performedById: null, // User initiated
+      balanceAfter: user.balance
+    }, session);
     
     // Delete the request
     await Request.findByIdAndDelete(requestId).session(session);
     
     await session.commitTransaction();
     res.json({ 
-      message: 'Request withdrawn successfully',
+      message: 'Yêu cầu đã được rút lại thành công',
       refundAmount: request.deposit
     });
   } catch (error) {
     await session.abortTransaction();
     console.error('Failed to withdraw request:', error);
-    res.status(500).json({ message: 'Failed to withdraw request' });
+    res.status(500).json({ message: 'Lỗi khi rút lại yêu cầu' });
   } finally {
     session.endSession();
   }
@@ -388,7 +463,7 @@ router.get('/all', auth, async (req, res) => {
   try {
     // Verify user is admin or moderator
     if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-      return res.status(403).json({ message: 'Access denied. Admin or moderator only.' });
+      return res.status(403).json({ message: 'Truy cập bị từ chối. Chỉ admin hoặc moderator mới được truy cập.' });
     }
     
     // Get query parameters for filtering
@@ -420,7 +495,7 @@ router.get('/all', auth, async (req, res) => {
     return res.json(requests);
   } catch (error) {
     console.error('Failed to fetch request history:', error);
-    return res.status(500).json({ message: 'Failed to fetch request history' });
+    return res.status(500).json({ message: 'Lỗi khi tải lại lịch sử yêu cầu' });
   }
 });
 
@@ -441,7 +516,7 @@ router.get('/history', auth, async (req, res) => {
     res.json(requests);
   } catch (error) {
     console.error('Failed to fetch request history:', error);
-    res.status(500).json({ message: 'Failed to fetch request history' });
+    res.status(500).json({ message: 'Lỗi khi tải lại lịch sử yêu cầu' });
   }
 });
 

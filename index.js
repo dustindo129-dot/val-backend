@@ -39,8 +39,9 @@ import uploadRoutes from './routes/uploadRoutes.js';
 import requestRoutes from './routes/requests.js';
 import topupRoutes from './routes/topup.js';
 import contributionRoutes from './routes/contributions.js';
-import topuptransactionRoutes from './routes/topuptransaction.js';
+import topupAdminRoutes from './routes/topupAdmin.js';
 import webhookRoutes from './routes/webhook.js';
+import userTransactionRoutes from './routes/userTransaction.js';
 import { initScheduler } from './scheduler.js';
 
 // Configure ES modules __dirname equivalent
@@ -202,8 +203,9 @@ app.use('/api/upload', uploadRoutes); // File upload endpoints
 app.use('/api/requests', requestRoutes); // Request system endpoints
 app.use('/api/topup', topupRoutes); // Top-up transaction endpoints
 app.use('/api/contributions', contributionRoutes); // Contribution endpoints
-app.use('/api/topup-admin', topuptransactionRoutes);
+app.use('/api/topup-admin', topupAdminRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/transactions', userTransactionRoutes); // User transaction endpoints
 
 // Health check endpoint
 app.get('/health', (req, res) => {

@@ -1,9 +1,10 @@
 import express from 'express';
 import { auth } from '../middleware/auth.js';
 import User from '../models/User.js';
-import TopUpTransaction from '../models/TopUpTransaction.js';
+import TopUpAdmin from '../models/TopUpAdmin.js';
 import TopUpRequest from '../models/TopUpRequest.js';
 import mongoose from 'mongoose';
+import { createTransaction } from './userTransaction.js';
 
 const router = express.Router();
 
@@ -18,25 +19,25 @@ router.post('/', auth, async (req, res) => {
   try {
     // Verify user is admin
     if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Only admins can create top-up transactions' });
+      return res.status(403).json({ message: 'Chỉ admin mới có thể phát 🌾' });
     }
     
     const { username, amount } = req.body;
     
     // Validate amount
     if (!amount || isNaN(amount) || amount <= 0) {
-      return res.status(400).json({ message: 'Invalid amount' });
+      return res.status(400).json({ message: 'Số 🌾 không hợp lệ' });
     }
     
     // Find user by username
     const user = await User.findOne({ username }).session(session);
     if (!user) {
       await session.abortTransaction();
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(404).json({ message: 'Người dùng không tồn tại' });
     }
     
     // Create transaction
-    const transaction = new TopUpTransaction({
+    const transaction = new TopUpAdmin({
       user: user._id,
       admin: req.user._id,
       amount,
@@ -46,8 +47,21 @@ router.post('/', auth, async (req, res) => {
     await transaction.save({ session });
     
     // Update user balance
-    user.balance = (user.balance || 0) + amount;
+    const oldBalance = user.balance || 0;
+    user.balance = oldBalance + amount;
     await user.save({ session });
+    
+    // Record in UserTransaction ledger
+    await createTransaction({
+      userId: user._id,
+      amount: amount,
+      type: 'admin_topup',
+      description: `Admin phát 🌾`,
+      sourceId: transaction._id,
+      sourceModel: 'TopUpAdmin',
+      performedById: req.user._id,
+      balanceAfter: user.balance
+    }, session);
     
     // Populate user and admin information
     await transaction.populate('user', 'username');
@@ -58,8 +72,8 @@ router.post('/', auth, async (req, res) => {
     res.status(201).json(transaction);
   } catch (error) {
     await session.abortTransaction();
-    console.error('Top-up transaction failed:', error);
-    res.status(500).json({ message: 'Failed to process top-up' });
+    console.error('Phát 🌾 thất bại:', error);
+    res.status(500).json({ message: 'Phát 🌾 thất bại' });
   } finally {
     session.endSession();
   }
@@ -73,10 +87,10 @@ router.get('/transactions', auth, async (req, res) => {
   try {
     // Verify user is admin
     if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Only admins can view all transactions' });
+      return res.status(403).json({ message: 'Chỉ admin mới có thể xem tất cả giao dịch' });
     }
     
-    const transactions = await TopUpTransaction.find()
+    const transactions = await TopUpAdmin.find()
       .populate('user', 'username')
       .populate('admin', 'username')
       .sort({ createdAt: -1 });
@@ -84,7 +98,7 @@ router.get('/transactions', auth, async (req, res) => {
     res.json(transactions);
   } catch (error) {
     console.error('Failed to fetch transactions:', error);
-    res.status(500).json({ message: 'Failed to fetch transactions' });
+    res.status(500).json({ message: 'Lỗi khi tải lại giao dịch' });
   }
 });
 
@@ -96,7 +110,7 @@ router.get('/pending-requests', auth, async (req, res) => {
   try {
     // Verify user is admin
     if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Unauthorized' });
+      return res.status(403).json({ message: 'Truy cập bị từ chối' });
     }
     
     const pendingRequests = await TopUpRequest.find({ status: 'Pending' })
@@ -106,7 +120,7 @@ router.get('/pending-requests', auth, async (req, res) => {
     res.json(pendingRequests);
   } catch (error) {
     console.error('Failed to fetch pending requests:', error);
-    res.status(500).json({ message: 'Failed to fetch pending requests' });
+    res.status(500).json({ message: 'Lỗi khi tải lại yêu cầu chờ xử lý' });
   }
 });
 
@@ -121,26 +135,26 @@ router.post('/process-request/:requestId', auth, async (req, res) => {
   try {
     // Verify user is admin
     if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Unauthorized' });
+      return res.status(403).json({ message: 'Truy cập bị từ chối' });
     }
     
     const { requestId } = req.params;
     const { action, adjustedBalance } = req.body;
     
     if (!['confirm', 'decline'].includes(action)) {
-      return res.status(400).json({ message: 'Invalid action' });
+      return res.status(400).json({ message: 'Hành động không hợp lệ' });
     }
     
     // Find the request
     const request = await TopUpRequest.findById(requestId).session(session);
     if (!request) {
       await session.abortTransaction();
-      return res.status(404).json({ message: 'Request not found' });
+      return res.status(404).json({ message: 'Yêu cầu không tồn tại' });
     }
     
     if (request.status !== 'Pending') {
       await session.abortTransaction();
-      return res.status(400).json({ message: 'Request is not pending' });
+      return res.status(400).json({ message: 'Yêu cầu đang không chờ xử lý' });
     }
     
     if (action === 'confirm') {
@@ -148,7 +162,7 @@ router.post('/process-request/:requestId', auth, async (req, res) => {
       const user = await User.findById(request.user).session(session);
       if (!user) {
         await session.abortTransaction();
-        return res.status(404).json({ message: 'User not found' });
+        return res.status(404).json({ message: 'Người dùng không tồn tại' });
       }
       
       // Update request
@@ -161,7 +175,7 @@ router.post('/process-request/:requestId', auth, async (req, res) => {
       
       // Add notes if amount was adjusted
       if (adjustedBalance && adjustedBalance !== request.balance) {
-        request.notes = `Balance adjusted from ${request.balance} to ${adjustedBalance} by admin`;
+        request.notes = `Số dư đã điều chỉnh từ ${request.balance} thành ${adjustedBalance} bởi admin`;
         request.balance = adjustedBalance;
       }
       
@@ -171,30 +185,56 @@ router.post('/process-request/:requestId', auth, async (req, res) => {
       await request.save({ session });
       await user.save({ session });
       
+      // Record in UserTransaction ledger
+      await createTransaction({
+        userId: user._id,
+        amount: finalBalance,
+        type: 'topup',
+        description: `Nạp tiền qua ${request.paymentMethod === 'bank' ? 'chuyển khoản ngân hàng' : 
+                      request.paymentMethod === 'ewallet' ? request.subMethod : 'thẻ cào'} (xác nhận bởi admin)`,
+        sourceId: request._id,
+        sourceModel: 'TopUpRequest',
+        performedById: req.user._id,
+        balanceAfter: user.balance
+      }, session);
+      
       await session.commitTransaction();
       
       return res.status(200).json({ 
-        message: 'Request confirmed successfully',
+        message: 'Yêu cầu đã được xác nhận thành công',
         request
       });
     } else {
       // Decline the request
       request.status = 'Failed';
-      request.notes = 'Declined by admin';
+      request.notes = 'Từ chối bởi admin';
       request.adminId = req.user._id;
       
       await request.save({ session });
+      
+      // Record in UserTransaction ledger (no balance change)
+      await createTransaction({
+        userId: request.user,
+        amount: 0,
+        type: 'other',
+        description: `Yêu cầu nạp tiền bị từ chối bởi admin`,
+        sourceId: request._id,
+        sourceModel: 'TopUpRequest',
+        performedById: req.user._id,
+        balanceAfter: (await User.findById(request.user).session(session)).balance || 0
+      }, session);
+      
       await session.commitTransaction();
       
       return res.status(200).json({ 
-        message: 'Request declined successfully',
+        message: 'Yêu cầu đã được từ chối thành công',
         request
       });
     }
   } catch (error) {
     await session.abortTransaction();
     console.error('Failed to process request:', error);
-    res.status(500).json({ message: 'Failed to process request' });
+    res.status(500).json({ message: 'Lỗi khi xử lý yêu cầu' });
   } finally {
     session.endSession();
   }
@@ -208,7 +248,7 @@ router.get('/completed-requests', auth, async (req, res) => {
   try {
     // Verify user is admin
     if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Unauthorized' });
+      return res.status(403).json({ message: 'Truy cập bị từ chối' });
     }
     
     const completedRequests = await TopUpRequest.find({ 
@@ -221,7 +261,7 @@ router.get('/completed-requests', auth, async (req, res) => {
     res.json(completedRequests);
   } catch (error) {
     console.error('Failed to fetch completed requests:', error);
-    res.status(500).json({ message: 'Failed to fetch completed requests' });
+    res.status(500).json({ message: 'Lỗi khi tải lại yêu cầu đã hoàn tất' });
   }
 });
 
@@ -231,14 +271,14 @@ router.get('/completed-requests', auth, async (req, res) => {
  */
 router.get('/history', auth, async (req, res) => {
   try {
-    const transactions = await TopUpTransaction.find({ user: req.user._id })
+    const transactions = await TopUpAdmin.find({ user: req.user._id })
       .populate('admin', 'username')
       .sort({ createdAt: -1 });
     
     res.json(transactions);
   } catch (error) {
     console.error('Failed to fetch transaction history:', error);
-    res.status(500).json({ message: 'Failed to fetch transaction history' });
+    res.status(500).json({ message: 'Lỗi khi tải lại lịch sử giao dịch' });
   }
 });
 
@@ -250,13 +290,13 @@ router.get('/search-users', auth, async (req, res) => {
   try {
     // Verify user is admin
     if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Only admins can search users' });
+      return res.status(403).json({ message: 'Chỉ admin mới có thể tìm kiếm người dùng' });
     }
     
     const { query } = req.query;
     
     if (!query || query.length < 2) {
-      return res.status(400).json({ message: 'Search query must be at least 2 characters' });
+      return res.status(400).json({ message: 'Tìm kiếm phải có ít nhất 2 ký tự' });
     }
     
     // Search for users by username or email
@@ -270,7 +310,7 @@ router.get('/search-users', auth, async (req, res) => {
     res.json(users);
   } catch (error) {
     console.error('User search failed:', error);
-    res.status(500).json({ message: 'Failed to search users' });
+    res.status(500).json({ message: 'Tìm kiếm người dùng thất bại' });
   }
 });
 

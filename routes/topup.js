@@ -7,6 +7,7 @@ import { createMomoPayment, createZaloPayPayment } from '../integrations/ewallet
 import { validatePrepaidCard } from '../integrations/cardProvider.js';
 import { getBankAccountInfo } from '../utils/paymentUtils.js';
 import paymentConfig from '../config/paymentConfig.js';
+import { createTransaction } from './userTransaction.js';
 
 const router = express.Router();
 
@@ -416,9 +417,6 @@ router.post('/process-bank-transfer', async (req, res) => {
     const results = [];
     
     for (const transaction of data) {
-      // For test transactions, we'll assume all are money-in
-      // In production, we should filter properly based on transaction type or "creditAmount" if available
-      
       // Extract necessary information from Casso transaction format
       const { 
         description,    // Transfer content/description
@@ -442,8 +440,29 @@ router.post('/process-bank-transfer', async (req, res) => {
         continue;
       }
 
-      // Extract the actual transfer content (last part after hyphen)
-      const actualTransferContent = description.split('-').pop();
+      // Extract the transfer content using regex to find an 8-character alphanumeric string
+      const transferContentRegex = /[a-zA-Z0-9]{8}/g;
+      const matches = description.match(transferContentRegex);
+      
+      let actualTransferContent = '';
+      
+      if (matches && matches.length > 0) {
+        // First try to find a match with our specific pattern (mix of uppercase and lowercase letters with numbers)
+        const idealPattern = /^[A-Za-z0-9]{8}$/;
+        const bestMatch = matches.find(match => 
+          idealPattern.test(match) && 
+          /[A-Z]/.test(match) && // Has at least one uppercase letter
+          /[0-9]/.test(match)    // Has at least one number
+        );
+        
+        actualTransferContent = bestMatch || matches[0];
+        
+        console.log(`Found potential transfer content: ${actualTransferContent} from description: ${description}`);
+      } else {
+        // Fallback to the old method if no 8-char codes found
+        actualTransferContent = description.split('-').pop();
+        console.log(`Using fallback method, extracted: ${actualTransferContent} from: ${description}`);
+      }
 
       // Check if this transaction has already been processed (idempotency)
       const existingTransaction = await TopUpRequest.findOne({
@@ -542,7 +561,7 @@ router.post('/process-bank-transfer', async (req, res) => {
         
         await pendingRequest.save({ session });
 
-        // Update user balance
+        // Get the user and previous balance
         const user = await User.findById(pendingRequest.user).session(session);
         if (!user) {
           await session.abortTransaction();
@@ -554,8 +573,26 @@ router.post('/process-bank-transfer', async (req, res) => {
           continue;
         }
 
-        user.balance = (user.balance || 0) + pendingRequest.balance;
+        const prevBalance = user.balance || 0;
+        user.balance = prevBalance + pendingRequest.balance;
         await user.save({ session });
+
+        // Record in UserTransaction ledger
+        let description = `Nạp tiền qua chuyển khoản ngân hàng (tự động)`;
+        if (isDifferent) {
+          description += ` (Ghi nhận chênh lệch số tiền)`;
+        }
+
+        await createTransaction({
+          userId: user._id,
+          amount: pendingRequest.balance,
+          type: 'topup',
+          description,
+          sourceId: pendingRequest._id,
+          sourceModel: 'TopUpRequest',
+          performedById: null, // Automatic process
+          balanceAfter: user.balance
+        }, session);
 
         await session.commitTransaction();
 

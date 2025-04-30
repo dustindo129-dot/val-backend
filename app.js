@@ -17,6 +17,7 @@ import requestRoutes from './routes/requests.js';
 import topupRoutes from './routes/topup.js';
 import chapterRoutes from './routes/chapters.js';
 import userChapterInteractionRoutes from './routes/userChapterInteractions.js';
+import userTransactionRoutes from './routes/userTransaction.js';
 import redisClient, { getRedisStatus } from './utils/redisClient.js';
 import { auth } from './middleware/auth.js';
 import admin from './middleware/admin.js';
@@ -81,3 +82,4 @@ app.use('/api/requests', requestRoutes); // Request system routes
 app.use('/api/topup', topupRoutes); // Top-up transaction routes
 app.use('/api/chapters', chapterRoutes); // Chapter routes
 app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User chapter interactions
+app.use('/api/transactions', userTransactionRoutes); // User transaction ledger routes
