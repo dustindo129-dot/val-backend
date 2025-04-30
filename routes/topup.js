@@ -447,10 +447,10 @@ router.post('/process-bank-transfer', async (req, res) => {
 
       // Check if this transaction has already been processed (idempotency)
       const existingTransaction = await TopUpRequest.findOne({
-        'details.bankReference': transId
+        'bankTransactions.transactionId': transId
       });
 
-      if (existingTransaction && existingTransaction.status === 'Completed') {
+      if (existingTransaction) {
         results.push({
           transId,
           status: 'skipped',
@@ -460,21 +460,51 @@ router.post('/process-bank-transfer', async (req, res) => {
         continue;
       }
 
-      // Find pending topup request with matching transfer content
-      const pendingRequest = await TopUpRequest.findOne({
+      // First, try to find a request with matching transfer content
+      let pendingRequest = await TopUpRequest.findOne({
         'details.transferContent': actualTransferContent,
         'status': 'Pending',
         'paymentMethod': 'bank'
       });
 
-      // If no pending request with this transfer content, log for manual review
+      // Store transaction data regardless of whether we find a matching request
+      const transactionData = {
+        transactionId: transId,
+        amount: creditAmount,
+        description: description,
+        date: new Date(transaction.when || Date.now()),
+        matched: !!pendingRequest
+      };
+
       if (!pendingRequest) {
         console.log(`Unmatched bank transfer: ${description}, amount: ${creditAmount}, transaction: ${transId}`);
-        results.push({
-          transId,
-          status: 'pending_review',
-          message: 'No matching topup request found'
+        
+        // Try to find any request with this transfer content, even if status isn't Pending
+        const anyRequest = await TopUpRequest.findOne({
+          'details.transferContent': actualTransferContent,
+          'paymentMethod': 'bank'
         });
+        
+        if (anyRequest) {
+          // Store the transaction with the request even if it's not in Pending status
+          anyRequest.bankTransactions.push(transactionData);
+          anyRequest.receivedAmount += creditAmount;
+          await anyRequest.save();
+          
+          results.push({
+            transId,
+            status: 'stored',
+            message: `Transaction stored with non-pending request: ${anyRequest._id}`,
+            requestId: anyRequest._id,
+            requestStatus: anyRequest.status
+          });
+        } else {
+          results.push({
+            transId,
+            status: 'pending_review',
+            message: 'No matching topup request found'
+          });
+        }
         continue;
       }
 
@@ -497,13 +527,18 @@ router.post('/process-bank-transfer', async (req, res) => {
           pendingRequest.notes = `Auto-processed with amount mismatch. Expected: ${pendingRequest.amount}, Received: ${creditAmount}`;
         }
 
+        // Add transaction to the request's transaction history
+        pendingRequest.bankTransactions.push(transactionData);
+        
+        // Update the receivedAmount
+        pendingRequest.receivedAmount = creditAmount;
+
         // Update the request
         pendingRequest.status = 'Completed';
         pendingRequest.completedAt = new Date();
         pendingRequest.details.bankReference = transId;
         pendingRequest.details.autoProcessed = true;
         pendingRequest.details.cassoProcessed = true;
-        pendingRequest.details.actualAmount = creditAmount;
         
         await pendingRequest.save({ session });
 

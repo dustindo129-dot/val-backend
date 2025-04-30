@@ -15,6 +15,11 @@ const topUpRequestSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  receivedAmount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   balance: {
     type: Number,
     required: true,
@@ -37,9 +42,7 @@ const topUpRequestSchema = new mongoose.Schema({
   details: {
     type: mongoose.Schema.Types.Mixed,
     required: true,
-    default: {
-      actualAmount: 0
-    }
+    default: {}
   },
   status: {
     type: String,
@@ -55,7 +58,17 @@ const topUpRequestSchema = new mongoose.Schema({
   },
   completedAt: {
     type: Date
-  }
+  },
+  bankTransactions: [{
+    transactionId: String,
+    amount: Number,
+    description: String,
+    date: Date,
+    matched: {
+      type: Boolean,
+      default: false
+    }
+  }]
 }, {
   timestamps: true
 });
@@ -64,6 +77,7 @@ const topUpRequestSchema = new mongoose.Schema({
 topUpRequestSchema.index({ user: 1, createdAt: -1 });
 topUpRequestSchema.index({ status: 1 });
 topUpRequestSchema.index({ paymentMethod: 1 });
+topUpRequestSchema.index({ 'details.transferContent': 1 });
 
 const TopUpRequest = mongoose.model('TopUpRequest', topUpRequestSchema);
 
