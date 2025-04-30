@@ -813,4 +813,138 @@ router.post('/:id/bookmark', auth, async (req, res) => {
   }
 });
 
+/**
+ * Get full chapter data with all related information
+ * @route GET /api/chapters/:id/full
+ */
+router.get('/:id/full', async (req, res) => {
+  try {
+    const chapterId = req.params.id;
+    const userId = req.user ? req.user._id : null;
+    
+    // Fetch chapter with novel info and navigation data (existing aggregation)
+    const chapter = await Chapter.aggregate([
+      { '$match': { _id: new mongoose.Types.ObjectId(chapterId) } },
+      { '$lookup': { 
+          from: 'novels', 
+          localField: 'novelId', 
+          foreignField: '_id', 
+          pipeline: [ { '$project': { title: 1, illustration: 1 } } ], 
+          as: 'novel' 
+      }},
+      { '$lookup': { 
+          from: 'chapters', 
+          let: { moduleId: '$moduleId', currentOrder: '$order', chapterId: '$_id' }, 
+          pipeline: [ 
+            { '$match': { 
+                '$expr': { '$and': [ 
+                  { '$eq': [ '$moduleId', '$$moduleId' ] }, 
+                  { '$ne': [ '$_id', '$$chapterId' ] } 
+                ]} 
+            }}, 
+            { '$project': { _id: 1, title: 1, order: 1 } }, 
+            { '$sort': { order: 1 } } 
+          ], 
+          as: 'siblingChapters' 
+      }},
+      { '$addFields': { 
+          novel: { '$arrayElemAt': [ '$novel', 0 ] },
+          prevChapter: { 
+            '$let': { 
+              vars: { 
+                prevChapters: { 
+                  '$filter': { 
+                    input: '$siblingChapters', 
+                    as: 'sibling', 
+                    cond: { '$lt': [ '$$sibling.order', '$order' ] } 
+                  } 
+                } 
+              }, 
+              in: { '$arrayElemAt': [ { '$sortArray': { input: '$$prevChapters', sortBy: { order: -1 } } }, 0 ] } 
+            } 
+          },
+          nextChapter: { 
+            '$let': { 
+              vars: { 
+                nextChapters: { 
+                  '$filter': { 
+                    input: '$siblingChapters', 
+                    as: 'sibling', 
+                    cond: { '$gt': [ '$$sibling.order', '$order' ] } 
+                  } 
+                } 
+              }, 
+              in: { '$arrayElemAt': [ { '$sortArray': { input: '$$nextChapters', sortBy: { order: 1 } } }, 0 ] } 
+            } 
+          } 
+      }},
+      { '$project': { siblingChapters: 0 } }
+    ]);
+
+    if (!chapter.length) {
+      return res.status(404).json({ message: 'Chapter not found' });
+    }
+
+    // Get interaction statistics
+    const [stats] = await UserChapterInteraction.aggregate([
+      {
+        $match: { chapterId: new mongoose.Types.ObjectId(chapterId) }
+      },
+      {
+        $group: {
+          _id: null,
+          totalLikes: {
+            $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
+          },
+          totalRatings: {
+            $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
+          },
+          ratingSum: {
+            $sum: { $ifNull: ['$rating', 0] }
+          }
+        }
+      }
+    ]);
+
+    // Default stats values if none exist
+    const interactions = {
+      totalLikes: stats?.totalLikes || 0,
+      totalRatings: stats?.totalRatings || 0,
+      averageRating: stats?.totalRatings > 0 
+        ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
+        : '0.0',
+      userInteraction: {
+        liked: false,
+        rating: null,
+        bookmarked: false
+      }
+    };
+
+    // Add user-specific interaction data if user is logged in
+    if (userId) {
+      const userInteraction = await UserChapterInteraction.findOne({ 
+        userId, 
+        chapterId: new mongoose.Types.ObjectId(chapterId) 
+      });
+      
+      if (userInteraction) {
+        interactions.userInteraction = {
+          liked: userInteraction.liked || false,
+          rating: userInteraction.rating || null,
+          bookmarked: userInteraction.bookmarked || false
+        };
+      }
+    }
+
+    // Combine everything into a single response
+    res.json({
+      chapter: chapter[0],
+      interactions
+    });
+  } catch (err) {
+    console.error('Error getting full chapter data:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 export default router; 
