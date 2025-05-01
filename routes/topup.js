@@ -12,6 +12,9 @@ import { createTransaction } from './userTransaction.js';
 
 const router = express.Router();
 
+// Set expiration time for pending requests (30 minutes)
+const PENDING_REQUEST_EXPIRY_TIME = 30 * 60 * 1000; // 30 minutes in milliseconds
+
 /**
  * User-initiated top-up request
  * @route POST /api/topup/request
@@ -36,7 +39,8 @@ router.post('/request', auth, async (req, res) => {
       balance,
       bonus: 0, // Set bonus to 0 for all requests
       paymentMethod,
-      status: 'Pending'
+      status: 'Pending',
+      expiresAt: new Date(Date.now() + PENDING_REQUEST_EXPIRY_TIME) // Set expiration time
     });
     
     // Handle different payment methods
@@ -278,6 +282,34 @@ router.post('/request', auth, async (req, res) => {
  */
 router.get('/pending', auth, async (req, res) => {
   try {
+    // Get current time
+    const now = new Date();
+    
+    // Find expired pending requests and update their status
+    const expiredRequests = await TopUpRequest.find({
+      user: req.user._id,
+      status: 'Pending',
+      expiresAt: { $lt: now }
+    });
+    
+    // Update expired requests if any found
+    if (expiredRequests.length > 0) {
+      const expiredIds = expiredRequests.map(req => req._id);
+      
+      await TopUpRequest.updateMany(
+        { _id: { $in: expiredIds } },
+        { 
+          $set: { 
+            status: 'Cancelled',
+            notes: 'Automatically cancelled due to expiration'
+          }
+        }
+      );
+      
+      console.log(`Cancelled ${expiredRequests.length} expired top-up requests`);
+    }
+    
+    // Get remaining pending requests
     const pendingRequests = await TopUpRequest.find({
       user: req.user._id,
       status: 'Pending'
@@ -292,7 +324,8 @@ router.get('/pending', auth, async (req, res) => {
         bonus: request.bonus,
         paymentMethod: request.paymentMethod,
         status: request.status,
-        createdAt: request.createdAt
+        createdAt: request.createdAt,
+        expiresAt: request.expiresAt
       };
       
       // Add payment method specific details

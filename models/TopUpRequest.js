@@ -59,6 +59,9 @@ const topUpRequestSchema = new mongoose.Schema({
   completedAt: {
     type: Date
   },
+  expiresAt: {
+    type: Date
+  },
   bankTransactions: [{
     transactionId: String,
     amount: Number,
@@ -78,6 +81,7 @@ topUpRequestSchema.index({ user: 1, createdAt: -1 });
 topUpRequestSchema.index({ status: 1 });
 topUpRequestSchema.index({ paymentMethod: 1 });
 topUpRequestSchema.index({ 'details.transferContent': 1 });
+topUpRequestSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const TopUpRequest = mongoose.model('TopUpRequest', topUpRequestSchema);
 
