@@ -9,6 +9,8 @@ import UserNovelInteraction from '../models/UserNovelInteraction.js';
 import { addClient, removeClient } from '../services/sseService.js';
 import Request from '../models/Request.js';
 import Contribution from '../models/Contribution.js';
+import { createNovelTransaction } from '../routes/novelTransactions.js';
+import mongoose from 'mongoose';
 
 const router = express.Router();
 
@@ -354,7 +356,8 @@ router.get("/", async (req, res) => {
                 description: 1,
                 note: 1,
                 active: 1,
-                inactive: 1
+                inactive: 1,
+                novelBalance: 1
               }
             },
             // Lookup latest chapters for display
@@ -801,44 +804,61 @@ router.delete("/:id/chapters/:chapterId", auth, async (req, res) => {
 });
 
 /**
- * Update a novel's balance without affecting updatedAt timestamp
+ * Update novel balance
  * @route PATCH /api/novels/:id/balance
  */
 router.patch("/:id/balance", auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
   try {
     // Verify user is admin
     if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: "Only admins can update novel balance" });
+      return res.status(403).json({ message: 'Only admins can update novel balance' });
     }
-
-    const { novelBalance } = req.body;
     
-    // Validate balance
-    if (novelBalance === undefined || isNaN(novelBalance) || novelBalance < 0) {
-      return res.status(400).json({ message: "Valid novel balance is required" });
+    const { novelBalance } = req.body;
+    const novelId = req.params.id;
+    
+    if (isNaN(novelBalance)) {
+      return res.status(400).json({ message: 'Invalid balance value' });
     }
-
-    // Find the novel and update only the novelBalance
-    // Use { timestamps: false } option to prevent updating the timestamps
-    const novel = await Novel.findByIdAndUpdate(
-      req.params.id,
-      { $set: { novelBalance: Number(novelBalance) } },
-      { new: true, timestamps: false }
-    );
-
+    
+    // Find novel first to get current balance
+    const novel = await Novel.findById(novelId).session(session);
     if (!novel) {
-      return res.status(404).json({ message: "Novel not found" });
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Novel not found' });
     }
-
-    // Return the updated novel
-    res.json({ 
-      _id: novel._id,
-      title: novel.title,
-      novelBalance: novel.novelBalance 
-    });
-  } catch (err) {
-    console.error("Error updating novel balance:", err);
-    res.status(500).json({ message: err.message });
+    
+    const oldBalance = novel.novelBalance || 0;
+    const change = novelBalance - oldBalance;
+    
+    // Update novel balance
+    const updatedNovel = await Novel.findByIdAndUpdate(
+      novelId,
+      { novelBalance },
+      { new: true, session }
+    );
+    
+    // Record transaction
+    await createNovelTransaction({
+      novel: novelId,
+      amount: change,
+      type: 'admin',
+      description: 'Admin điều chỉnh số dư thủ công',
+      balanceAfter: novelBalance,
+      performedBy: req.user._id
+    }, session);
+    
+    await session.commitTransaction();
+    res.json(updatedNovel);
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Error updating novel balance:', error);
+    res.status(500).json({ message: 'Lỗi máy chủ' });
+  } finally {
+    session.endSession();
   }
 });
 

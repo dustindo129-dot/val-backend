@@ -42,6 +42,7 @@ import contributionRoutes from './routes/contributions.js';
 import topupAdminRoutes from './routes/topupAdmin.js';
 import webhookRoutes from './routes/webhook.js';
 import userTransactionRoutes from './routes/userTransaction.js';
+import novelTransactionRoutes from './routes/novelTransactions.js';
 import { initScheduler } from './scheduler.js';
 
 // Configure ES modules __dirname equivalent
@@ -206,6 +207,7 @@ app.use('/api/contributions', contributionRoutes); // Contribution endpoints
 app.use('/api/topup-admin', topupAdminRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/transactions', userTransactionRoutes); // User transaction endpoints
+app.use('/api/novel-transactions', novelTransactionRoutes); // Novel transaction endpoints
 
 // Health check endpoint
 app.get('/health', (req, res) => {

@@ -4,6 +4,7 @@ import Request from '../models/Request.js';
 import User from '../models/User.js';
 import mongoose from 'mongoose';
 import { createTransaction } from './userTransaction.js';
+import { createNovelTransaction } from './novelTransactions.js';
 
 const router = express.Router();
 
@@ -27,8 +28,13 @@ router.get('/', async (req, res) => {
       sortCriteria = { createdAt: -1 };
     }
     
-    // Query requests with status pending and populate user and novel
-    const requests = await Request.find({ status: 'pending' })
+    // Query both pending requests and approved web requests
+    const requests = await Request.find({ 
+      $or: [
+        { status: 'pending' },
+        { type: 'web', status: 'approved' }
+      ]
+    })
       .populate('user', 'username avatar role')
       .populate('novel', 'title _id')
       .populate('module', 'title _id')
@@ -59,22 +65,22 @@ router.post('/', auth, async (req, res) => {
   session.startTransaction();
   
   try {
-    const { type, text, novelId, moduleId, chapterId, deposit, note, autoApproveWebRecommendation } = req.body;
+    const { type, title, novelId, moduleId, chapterId, deposit, note, openNow, goalBalance } = req.body;
     
-    // Validate deposit amount
-    if (!deposit || isNaN(deposit) || deposit <= 0) {
+    // Validate deposit amount (except for web requests which use goalBalance)
+    if (type !== 'web' && (!deposit || isNaN(deposit) || deposit <= 0)) {
       return res.status(400).json({ message: 'Invalid deposit amount' });
     }
     
-    // Find user and check balance
+    // Find user
     const user = await User.findById(req.user._id).session(session);
     if (!user) {
       await session.abortTransaction();
       return res.status(404).json({ message: 'User not found' });
     }
     
-    // Validate user has enough balance
-    if (user.balance < deposit) {
+    // Validate user has enough balance (skip for web requests)
+    if (type !== 'web' && user.balance < deposit) {
       await session.abortTransaction();
       return res.status(400).json({ message: 'Insufficient balance' });
     }
@@ -83,93 +89,209 @@ router.post('/', auth, async (req, res) => {
     const requestData = {
       user: req.user._id,
       type,
-      text: text || "", // Provide default empty string if text is not provided
-      deposit
+      title: title || "", // Provide default empty string if title is not provided
+      deposit: type === 'web' ? 0 : deposit // Web requests start with 0 deposit
     };
+    
+    // Add goal balance for web requests
+    if (type === 'web' && goalBalance) {
+      requestData.goalBalance = goalBalance;
+    }
     
     // Add note if provided
     if (note) {
       requestData.note = note;
     }
     
-    // Add novel reference if request type is 'open'
-    if (type === 'open') {
+    // Add novel reference for open and web requests
+    if (type === 'open' || type === 'web') {
       if (!novelId) {
         await session.abortTransaction();
-        return res.status(400).json({ message: 'Novel ID is required for open requests' });
+        return res.status(400).json({ message: 'Novel ID is required for open and web requests' });
       }
       requestData.novel = novelId;
       
-      // Add module and chapter if provided
-      if (moduleId) {
+      // Add module and chapter if provided (for open requests)
+      if (type === 'open' && moduleId) {
         requestData.module = moduleId;
       }
       
-      if (chapterId) {
+      if (type === 'open' && chapterId) {
         requestData.chapter = chapterId;
       }
     }
     
-    // Handle web recommendations with auto-approval
-    if (autoApproveWebRecommendation && user.role === 'admin') {
-      requestData.status = 'approved'; // Auto-approve web recommendations by admin
+    // Auto-approve all open requests and web recommendations from admins
+    if (type === 'open' || (type === 'web' && user.role === 'admin')) {
+      requestData.status = 'approved';
+      
+      if (type === 'open') {
+        requestData.openNow = true;
+      }
     }
     
     // Create request
     const newRequest = new Request(requestData);
     await newRequest.save({ session });
     
-    // Store old balance for transaction record
-    const oldBalance = user.balance;
+    // Only deduct deposit for non-web requests
+    if (type !== 'web') {
+      // Store old balance for transaction record
+      const oldBalance = user.balance;
+      
+      // Deduct deposit from user balance
+      user.balance -= deposit;
+      await user.save({ session });
+      
+      // Record the transaction in UserTransaction ledger
+      let description;
+      if (type === 'open') {
+        description = 'Yêu cầu mở chương truyện';
+      } else if (type === 'new') {
+        description = 'Yêu cầu truyện mới';
+      }
+      
+      await createTransaction({
+        userId: user._id,
+        amount: -deposit, // Negative amount for deductions
+        type: 'request',
+        description,
+        sourceId: newRequest._id,
+        sourceModel: 'Request',
+        performedById: null, // User initiated
+        balanceAfter: user.balance
+      }, session);
+    }
     
-    // Deduct deposit from user balance
-    user.balance -= deposit;
-    await user.save({ session });
+    // Process auto-approved open requests
+    let refundAmount = 0;
     
-    // Record the transaction in UserTransaction ledger
-    const description = type === 'open' 
-      ? `Yêu cầu mở chương truyện` 
-      : `Yêu cầu truyện mới`;
-    
-    await createTransaction({
-      userId: user._id,
-      amount: -deposit, // Negative amount for deductions
-      type: 'request',
-      description,
-      sourceId: newRequest._id,
-      sourceModel: 'Request',
-      performedById: null, // User initiated
-      balanceAfter: user.balance
-    }, session);
-    
-    // If this is an auto-approved web recommendation, add deposit to novel balance
-    if (autoApproveWebRecommendation && user.role === 'admin' && type === 'open' && novelId) {
+    if (type === 'open') {
       const Novel = mongoose.model('Novel');
-      await Novel.findByIdAndUpdate(
-        novelId,
-        { $inc: { novelBalance: deposit } },
-        { session }
-      );
+      
+      if (moduleId) {
+        // Process module opening
+        const Module = mongoose.model('Module');
+        const module = await Module.findById(moduleId).session(session);
+        
+        if (module) {
+          if (deposit > module.moduleBalance) {
+            refundAmount = deposit - module.moduleBalance;
+          }
+          
+          // Update module mode to "published" if balance will be 0 after this transaction
+          const newMode = module.moduleBalance <= deposit ? 'published' : 'paid';
+          const newBalance = Math.max(0, module.moduleBalance - deposit);
+          
+          // Update module
+          await Module.findByIdAndUpdate(
+            moduleId,
+            {
+              mode: newMode,
+              moduleBalance: newBalance
+            },
+            { session }
+          );
+        }
+      } else if (chapterId) {
+        // Process chapter opening
+        const Chapter = mongoose.model('Chapter');
+        const chapter = await Chapter.findById(chapterId).session(session);
+        
+        if (chapter) {
+          if (deposit > chapter.chapterBalance) {
+            refundAmount = deposit - chapter.chapterBalance;
+          }
+          
+          // Update chapter mode to "published" if balance will be 0 after this transaction
+          const newMode = chapter.chapterBalance <= deposit ? 'published' : 'paid';
+          const newBalance = Math.max(0, chapter.chapterBalance - deposit);
+          
+          // Update chapter
+          await Chapter.findByIdAndUpdate(
+            chapterId,
+            {
+              mode: newMode, 
+              chapterBalance: newBalance
+            },
+            { session }
+          );
+        }
+      }
+      
+      // Update novel balance with the appropriate amount (deposit minus any refund)
+      const effectiveDeposit = deposit - refundAmount;
+      if (effectiveDeposit > 0) {
+        // Get current novel balance for transaction record
+        const novel = await Novel.findById(novelId).session(session);
+        const oldBalance = novel ? (novel.novelBalance || 0) : 0;
+        const newBalance = oldBalance + effectiveDeposit;
+        
+        await Novel.findByIdAndUpdate(
+          novelId,
+          { $inc: { novelBalance: effectiveDeposit } },
+          { session }
+        );
+        
+        // Create novel transaction record
+        await createNovelTransaction({
+          novel: novelId,
+          amount: effectiveDeposit,
+          type: 'open',
+          description: `Yêu cầu mở chương/tập tự động xử lí. Deposit: ${deposit}, Refunded: ${refundAmount}`,
+          balanceAfter: newBalance,
+          sourceId: newRequest._id,
+          sourceModel: 'Request',
+          performedBy: req.user._id
+        }, session);
+      }
+      
+      // Process refund if needed
+      if (refundAmount > 0) {
+        // Add refund to user balance
+        user.balance += refundAmount;
+        await user.save({ session });
+        
+        // Record refund transaction
+        await createTransaction({
+          userId: user._id,
+          amount: refundAmount,
+          type: 'refund',
+          description: 'Hoàn trả số dư sau khi mở chương/tập',
+          sourceId: newRequest._id,
+          sourceModel: 'Request',
+          performedById: null,
+          balanceAfter: user.balance
+        }, session);
+      }
+    } else if (type === 'web' && user.role === 'admin') {
+      // For admin web recommendations, we don't add to novel balance - that happens via contributions
     }
     
     // Populate user and novel data before sending response
     await newRequest.populate('user', 'username avatar role');
-    if (type === 'open') {
+    if (type === 'open' || type === 'web') {
       await newRequest.populate('novel', 'title _id');
       
-      // Populate module and chapter if they exist
-      if (moduleId) {
+      // Populate module and chapter if they exist (for open requests)
+      if (type === 'open' && moduleId) {
         await newRequest.populate('module', 'title _id');
       }
       
-      if (chapterId) {
+      if (type === 'open' && chapterId) {
         await newRequest.populate('chapter', 'title _id');
       }
     }
     
     await session.commitTransaction();
     
-    res.status(201).json(newRequest);
+    // Add refund information to response if applicable
+    const response = { ...newRequest.toObject() };
+    if (refundAmount > 0) {
+      response.refundAmount = refundAmount;
+    }
+    
+    res.status(201).json(response);
   } catch (error) {
     await session.abortTransaction();
     console.error('Failed to create request:', error);
@@ -252,56 +374,78 @@ router.post('/:requestId/approve', auth, async (req, res) => {
       return res.status(400).json({ message: 'Request has already been processed' });
     }
     
-    // Update request status
+    // We only process 'new' type requests here since 'open' requests are auto-processed
+    if (request.type !== 'new') {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'This request type cannot be approved manually' });
+    }
+    
+    // New constraint: Check if a novel with matching title already exists
+    const Novel = mongoose.model('Novel');
+    const matchingNovel = await Novel.findOne({ title: request.title }).session(session);
+    
+    if (!matchingNovel) {
+      await session.abortTransaction();
+      return res.status(400).json({ 
+        message: 'Không thể phê duyệt: Truyện phải được tạo trước với tên trùng khớp với yêu cầu',
+        needsNovel: true 
+      });
+    }
+    
+    // Get all approved contributions for this request
+    const Contribution = mongoose.model('Contribution');
+    const contributions = await Contribution.find({ 
+      request: request._id,
+      status: 'approved' 
+    }).session(session);
+    
+    const totalContributions = contributions.reduce((sum, contribution) => sum + contribution.amount, 0);
+    
+    // Update novel balance with deposit + approved contributions
+    const totalAmount = request.deposit + totalContributions;
+    const oldBalance = matchingNovel.novelBalance || 0;
+    const newBalance = oldBalance + totalAmount;
+    
+    await Novel.findByIdAndUpdate(
+      matchingNovel._id, 
+      { $inc: { novelBalance: totalAmount } },
+      { session }
+    );
+    
+    // Create novel transaction record
+    await createNovelTransaction({
+      novel: matchingNovel._id,
+      amount: totalAmount,
+      type: 'request',
+      description: `Yêu cầu truyện mới được admin chấp nhận. Deposit: ${request.deposit}, Contributions: ${totalContributions}`,
+      balanceAfter: newBalance,
+      sourceId: request._id,
+      sourceModel: 'Request',
+      performedBy: req.user._id
+    }, session);
+    
+    // Update request status and link to the novel
     request.status = 'approved';
+    request.novel = matchingNovel._id;
     await request.save({ session });
     
-    // Handle deposit based on request type
-    if (request.type === 'open' && request.novel) {
-      // For chapter opening requests, add deposit to novel balance
-      const Novel = mongoose.model('Novel');
-      await Novel.findByIdAndUpdate(
-        request.novel._id,
-        { $inc: { novelBalance: request.deposit } },
-        { session }
-      );
-      
-      // Record the transaction in UserTransaction ledger - no balance change since deposit was already deducted
-      await createTransaction({
-        userId: request.user,
-        amount: 0, // No balance change as deposit was already deducted when request was created
-        type: 'request',
-        description: `Yêu cầu mở chương được admin chấp nhận`,
-        sourceId: request._id,
-        sourceModel: 'Request',
-        performedById: req.user._id, // Admin initiated
-        balanceAfter: (await User.findById(request.user).session(session)).balance || 0
-      }, session);
-      
-      await session.commitTransaction();
-      res.json({ 
-        message: 'Request approved successfully. Deposit added to novel balance.',
-        novelId: request.novel._id,
-        novelBalance: (request.novel.novelBalance || 0) + request.deposit
-      });
-    } else {
-      // For new novel requests, deposit is kept (not returned to user)
-      
-      // Record the transaction in UserTransaction ledger - no balance change since deposit was already deducted
-      await createTransaction({
-        userId: request.user,
-        amount: 0, // No balance change as deposit was already deducted when request was created
-        type: 'request',
-        description: `Yêu cầu truyện mới được admin chấp nhận`,
-        sourceId: request._id,
-        sourceModel: 'Request',
-        performedById: req.user._id, // Admin initiated
-        balanceAfter: (await User.findById(request.user).session(session)).balance || 0
-      }, session);
-      
-      await session.commitTransaction();
-      res.json({ message: 'Request approved successfully' });
-    }
+    // Record the transaction in UserTransaction ledger - no balance change since deposit was already deducted
+    await createTransaction({
+      userId: request.user,
+      amount: 0, // No balance change as deposit was already deducted when request was created
+      type: 'request',
+      description: `Yêu cầu truyện mới được admin chấp nhận, ${totalAmount} 🌾 đã được chuyển vào truyện`,
+      sourceId: request._id,
+      sourceModel: 'Request',
+      performedById: req.user._id, // Admin initiated
+      balanceAfter: (await User.findById(request.user).session(session)).balance || 0
+    }, session);
+    
+    await session.commitTransaction();
+    res.json({ 
+      message: 'Yêu cầu đã được phê duyệt thành công và 🌾 đã được chuyển cho truyện',
+      novelId: matchingNovel._id 
+    });
   } catch (error) {
     await session.abortTransaction();
     console.error('Failed to approve request:', error);

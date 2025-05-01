@@ -13,10 +13,10 @@ const requestSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['new', 'open'],
+    enum: ['new', 'open', 'web'],
     required: true
   },
-  text: {
+  title: {
     type: String,
     trim: true
   },
@@ -28,7 +28,7 @@ const requestSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Novel',
     required: function() {
-      return this.type === 'open';
+      return this.type === 'open' || this.type === 'web';
     }
   },
   module: {
@@ -44,10 +44,19 @@ const requestSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  goalBalance: {
+    type: Number,
+    default: 10000,
+    min: 0
+  },
   status: {
     type: String,
     enum: ['pending', 'approved', 'declined'],
     default: 'pending'
+  },
+  openNow: {
+    type: Boolean,
+    default: false
   },
   likes: [{
     type: mongoose.Schema.Types.ObjectId,
