@@ -46,7 +46,7 @@ const requestSchema = new mongoose.Schema({
   },
   goalBalance: {
     type: Number,
-    default: 10000,
+    default: 1000,
     min: 0
   },
   status: {

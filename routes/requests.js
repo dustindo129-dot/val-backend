@@ -664,4 +664,31 @@ router.get('/history', auth, async (req, res) => {
   }
 });
 
+/**
+ * Delete a request (admin only)
+ * @route DELETE /api/requests/:requestId
+ */
+router.delete('/:requestId', auth, async (req, res) => {
+  try {
+    // Verify user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Chỉ admin mới có thể xóa yêu cầu' });
+    }
+    
+    const { requestId } = req.params;
+    
+    // Find and delete the request
+    const request = await Request.findByIdAndDelete(requestId);
+    
+    if (!request) {
+      return res.status(404).json({ message: 'Yêu cầu không tồn tại' });
+    }
+    
+    res.json({ message: 'Yêu cầu đã được xóa thành công' });
+  } catch (error) {
+    console.error('Failed to delete request:', error);
+    res.status(500).json({ message: 'Lỗi khi xóa yêu cầu' });
+  }
+});
+
 export default router; 
