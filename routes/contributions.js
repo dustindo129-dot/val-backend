@@ -30,8 +30,9 @@ router.post('/', auth, async (req, res) => {
       return res.status(404).json({ message: 'Request not found' });
     }
     
-    // Verify request is still pending
-    if (request.status !== 'pending') {
+    // Verify request is still pending or is a web request that's approved
+    // Web requests from translation team can receive contributions even when approved
+    if (request.status !== 'pending' && !(request.type === 'web' && request.status === 'approved')) {
       await session.abortTransaction();
       return res.status(400).json({ message: 'Cannot contribute to a processed request' });
     }
