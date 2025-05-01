@@ -422,8 +422,8 @@ router.get('/pricing', async (req, res) => {
       { price: 12000, balance: 100, note: "Chỉ với 12.000đ mỗi tháng bạn sẽ không bao giờ thấy bất kì quảng cáo nào trên page trong cuộc đời này" },
       { price: 20000, balance: 200, note: "Gói bình dân hạt dẻ" },
       { price: 50000, balance: 550, note: "Thêm tí bonus gọi là" },
-      { price: 250000, balance: 2800, note: "Với gói này phú hào có thể unlock ngay một tập truyện dịch từ Eng" },
-      { price: 350000, balance: 4000, note: "Với gói này đại gia đủ sức bao trọn một tập truyện bất kì dịch từ Jap" }
+      { price: 250000, balance: 2800, note: "Với gói này phú hào có thể unlock ngay một tập truyện dịch từ ngôn ngữ Anh/Trung" },
+      { price: 350000, balance: 4000, note: "Với gói này đại gia đủ sức bao trọn một tập truyện bất kì dịch từ ngôn ngữ Nhật" }
     ];
     
     res.json(pricingOptions);
@@ -503,28 +503,73 @@ router.post('/process-bank-transfer', async (req, res) => {
         continue;
       }
 
-      // Extract the transfer content using regex to find an 8-character alphanumeric string
-      const transferContentRegex = /[a-zA-Z0-9]{8}/g;
-      const matches = description.match(transferContentRegex);
+      // Extract the transfer content using regex to find isolated 8-character alphanumeric strings
+      // Look for 8-character alphanumeric strings that are surrounded by delimiters or at start/end
+      const transferContentRegex = /(^|[^a-zA-Z0-9])([a-zA-Z0-9]{8})([^a-zA-Z0-9]|$)/g;
+      let matches = [];
+      let match;
+      
+      // Extract all potential matches
+      while ((match = transferContentRegex.exec(description)) !== null) {
+        matches.push(match[2]); // The actual match is in the 2nd capture group
+      }
+      
+      // If no matches found with delimiter approach, fallback to simple 8-char detection
+      if (matches.length === 0) {
+        const simpleRegex = /[a-zA-Z0-9]{8}/g;
+        matches = description.match(simpleRegex) || [];
+      }
       
       let actualTransferContent = '';
       
       if (matches && matches.length > 0) {
-        // First try to find a match with our specific pattern (mix of uppercase and lowercase letters with numbers)
-        const idealPattern = /^[A-Za-z0-9]{8}$/;
-        const bestMatch = matches.find(match => 
-          idealPattern.test(match) && 
-          /[A-Z]/.test(match) && // Has at least one uppercase letter
-          /[0-9]/.test(match)    // Has at least one number
+        // Prioritize matches that have mixed case and numbers
+        const idealMatch = matches.find(m => 
+          /[a-z]/.test(m) && 
+          /[A-Z]/.test(m) && 
+          /[0-9]/.test(m)
         );
         
-        actualTransferContent = bestMatch || matches[0];
+        // If no ideal match, use the last match as fallback
+        actualTransferContent = idealMatch || matches[matches.length - 1];
         
         console.log(`Found potential transfer content: ${actualTransferContent} from description: ${description}`);
       } else {
         // Fallback to the old method if no 8-char codes found
         actualTransferContent = description.split('-').pop();
         console.log(`Using fallback method, extracted: ${actualTransferContent} from: ${description}`);
+      }
+      
+      // Additional fallback: Check if any 8-character sequence matches an existing transfer content
+      if (!actualTransferContent || actualTransferContent.length !== 8) {
+        try {
+          // Find all pending bank transfer requests to match against their transfer contents
+          const pendingRequests = await TopUpRequest.find({
+            'paymentMethod': 'bank',
+            'status': 'Pending'
+          }).select('details.transferContent').lean();
+          
+          // Extract all transfer contents to match against
+          const existingTransferContents = pendingRequests
+            .map(req => req.details?.transferContent)
+            .filter(Boolean);
+          
+          if (existingTransferContents.length > 0) {
+            console.log(`Checking for matches against ${existingTransferContents.length} existing transfer contents`);
+            
+            // Check if any part of the description matches an existing transfer content
+            const foundMatch = existingTransferContents.find(transferContent => 
+              description.includes(transferContent) && transferContent.length === 8
+            );
+            
+            if (foundMatch) {
+              actualTransferContent = foundMatch;
+              console.log(`Found exact match with existing transfer content: ${actualTransferContent}`);
+            }
+          }
+        } catch (err) {
+          console.error('Error checking for existing transfer content matches:', err);
+        }
       }
 
       // Check if this transaction has already been processed (idempotency)
