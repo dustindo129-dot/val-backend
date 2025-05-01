@@ -2,6 +2,7 @@ import express from 'express';
 import { auth } from '../middleware/auth.js';
 import User from '../models/User.js';
 import TopUpRequest from '../models/TopUpRequest.js';
+import TransactionInfo from '../models/TransactionInfo.js';
 import mongoose from 'mongoose';
 import { createMomoPayment, createZaloPayPayment } from '../integrations/ewallet.js';
 import { validatePrepaidCard } from '../integrations/cardProvider.js';
@@ -111,6 +112,68 @@ router.post('/request', auth, async (req, res) => {
       
       // Save the request
       await topUpRequest.save({ session });
+      
+      // Check for unmatched transactions that can now be matched
+      const unmatched = await TransactionInfo.findOne({ 
+        extractedContent: transferContent,
+        processed: false
+      });
+      
+      if (unmatched) {
+        console.log(`Found matching unprocessed transaction for new request: ${unmatched.transactionId}`);
+        
+        // Create transaction data format
+        const transactionData = {
+          transactionId: unmatched.transactionId,
+          amount: unmatched.amount,
+          description: unmatched.description,
+          date: unmatched.date,
+          matched: true
+        };
+        
+        // Mark transaction as processed
+        unmatched.processed = true;
+        await unmatched.save({ session });
+        
+        // Update the request with transaction info
+        topUpRequest.bankTransactions.push(transactionData);
+        topUpRequest.receivedAmount = unmatched.amount;
+        topUpRequest.status = 'Completed';
+        topUpRequest.completedAt = new Date();
+        topUpRequest.details.bankReference = unmatched.transactionId;
+        topUpRequest.details.autoProcessed = true;
+        
+        await topUpRequest.save({ session });
+        
+        // Update user balance
+        await User.findByIdAndUpdate(
+          req.user._id,
+          { $inc: { balance: topUpRequest.balance } },
+          { session }
+        );
+        
+        // Record in transaction ledger
+        await createTransaction({
+          userId: req.user._id,
+          amount: topUpRequest.balance,
+          type: 'topup',
+          description: `Nạp tiền qua chuyển khoản ngân hàng (tự động - khớp với giao dịch trước đó)`,
+          sourceId: topUpRequest._id,
+          sourceModel: 'TopUpRequest',
+          performedById: null, // Automatic process
+          balanceAfter: req.user.balance + topUpRequest.balance
+        }, session);
+        
+        await session.commitTransaction();
+        
+        return res.status(200).json({ 
+          message: 'Đã tìm thấy giao dịch chuyển khoản khớp với mã của bạn. Tài khoản đã được cập nhật.',
+          requestId: topUpRequest._id,
+          status: 'Completed',
+          balanceAdded: topUpRequest.balance
+        });
+      }
+      
       await session.commitTransaction();
       
       return res.status(200).json({ 
@@ -498,6 +561,28 @@ router.post('/process-bank-transfer', async (req, res) => {
       if (!pendingRequest) {
         console.log(`Unmatched bank transfer: ${description}, amount: ${creditAmount}, transaction: ${transId}`);
         
+        // Store unmatched transaction for future matching
+        try {
+          await TransactionInfo.create({
+            transactionId: transId,
+            description: description,
+            extractedContent: actualTransferContent,
+            amount: creditAmount,
+            bankName: transaction.bankName || 'Unknown',
+            bankAccount: bank_sub_acc_id,
+            date: new Date(transaction.when || Date.now())
+          });
+          
+          console.log(`Stored unmatched transaction ${transId} with reference ${actualTransferContent} for future matching`);
+        } catch (err) {
+          // Handle duplicate transaction ID (idempotency)
+          if (err.code === 11000) {
+            console.log(`Transaction ${transId} already stored`);
+          } else {
+            console.error(`Error storing unmatched transaction: ${err.message}`);
+          }
+        }
+        
         // Try to find any request with this transfer content, even if status isn't Pending
         const anyRequest = await TopUpRequest.findOne({
           'details.transferContent': actualTransferContent,
@@ -521,7 +606,7 @@ router.post('/process-bank-transfer', async (req, res) => {
           results.push({
             transId,
             status: 'pending_review',
-            message: 'No matching topup request found'
+            message: 'No matching topup request found, stored for future matching'
           });
         }
         continue;
@@ -625,6 +710,137 @@ router.post('/process-bank-transfer', async (req, res) => {
   } catch (error) {
     console.error('Casso webhook processing error:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+/**
+ * Get unmatched transactions
+ * @route GET /api/topup/unmatched-transactions
+ * @description Admin endpoint to get unmatched transactions
+ */
+router.get('/unmatched-transactions', auth, async (req, res) => {
+  // Ensure user is an admin
+  if (!req.user.role || req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Unauthorized' });
+  }
+  
+  try {
+    const unmatched = await TransactionInfo.find({ processed: false })
+      .sort({ date: -1 });
+    
+    res.json(unmatched);
+  } catch (error) {
+    console.error('Failed to fetch unmatched transactions:', error);
+    res.status(500).json({ message: 'Failed to fetch unmatched transactions' });
+  }
+});
+
+/**
+ * Manually process an unmatched transaction
+ * @route POST /api/topup/process-unmatched/:transactionId
+ * @description Admin endpoint to manually process an unmatched transaction
+ */
+router.post('/process-unmatched/:transactionId', auth, async (req, res) => {
+  // Ensure user is an admin
+  if (!req.user.isAdmin) {
+    return res.status(403).json({ message: 'Unauthorized' });
+  }
+  
+  const { userId, amount, balance } = req.body;
+  const { transactionId } = req.params;
+  
+  if (!userId || !amount || !balance) {
+    return res.status(400).json({ message: 'Missing required fields' });
+  }
+  
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    // Find the unmatched transaction
+    const transaction = await TransactionInfo.findOne({ 
+      transactionId,
+      processed: false 
+    }).session(session);
+    
+    if (!transaction) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Transaction not found or already processed' });
+    }
+    
+    // Find user
+    const user = await User.findById(userId).session(session);
+    if (!user) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Create a new TopUpRequest
+    const topUpRequest = new TopUpRequest({
+      user: userId,
+      amount,
+      balance,
+      bonus: 0,
+      paymentMethod: 'bank',
+      status: 'Completed',
+      completedAt: new Date(),
+      receivedAmount: transaction.amount,
+      details: {
+        bankName: transaction.bankName || 'Unknown',
+        accountName: user.username,
+        accountNumber: transaction.bankAccount || 'Unknown',
+        transferContent: transaction.extractedContent,
+        bankReference: transaction.transactionId,
+        manuallyProcessed: true
+      },
+      adminId: req.user._id,
+      notes: `Manually processed from unmatched transaction by admin ${req.user.username}`
+    });
+    
+    // Add transaction to the request
+    topUpRequest.bankTransactions.push({
+      transactionId: transaction.transactionId,
+      amount: transaction.amount,
+      description: transaction.description,
+      date: transaction.date,
+      matched: true
+    });
+    
+    await topUpRequest.save({ session });
+    
+    // Update user balance
+    const prevBalance = user.balance || 0;
+    user.balance = prevBalance + balance;
+    await user.save({ session });
+    
+    // Mark transaction as processed
+    transaction.processed = true;
+    await transaction.save({ session });
+    
+    // Create transaction record
+    await createTransaction({
+      userId: user._id,
+      amount: balance,
+      type: 'topup',
+      description: `Nạp tiền qua chuyển khoản ngân hàng (xử lý thủ công bởi admin)`,
+      sourceId: topUpRequest._id,
+      sourceModel: 'TopUpRequest',
+      performedById: req.user._id,
+      balanceAfter: user.balance
+    }, session);
+    
+    await session.commitTransaction();
+    
+    res.status(200).json({
+      message: 'Transaction processed successfully',
+      requestId: topUpRequest._id
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Failed to process transaction:', error);
+    res.status(500).json({ message: 'Failed to process transaction' });
+  } finally {
+    session.endSession();
   }
 });
 
