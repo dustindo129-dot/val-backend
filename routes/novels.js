@@ -1153,16 +1153,19 @@ router.get('/:novelId/contributions', async (req, res) => {
       return res.status(404).json({ message: 'Novel not found' });
     }
     
-    // PART 1: Find approved contributions
-    // Find requests for this novel
-    const requests = await Request.find({ novel: novelId, type: 'open' })
-      .select('_id')
-      .lean();
+    // PART 1: Find approved contributions for open and web requests
+    // Find requests for this novel (open and web types)
+    const openWebRequests = await Request.find({ 
+      novel: novelId, 
+      type: { $in: ['open', 'web'] }
+    })
+    .select('_id')
+    .lean();
     
     let contributions = [];
-    if (requests && requests.length > 0) {
+    if (openWebRequests && openWebRequests.length > 0) {
       // Get request IDs
-      const requestIds = requests.map(req => req._id);
+      const requestIds = openWebRequests.map(req => req._id);
       
       // Find approved contributions for these requests
       contributions = await Contribution.find({ 
@@ -1170,24 +1173,74 @@ router.get('/:novelId/contributions', async (req, res) => {
         status: 'approved'
       })
       .populate('user', 'username avatar')
+      .populate('request', 'type title')
       .sort({ updatedAt: -1 })
       .lean();
     }
     
-    // PART 2: Find approved requests for this novel
-    const approvedRequests = await Request.find({ 
+    // PART 2: Find approved 'new' requests for this novel
+    const approvedNewRequests = await Request.find({ 
+      novel: novelId, 
+      type: 'new',
+      status: 'approved'
+    })
+    .populate('user', 'username avatar')
+    .lean();
+    
+    // Handle 'new' request deposits as contributions
+    const newRequestDeposits = approvedNewRequests.map(request => ({
+      _id: request._id + '_deposit', // Create unique ID
+      user: request.user,
+      amount: request.deposit,
+      status: 'approved',
+      createdAt: request.createdAt,
+      updatedAt: request.updatedAt,
+      request: {
+        _id: request._id,
+        type: 'new',
+        title: 'Yêu cầu truyện mới'
+      },
+      note: 'Tiền cọc yêu cầu truyện mới',
+      isDeposit: true
+    }));
+    
+    // Find approved contributions for all 'new' requests
+    let newRequestContributions = [];
+    if (approvedNewRequests.length > 0) {
+      const newRequestIds = approvedNewRequests.map(req => req._id);
+      
+      newRequestContributions = await Contribution.find({ 
+        request: { $in: newRequestIds },
+        status: 'approved'
+      })
+      .populate('user', 'username avatar')
+      .populate('request', 'type title')
+      .lean();
+    }
+    
+    // PART 3: Find approved open requests for this novel with module/chapter info
+    const approvedOpenRequests = await Request.find({ 
       novel: novelId, 
       type: 'open',
       status: 'approved'
     })
     .populate('user', 'username avatar')
+    .populate('module', 'title')
+    .populate('chapter', 'title')
     .sort({ updatedAt: -1 })
     .lean();
     
-    // Return both types of data
+    // Combine all contributions
+    const allContributions = [
+      ...contributions,
+      ...newRequestContributions,
+      ...newRequestDeposits
+    ].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    
+    // Return all data
     return res.json({ 
-      contributions: contributions,
-      requests: approvedRequests
+      contributions: allContributions,
+      requests: approvedOpenRequests
     });
   } catch (error) {
     console.error('Error fetching novel contributions:', error);

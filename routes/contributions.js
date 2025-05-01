@@ -4,6 +4,7 @@ import Contribution from '../models/Contribution.js';
 import Request from '../models/Request.js';
 import User from '../models/User.js';
 import mongoose from 'mongoose';
+import { createNovelTransaction } from './novelTransactions.js';
 
 const router = express.Router();
 
@@ -62,6 +63,11 @@ router.post('/', auth, async (req, res) => {
       contributionData.note = note;
     }
     
+    // Auto-approve contributions for web requests
+    if (request.type === 'web') {
+      contributionData.status = 'approved';
+    }
+    
     // Create contribution
     const newContribution = new Contribution(contributionData);
     await newContribution.save({ session });
@@ -69,6 +75,41 @@ router.post('/', auth, async (req, res) => {
     // Deduct contribution amount from user balance
     user.balance -= amount;
     await user.save({ session });
+    
+    // For web requests, automatically add contribution to novel balance
+    if (request.type === 'web' && request.novel) {
+      const Novel = mongoose.model('Novel');
+      const novel = await Novel.findById(request.novel).session(session);
+      
+      if (novel) {
+        // Update novel balance
+        const newBalance = novel.novelBalance + Number(amount);
+        await Novel.updateOne(
+          { _id: request.novel },
+          { novelBalance: newBalance },
+          { session }
+        );
+        
+        // Create transaction record
+        await createNovelTransaction({
+          novel: request.novel,
+          amount: Number(amount),
+          type: 'contribution',
+          description: `Đóng góp cho đề xuất từ nhóm dịch: ${request.title || novel.title}`,
+          balanceAfter: newBalance,
+          sourceId: newContribution._id,
+          sourceModel: 'Contribution',
+          performedBy: req.user._id
+        }, session);
+      } else {
+        // Just update the balance if novel not found (shouldn't happen)
+        await Novel.findByIdAndUpdate(
+          request.novel,
+          { $inc: { novelBalance: Number(amount) } },
+          { session }
+        );
+      }
+    }
     
     // Populate user data before sending response
     await newContribution.populate('user', 'username avatar role');

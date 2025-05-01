@@ -238,7 +238,7 @@ router.post('/', auth, async (req, res) => {
           novel: novelId,
           amount: effectiveDeposit,
           type: 'open',
-          description: `Yêu cầu mở chương/tập tự động xử lí. Deposit: ${deposit}, Refunded: ${refundAmount}`,
+          description: `Yêu cầu mở chương/tập tự động xử lí. Cọc: ${deposit}, Hoàn trả: ${refundAmount}`,
           balanceAfter: newBalance,
           sourceId: newRequest._id,
           sourceModel: 'Request',
@@ -392,16 +392,31 @@ router.post('/:requestId/approve', auth, async (req, res) => {
       });
     }
     
-    // Get all approved contributions for this request
+    // Get all contributions for this request
     const Contribution = mongoose.model('Contribution');
     const contributions = await Contribution.find({ 
       request: request._id,
-      status: 'approved' 
+      status: 'pending' 
     }).session(session);
     
-    const totalContributions = contributions.reduce((sum, contribution) => sum + contribution.amount, 0);
+    // Mark all pending contributions as approved
+    if (contributions.length > 0) {
+      await Contribution.updateMany(
+        { request: request._id, status: 'pending' },
+        { status: 'approved' },
+        { session }
+      );
+    }
     
-    // Update novel balance with deposit + approved contributions
+    // Calculate total contributions (including previously approved ones)
+    const allContributions = await Contribution.find({
+      request: request._id,
+      status: 'approved'
+    }).session(session);
+    
+    const totalContributions = allContributions.reduce((sum, contribution) => sum + contribution.amount, 0);
+    
+    // Update novel balance with deposit + all contributions
     const totalAmount = request.deposit + totalContributions;
     const oldBalance = matchingNovel.novelBalance || 0;
     const newBalance = oldBalance + totalAmount;
@@ -417,7 +432,7 @@ router.post('/:requestId/approve', auth, async (req, res) => {
       novel: matchingNovel._id,
       amount: totalAmount,
       type: 'request',
-      description: `Yêu cầu truyện mới được admin chấp nhận. Deposit: ${request.deposit}, Contributions: ${totalContributions}`,
+      description: `Yêu cầu truyện mới được admin chấp nhận. Cọc: ${request.deposit}, Đóng góp: ${totalContributions}`,
       balanceAfter: newBalance,
       sourceId: request._id,
       sourceModel: 'Request',
