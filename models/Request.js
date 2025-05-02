@@ -28,7 +28,7 @@ const requestSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Novel',
     required: function() {
-      return this.type === 'open' || this.type === 'web';
+      return this.type === 'open';
     }
   },
   module: {

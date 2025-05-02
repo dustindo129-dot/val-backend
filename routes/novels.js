@@ -1,6 +1,5 @@
 import express from "express";
 import Novel from "../models/Novel.js";
-import { uploadImage } from "../utils/imageUpload.js";
 import { auth } from "../middleware/auth.js";
 import Chapter from "../models/Chapter.js";
 import Module from "../models/Module.js";

@@ -31,9 +31,8 @@ router.post('/', auth, async (req, res) => {
       return res.status(404).json({ message: 'Request not found' });
     }
     
-    // Verify request is still pending or is a web request that's approved
-    // Web requests from translation team can receive contributions even when approved
-    if (request.status !== 'pending' && !(request.type === 'web' && request.status === 'approved')) {
+    // Verify request is still pending
+    if (request.status !== 'pending') {
       await session.abortTransaction();
       return res.status(400).json({ message: 'Cannot contribute to a processed request' });
     }
@@ -63,53 +62,13 @@ router.post('/', auth, async (req, res) => {
       contributionData.note = note;
     }
     
-    // Auto-approve contributions for web requests
-    if (request.type === 'web') {
-      contributionData.status = 'approved';
-    }
-    
-    // Create contribution
+    // Create contribution (all contributions start as pending)
     const newContribution = new Contribution(contributionData);
     await newContribution.save({ session });
     
     // Deduct contribution amount from user balance
     user.balance -= amount;
     await user.save({ session });
-    
-    // For web requests, automatically add contribution to novel balance
-    if (request.type === 'web' && request.novel) {
-      const Novel = mongoose.model('Novel');
-      const novel = await Novel.findById(request.novel).session(session);
-      
-      if (novel) {
-        // Update novel balance
-        const newBalance = novel.novelBalance + Number(amount);
-        await Novel.updateOne(
-          { _id: request.novel },
-          { novelBalance: newBalance },
-          { session }
-        );
-        
-        // Create transaction record
-        await createNovelTransaction({
-          novel: request.novel,
-          amount: Number(amount),
-          type: 'contribution',
-          description: `Đóng góp cho đề xuất từ nhóm dịch: ${request.title || novel.title}`,
-          balanceAfter: newBalance,
-          sourceId: newContribution._id,
-          sourceModel: 'Contribution',
-          performedBy: req.user._id
-        }, session);
-      } else {
-        // Just update the balance if novel not found (shouldn't happen)
-        await Novel.findByIdAndUpdate(
-          request.novel,
-          { $inc: { novelBalance: Number(amount) } },
-          { session }
-        );
-      }
-    }
     
     // Populate user data before sending response
     await newContribution.populate('user', 'username avatar role');

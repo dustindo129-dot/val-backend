@@ -1,7 +1,6 @@
 import express from 'express';
 import { auth } from '../middleware/auth.js';
 import User from '../models/User.js';
-import { uploadImage } from '../utils/imageUpload.js';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 

@@ -103,31 +103,29 @@ router.post('/', auth, async (req, res) => {
       requestData.note = note;
     }
     
-    // Add novel reference for open and web requests
-    if (type === 'open' || type === 'web') {
+    // Add novel reference for open requests only
+    // Web requests now don't need a novel reference at creation time
+    if (type === 'open') {
       if (!novelId) {
         await session.abortTransaction();
-        return res.status(400).json({ message: 'Novel ID is required for open and web requests' });
+        return res.status(400).json({ message: 'Novel ID is required for open requests' });
       }
       requestData.novel = novelId;
       
       // Add module and chapter if provided (for open requests)
-      if (type === 'open' && moduleId) {
+      if (moduleId) {
         requestData.module = moduleId;
       }
       
-      if (type === 'open' && chapterId) {
+      if (chapterId) {
         requestData.chapter = chapterId;
       }
     }
     
-    // Auto-approve all open requests and web recommendations from admins
-    if (type === 'open' || (type === 'web' && user.role === 'admin')) {
+    // Auto-approve open requests only
+    if (type === 'open') {
       requestData.status = 'approved';
-      
-      if (type === 'open') {
-        requestData.openNow = true;
-      }
+      requestData.openNow = true;
     }
     
     // Create request
@@ -375,12 +373,12 @@ router.post('/:requestId/approve', auth, async (req, res) => {
     }
     
     // We only process 'new' type requests here since 'open' requests are auto-processed
-    if (request.type !== 'new') {
+    if (request.type !== 'new' && request.type !== 'web') {
       await session.abortTransaction();
       return res.status(400).json({ message: 'This request type cannot be approved manually' });
     }
     
-    // New constraint: Check if a novel with matching title already exists
+    // Check if a novel with matching title already exists for both 'new' and 'web' requests
     const Novel = mongoose.model('Novel');
     const matchingNovel = await Novel.findOne({ title: request.title }).session(session);
     
@@ -432,7 +430,9 @@ router.post('/:requestId/approve', auth, async (req, res) => {
       novel: matchingNovel._id,
       amount: totalAmount,
       type: 'request',
-      description: `Yêu cầu truyện mới được admin chấp nhận. Cọc: ${request.deposit}, Đóng góp: ${totalContributions}`,
+      description: request.type === 'new' 
+        ? `Yêu cầu truyện mới được admin chấp nhận. Cọc: ${request.deposit}, Đóng góp: ${totalContributions}`
+        : `Đề xuất từ nhóm dịch được admin chấp nhận. Cọc: ${request.deposit}, Đóng góp: ${totalContributions}`,
       balanceAfter: newBalance,
       sourceId: request._id,
       sourceModel: 'Request',
@@ -449,7 +449,9 @@ router.post('/:requestId/approve', auth, async (req, res) => {
       userId: request.user,
       amount: 0, // No balance change as deposit was already deducted when request was created
       type: 'request',
-      description: `Yêu cầu truyện mới được admin chấp nhận, ${totalAmount} 🌾 đã được chuyển vào truyện`,
+      description: request.type === 'new'
+        ? `Yêu cầu truyện mới được admin chấp nhận, ${totalAmount} 🌾 đã được chuyển vào truyện`
+        : `Đề xuất từ nhóm dịch được admin chấp nhận, ${totalAmount} 🌾 đã được chuyển vào truyện`,
       sourceId: request._id,
       sourceModel: 'Request',
       performedById: req.user._id, // Admin initiated
@@ -457,9 +459,25 @@ router.post('/:requestId/approve', auth, async (req, res) => {
     }, session);
     
     await session.commitTransaction();
+    
+    // Prepare success message based on request type and goal achievement
+    let successMessage = 'Yêu cầu đã được phê duyệt thành công và 🌾 đã được chuyển cho truyện';
+    
+    // For web requests, check if goal is reached
+    if (request.type === 'web' && request.goalBalance) {
+      if (newBalance >= request.goalBalance) {
+        successMessage = `Đề xuất từ nhóm dịch đã được phê duyệt và mục tiêu ${request.goalBalance} 🌾 đã đạt được!`;
+      } else {
+        const remaining = request.goalBalance - newBalance;
+        successMessage = `Đề xuất từ nhóm dịch đã được phê duyệt. Còn cần thêm ${remaining} 🌾 để đạt mục tiêu ${request.goalBalance} 🌾`;
+      }
+    }
+    
     res.json({ 
-      message: 'Yêu cầu đã được phê duyệt thành công và 🌾 đã được chuyển cho truyện',
-      novelId: matchingNovel._id 
+      message: successMessage,
+      novelId: matchingNovel._id,
+      goalBalance: request.type === 'web' ? request.goalBalance : null,
+      currentBalance: newBalance
     });
   } catch (error) {
     await session.abortTransaction();
