@@ -163,61 +163,6 @@ router.post('/:contributionId/approve', auth, async (req, res) => {
 });
 
 /**
- * Decline contribution (admin only)
- * @route POST /api/contributions/:contributionId/decline
- */
-router.post('/:contributionId/decline', auth, async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  
-  try {
-    // Verify user is admin
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Only admins can decline contributions' });
-    }
-    
-    const { contributionId } = req.params;
-    
-    // Find contribution
-    const contribution = await Contribution.findById(contributionId).session(session);
-    if (!contribution) {
-      await session.abortTransaction();
-      return res.status(404).json({ message: 'Contribution not found' });
-    }
-    
-    // Check if contribution is already processed
-    if (contribution.status !== 'pending') {
-      await session.abortTransaction();
-      return res.status(400).json({ message: 'Contribution has already been processed' });
-    }
-    
-    // Find user to refund contribution
-    const user = await User.findById(contribution.user).session(session);
-    if (!user) {
-      await session.abortTransaction();
-      return res.status(404).json({ message: 'User not found' });
-    }
-    
-    // Update contribution status
-    contribution.status = 'declined';
-    await contribution.save({ session });
-    
-    // Refund contribution to user
-    user.balance += contribution.amount;
-    await user.save({ session });
-    
-    await session.commitTransaction();
-    res.json({ message: 'Contribution declined and amount refunded' });
-  } catch (error) {
-    await session.abortTransaction();
-    console.error('Failed to decline contribution:', error);
-    res.status(500).json({ message: 'Failed to decline contribution' });
-  } finally {
-    session.endSession();
-  }
-});
-
-/**
  * Approve all contributions for a request (admin only)
  * @route POST /api/contributions/request/:requestId/approve-all
  */

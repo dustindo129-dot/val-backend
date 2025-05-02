@@ -615,13 +615,56 @@ router.post('/:requestId/withdraw', auth, async (req, res) => {
       balanceAfter: user.balance
     }, session);
     
+    // For 'new' type requests, find and refund all pending contributions
+    if (request.type === 'new') {
+      // Find all pending contributions for this request
+      const Contribution = mongoose.model('Contribution');
+      const pendingContributions = await Contribution.find({ 
+        request: request._id,
+        status: 'pending' 
+      }).session(session);
+      
+      // If there are pending contributions, process refunds
+      if (pendingContributions.length > 0) {
+        // Update all contributions to declined
+        await Contribution.updateMany(
+          { request: request._id, status: 'pending' },
+          { status: 'declined' },
+          { session }
+        );
+        
+        // Refund each contributor
+        for (const contribution of pendingContributions) {
+          const contributor = await User.findById(contribution.user).session(session);
+          if (contributor) {
+            const contributorOldBalance = contributor.balance;
+            contributor.balance += contribution.amount;
+            await contributor.save({ session });
+            
+            // Record the refund transaction
+            await createTransaction({
+              userId: contributor._id,
+              amount: contribution.amount,
+              type: 'refund',
+              description: `Hoàn tiền do yêu cầu được rút lại`,
+              sourceId: request._id,
+              sourceModel: 'Request',
+              performedById: null,
+              balanceAfter: contributor.balance
+            }, session);
+          }
+        }
+      }
+    }
+    
     // Delete the request
     await Request.findByIdAndDelete(requestId).session(session);
     
     await session.commitTransaction();
     res.json({ 
       message: 'Yêu cầu đã được rút lại thành công',
-      refundAmount: request.deposit
+      refundAmount: request.deposit,
+      contributionsRefunded: request.type === 'new' && pendingContributions ? pendingContributions.length : 0
     });
   } catch (error) {
     await session.abortTransaction();
