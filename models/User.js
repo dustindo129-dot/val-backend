@@ -25,7 +25,7 @@ const userSchema = new mongoose.Schema({
   },
   avatar: {
     type: String,
-    default: 'https://secure.gravatar.com/avatar?d=mp'
+    default: 'https://Valvrareteam.b-cdn.net/defaults/default-avatar.png'
   },
   role: {
     type: String,
