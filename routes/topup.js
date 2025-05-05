@@ -4,7 +4,6 @@ import User from '../models/User.js';
 import TopUpRequest from '../models/TopUpRequest.js';
 import TransactionInfo from '../models/TransactionInfo.js';
 import mongoose from 'mongoose';
-import { createMomoPayment, createZaloPayPayment } from '../integrations/ewallet.js';
 import { validatePrepaidCard } from '../integrations/cardProvider.js';
 import { getBankAccountInfo } from '../utils/paymentUtils.js';
 import paymentConfig from '../config/paymentConfig.js';
@@ -25,7 +24,7 @@ router.post('/request', auth, async (req, res) => {
   session.startTransaction();
   
   try {
-    const { amount, balance, paymentMethod, subMethod, details } = req.body;
+    const { amount, balance, paymentMethod, details } = req.body;
     
     // Validate request data
     if (!amount || !balance || !paymentMethod) {
@@ -44,59 +43,7 @@ router.post('/request', auth, async (req, res) => {
     });
     
     // Handle different payment methods
-    if (paymentMethod === 'ewallet') {
-      if (!subMethod || !details || !details.phoneNumber) {
-        return res.status(400).json({ message: 'Missing e-wallet details' });
-      }
-      
-      topUpRequest.subMethod = subMethod;
-      topUpRequest.details = {
-        phoneNumber: details.phoneNumber
-      };
-      
-      // Save the request first to get an ID
-      await topUpRequest.save({ session });
-      
-      // Generate payment URL based on the selected e-wallet
-      let paymentResult;
-      
-      if (subMethod === 'momo') {
-        paymentResult = await createMomoPayment(
-          req.user._id.toString(),
-          topUpRequest._id.toString(),
-          amount,
-          `Top-up ${amount}VND to account ${req.user.username}`
-        );
-      } else if (subMethod === 'zalopay') {
-        paymentResult = await createZaloPayPayment(
-          req.user._id.toString(),
-          topUpRequest._id.toString(),
-          amount,
-          `Top-up ${amount}VND to account ${req.user.username}`
-        );
-      } else {
-        await session.abortTransaction();
-        return res.status(400).json({ message: 'Invalid e-wallet method' });
-      }
-      
-      if (!paymentResult.success) {
-        await session.abortTransaction();
-        return res.status(500).json({ message: paymentResult.error || 'Failed to create payment' });
-      }
-      
-      // Update request with payment information
-      topUpRequest.details.requestId = paymentResult.requestId;
-      topUpRequest.details.paymentUrl = paymentResult.paymentUrl;
-      await topUpRequest.save({ session });
-      
-      await session.commitTransaction();
-      
-      return res.status(200).json({
-        message: 'Please complete your payment',
-        paymentUrl: paymentResult.paymentUrl,
-        requestId: topUpRequest._id
-      });
-    } else if (paymentMethod === 'bank') {
+    if (paymentMethod === 'bank') {
       if (!details || !details.accountNumber || !details.accountName || !details.bankName) {
         return res.status(400).json({ message: 'Missing bank transfer details' });
       }
@@ -268,7 +215,7 @@ router.post('/request', auth, async (req, res) => {
     }
   } catch (error) {
     await session.abortTransaction();
-    console.error('Top-up request failed:', error);
+    console.error('Top-up request error:', error);
     res.status(500).json({ message: 'Failed to process top-up request' });
   } finally {
     session.endSession();
@@ -329,10 +276,7 @@ router.get('/pending', auth, async (req, res) => {
       };
       
       // Add payment method specific details
-      if (request.paymentMethod === 'ewallet') {
-        formattedRequest.subMethod = request.subMethod;
-        formattedRequest.paymentUrl = request.details.paymentUrl;
-      } else if (request.paymentMethod === 'bank') {
+      if (request.paymentMethod === 'bank') {
         formattedRequest.bankInfo = {
           transferContent: request.details.transferContent
         };
@@ -370,7 +314,6 @@ router.get('/history', auth, async (req, res) => {
         balance: item.balance,
         bonus: item.bonus,
         paymentMethod: item.paymentMethod,
-        subMethod: item.subMethod,
         status: item.status,
         createdAt: item.createdAt,
         completedAt: item.completedAt
@@ -386,10 +329,6 @@ router.get('/history', auth, async (req, res) => {
         formattedItem.bankInfo = {
           bankName: item.details.bankName,
           transferContent: item.details.transferContent
-        };
-      } else if (item.paymentMethod === 'ewallet' && item.details) {
-        formattedItem.ewalletInfo = {
-          provider: item.subMethod
         };
       }
       
@@ -424,9 +363,6 @@ router.delete('/request/:requestId', auth, async (req, res) => {
         message: 'Request not found or cannot be cancelled' 
       });
     }
-    
-    // For e-wallet payments, we should check the status with the provider
-    // before allowing cancellation, but we'll skip that for simplicity
     
     // Update request status
     request.status = 'Cancelled';

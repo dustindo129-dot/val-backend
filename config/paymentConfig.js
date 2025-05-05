@@ -6,26 +6,6 @@
  */
 
 const paymentConfig = {
-  momo: {
-    partnerCode: process.env.MOMO_PARTNER_CODE || 'MOMOXYZ123',
-    accessKey: process.env.MOMO_ACCESS_KEY || 'test_access_key',
-    secretKey: process.env.MOMO_SECRET_KEY || 'test_secret_key',
-    environment: process.env.NODE_ENV || 'development',
-    apiUrl: process.env.NODE_ENV === 'production' 
-      ? 'https://payment.momo.vn/v2/gateway/api'
-      : 'https://test-payment.momo.vn/v2/gateway/api'
-  },
-  
-  zalopay: {
-    appId: process.env.ZALOPAY_APP_ID || '123456789',
-    key1: process.env.ZALOPAY_KEY1 || 'test_key1',
-    key2: process.env.ZALOPAY_KEY2 || 'test_key2',
-    environment: process.env.NODE_ENV || 'development',
-    apiUrl: process.env.NODE_ENV === 'production'
-      ? 'https://api.zalopay.vn/v2'
-      : 'https://sandbox.zalopay.vn/v2'
-  },
-  
   bankAccounts: {
     primary: {
       bank: process.env.BANK_NAME || 'Example Bank',
