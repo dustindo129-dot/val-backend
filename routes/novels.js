@@ -199,101 +199,203 @@ router.get("/hot", async (req, res) => {
       startDate.setDate(startDate.getDate() - 7);
     }
     
-    // For 'alltime', we don't need startDate filtering
-
-    // Base aggregation pipeline
-    let pipeline = [];
+    let hotNovels = [];
     
+    // First try to get novels based on view count
     if (timeRange === 'today' || timeRange === 'week') {
-      // For today and week, use daily views
-      pipeline = [
-        // Unwind daily views array
-        { $unwind: "$views.daily" },
-        // Match views from selected time range
-        {
-          $match: {
-            "views.daily.date": { $gte: startDate }
+      // For today and week timeframes
+      try {
+        // Find novels with views in the selected time range
+        hotNovels = await Novel.aggregate([
+          // Only include novels with daily views
+          { $match: { "views.daily": { $exists: true, $ne: [] } } },
+          // Unwind daily views array
+          { $unwind: "$views.daily" },
+          // Match views from selected time range
+          {
+            $match: {
+              "views.daily.date": { $gte: startDate }
+            }
+          },
+          // Group by novel ID to prevent duplicates and sum the view counts
+          {
+            $group: {
+              _id: "$_id",
+              title: { $first: "$title" },
+              illustration: { $first: "$illustration" },
+              status: { $first: "$status" },
+              updatedAt: { $first: "$updatedAt" },
+              dailyViews: { $sum: "$views.daily.count" }
+            }
+          },
+          // Sort by the summed daily views
+          { $sort: { dailyViews: -1 } },
+          // Limit to top 5
+          { $limit: 5 },
+          // Lookup latest chapters
+          {
+            $lookup: {
+              from: 'chapters',
+              let: { novelId: '$_id' },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: { $eq: ['$novelId', '$$novelId'] }
+                  }
+                },
+                { $sort: { createdAt: -1 } },
+                { $limit: 1 },
+                {
+                  $project: {
+                    _id: 1,
+                    title: 1,
+                    createdAt: 1
+                  }
+                }
+              ],
+              as: 'chapters'
+            }
+          },
+          // Project final fields
+          {
+            $project: {
+              _id: 1,
+              title: 1,
+              illustration: 1,
+              status: 1,
+              updatedAt: 1,
+              chapters: 1,
+              dailyViews: 1,
+              source: { $literal: "views" }
+            }
           }
-        },
-        // Group by novel ID to prevent duplicates and sum the view counts
-        {
-          $group: {
-            _id: "$_id",
-            title: { $first: "$title" },
-            illustration: { $first: "$illustration" },
-            status: { $first: "$status" },
-            updatedAt: { $first: "$updatedAt" },
-            dailyViews: { $sum: "$views.daily.count" }
-          }
-        },
-        // Sort by the summed daily views
-        { $sort: { dailyViews: -1 } }
-      ];
+        ]);
+      } catch (err) {
+        console.error("Error fetching novels by views:", err);
+        // Continue with empty array if this fails
+        hotNovels = [];
+      }
     } else {
       // For alltime, use total views
-      pipeline = [
-        // Sort by total views
-        { $sort: { "views.total": -1 } },
-        // Project needed fields
-        {
-          $project: {
-            _id: 1,
-            title: 1,
-            illustration: 1,
-            status: 1,
-            updatedAt: 1,
-            dailyViews: "$views.total"
+      try {
+        hotNovels = await Novel.aggregate([
+          // Match only novels with total views
+          { $match: { "views.total": { $exists: true, $gt: 0 } } },
+          // Sort by total views
+          { $sort: { "views.total": -1 } },
+          // Limit to top 5
+          { $limit: 5 },
+          // Lookup latest chapters
+          {
+            $lookup: {
+              from: 'chapters',
+              let: { novelId: '$_id' },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: { $eq: ['$novelId', '$$novelId'] }
+                  }
+                },
+                { $sort: { createdAt: -1 } },
+                { $limit: 1 },
+                {
+                  $project: {
+                    _id: 1,
+                    title: 1,
+                    createdAt: 1
+                  }
+                }
+              ],
+              as: 'chapters'
+            }
+          },
+          // Project final fields
+          {
+            $project: {
+              _id: 1,
+              title: 1,
+              illustration: 1,
+              status: 1,
+              updatedAt: 1,
+              chapters: 1,
+              dailyViews: "$views.total",
+              source: { $literal: "views" }
+            }
           }
-        }
-      ];
+        ]);
+      } catch (err) {
+        console.error("Error fetching novels by all-time views:", err);
+        // Continue with empty array if this fails
+        hotNovels = [];
+      }
     }
     
-    // Add limit and lookup stages to the pipeline
-    pipeline = [
-      ...pipeline,
-      // Limit to top 5
-      { $limit: 5 },
-      // Lookup latest chapters
-      {
-        $lookup: {
-          from: 'chapters',
-          let: { novelId: '$_id' },
-          pipeline: [
-            {
-              $match: {
-                $expr: { $eq: ['$novelId', '$$novelId'] }
-              }
-            },
-            { $sort: { createdAt: -1 } },
-            { $limit: 1 },
-            {
-              $project: {
-                _id: 1,
-                title: 1,
-                createdAt: 1
-              }
+    // Check if we need to add more novels
+    if (hotNovels.length < 5) {
+      // Calculate how many more novels we need
+      const remainingCount = 5 - hotNovels.length;
+      
+      // Get IDs of novels we already have to exclude them
+      const existingNovelIds = hotNovels.map(novel => novel._id);
+      
+      try {
+        // Find most recently updated novels that aren't already in our list
+        const recentNovels = await Novel.aggregate([
+          {
+            $match: {
+              _id: { $nin: existingNovelIds.map(id => new mongoose.Types.ObjectId(id)) }
             }
-          ],
-          as: 'chapters'
-        }
-      },
-      // Project final fields
-      {
-        $project: {
-          _id: 1,
-          title: 1,
-          illustration: 1,
-          status: 1,
-          updatedAt: 1,
-          chapters: 1,
-          dailyViews: 1  // Include view count for debugging
-        }
+          },
+          // Sort by updatedAt (most recent first)
+          { $sort: { updatedAt: -1 } },
+          // Limit to what we need
+          { $limit: remainingCount },
+          // Lookup latest chapters
+          {
+            $lookup: {
+              from: 'chapters',
+              let: { novelId: '$_id' },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: { $eq: ['$novelId', '$$novelId'] }
+                  }
+                },
+                { $sort: { createdAt: -1 } },
+                { $limit: 1 },
+                {
+                  $project: {
+                    _id: 1,
+                    title: 1,
+                    createdAt: 1
+                  }
+                }
+              ],
+              as: 'chapters'
+            }
+          },
+          // Project the same fields as hotNovels
+          {
+            $project: {
+              _id: 1,
+              title: 1,
+              illustration: 1,
+              status: 1,
+              updatedAt: 1,
+              chapters: 1,
+              dailyViews: { $literal: 0 },
+              source: { $literal: "recent" }
+            }
+          }
+        ]);
+        
+        // Combine the two sets of novels
+        hotNovels = [...hotNovels, ...recentNovels];
+      } catch (err) {
+        console.error("Error fetching recent novels:", err);
       }
-    ];
-
-    // Execute the aggregation
-    const hotNovels = await Novel.aggregate(pipeline);
-
+    }
+    
     const result = { novels: hotNovels };
     
     // Cache the result only if not bypassing
@@ -303,6 +405,7 @@ router.get("/hot", async (req, res) => {
     
     res.json(result);
   } catch (err) {
+    console.error("Error in GET /api/novels/hot:", err);
     res.status(500).json({
       novels: [],
       error: err.message
