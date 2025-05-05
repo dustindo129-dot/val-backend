@@ -11,7 +11,8 @@ const moduleSchema = new mongoose.Schema({
     required: true
   },
   illustration: {
-    type: String
+    type: String,
+    default: 'https://Valvrareteam.b-cdn.net/defaults/missing-image.png'
   },
   chapters: [{
     type: mongoose.Schema.Types.ObjectId,

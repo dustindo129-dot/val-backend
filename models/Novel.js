@@ -25,18 +25,13 @@ const novelSchema = new mongoose.Schema({
   note: { type: String },
   illustration: { 
     type: String,
-    default: 'https://res.cloudinary.com/dvoytcc6b/image/upload/v1743234203/%C6%A0_l%E1%BB%97i_h%C3%ACnh_m%E1%BA%A5t_r%E1%BB%93i_n8zdtv.png'
+    default: 'https://Valvrareteam.b-cdn.net/defaults/missing-image.png'
   },
   novelBalance: { 
     type: Number, 
     default: 0,
     min: 0
   },
-  chapters: [{
-    title: String,
-    content: String,
-    createdAt: { type: Date, default: Date.now }
-  }],
   views: {
     total: { type: Number, default: 0 },
     daily: [{
