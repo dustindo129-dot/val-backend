@@ -198,7 +198,7 @@ app.use('/api/users', userRoutes);      // User management endpoints
 app.use('/api/chapters', chaptersRouter); // Chapter management endpoints
 app.use('/api/modules', moduleRoutes);   // Module management endpoints
 app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User chapter interactions endpoints
-app.use('/api/user-novel-interactions', userNovelInteractionRoutes); // User novel interactions endpoints
+app.use('/api/usernovelinteractions', userNovelInteractionRoutes); // User novel interactions endpoints
 app.use('/api/reports', reportRoutes); // Report endpoints
 app.use('/api/upload', uploadRoutes); // File upload endpoints
 app.use('/api/requests', requestRoutes); // Request system endpoints

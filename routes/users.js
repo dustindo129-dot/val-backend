@@ -1,6 +1,7 @@
 import express from 'express';
 import { auth } from '../middleware/auth.js';
 import User from '../models/User.js';
+import UserNovelInteraction from '../models/UserNovelInteraction.js';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 
@@ -167,10 +168,13 @@ router.get('/:username/bookmarks/:novelId', auth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid novel ID' });
     }
 
-    const user = await User.findById(req.user._id);
-    const isBookmarked = user.bookmarks && user.bookmarks.some(
-      bookmark => bookmark.toString() === req.params.novelId
-    );
+    // Use UserNovelInteraction instead of User.bookmarks
+    const interaction = await UserNovelInteraction.findOne({
+      userId: req.user._id,
+      novelId: req.params.novelId
+    });
+    
+    const isBookmarked = interaction ? interaction.bookmarked : false;
     
     res.json({ isBookmarked });
   } catch (error) {
@@ -195,24 +199,37 @@ router.post('/:username/bookmarks', auth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid novel ID' });
     }
 
-    // Use findOneAndUpdate to do everything in one query
-    const result = await User.findOneAndUpdate(
-      { _id: req.user._id },
-      {
-        $set: { updatedAt: new Date() },
-        [req.user.bookmarks?.some(id => id.toString() === novelId) ? '$pull' : '$addToSet']: {
-          bookmarks: novelId
-        }
-      },
-      { new: true }
-    ).select('bookmarks');
-
-    const isBookmarked = result.bookmarks.some(id => id.toString() === novelId);
-    
-    res.json({ 
-      message: isBookmarked ? 'Novel bookmarked successfully' : 'Bookmark removed successfully',
-      isBookmarked
+    // Find existing interaction or create a new one
+    let interaction = await UserNovelInteraction.findOne({
+      userId: req.user._id,
+      novelId: novelId
     });
+
+    if (!interaction) {
+      // Create new interaction with bookmarked=true
+      interaction = new UserNovelInteraction({
+        userId: req.user._id,
+        novelId: novelId,
+        bookmarked: true,
+        updatedAt: new Date()
+      });
+      await interaction.save();
+      
+      return res.json({
+        message: 'Novel bookmarked successfully',
+        isBookmarked: true
+      });
+    } else {
+      // Toggle bookmark status
+      interaction.bookmarked = !interaction.bookmarked;
+      interaction.updatedAt = new Date();
+      await interaction.save();
+      
+      return res.json({
+        message: interaction.bookmarked ? 'Novel bookmarked successfully' : 'Bookmark removed successfully',
+        isBookmarked: interaction.bookmarked
+      });
+    }
   } catch (error) {
     console.error('Bookmark toggle error:', error);
     res.status(500).json({ message: 'Failed to toggle bookmark' });
@@ -235,15 +252,17 @@ router.delete('/:username/bookmarks/:novelId', auth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid novel ID' });
     }
 
-    const user = await User.findById(req.user._id);
-    if (!user.bookmarks) {
-      user.bookmarks = [];
+    // Find interaction and set bookmarked to false
+    const interaction = await UserNovelInteraction.findOne({
+      userId: req.user._id,
+      novelId: req.params.novelId
+    });
+
+    if (interaction && interaction.bookmarked) {
+      interaction.bookmarked = false;
+      interaction.updatedAt = new Date();
+      await interaction.save();
     }
-    
-    user.bookmarks = user.bookmarks.filter(
-      bookmark => bookmark.toString() !== req.params.novelId
-    );
-    await user.save();
 
     res.json({ 
       message: 'Bookmark removed successfully',
@@ -266,53 +285,51 @@ router.get('/:username/bookmarks', auth, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to view bookmarks' });
     }
 
-    const user = await User.findById(req.user._id);
+    // Find all bookmarked interactions for this user
+    const bookmarkedInteractions = await UserNovelInteraction.find({
+      userId: req.user._id,
+      bookmarked: true
+    });
     
-    // Initialize bookmarks array if it doesn't exist or is invalid
-    if (!user.bookmarks || !Array.isArray(user.bookmarks)) {
-      user.bookmarks = [];
-      await user.save();
+    if (bookmarkedInteractions.length === 0) {
       return res.json([]);
     }
 
-    // Only proceed with population if there are bookmarks
-    if (user.bookmarks.length > 0) {
-      // First populate the bookmarks to get the novels
-      const populatedUser = await User.findById(user._id)
-        .populate({
-          path: 'bookmarks',
-          select: '_id title illustration'
-        });
+    // Extract novel IDs
+    const novelIds = bookmarkedInteractions.map(interaction => interaction.novelId);
+    
+    // Find all novels that are bookmarked
+    const novels = await mongoose.model('Novel').find(
+      { _id: { $in: novelIds } },
+      { _id: 1, title: 1, illustration: 1 }
+    );
+    
+    // Then fetch the latest chapter for each novel
+    const bookmarksWithDetails = await Promise.all(
+      novels.map(async (novel) => {
+        // Find the latest module and its latest chapter
+        const latestModule = await mongoose.model('Module')
+          .findOne({ novelId: novel._id })
+          .sort({ order: -1 })
+          .populate({
+            path: 'chapters',
+            select: 'title order',
+            options: { sort: { order: -1 }, limit: 1 }
+          });
 
-      // Then fetch the latest chapter for each novel
-      const bookmarksWithDetails = await Promise.all(
-        populatedUser.bookmarks.map(async (novel) => {
-          // Find the latest module and its latest chapter
-          const latestModule = await mongoose.model('Module')
-            .findOne({ novelId: novel._id })
-            .sort({ order: -1 })
-            .populate({
-              path: 'chapters',
-              select: 'title order',
-              options: { sort: { order: -1 }, limit: 1 }
-            });
+        return {
+          _id: novel._id,
+          title: novel.title || 'Untitled',
+          illustration: novel.illustration || '',
+          latestChapter: latestModule?.chapters?.[0] ? {
+            title: latestModule.chapters[0].title,
+            number: latestModule.chapters[0].order + 1
+          } : null
+        };
+      })
+    );
 
-          return {
-            _id: novel._id,
-            title: novel.title || 'Untitled',
-            illustration: novel.illustration || '',
-            latestChapter: latestModule?.chapters?.[0] ? {
-              title: latestModule.chapters[0].title,
-              number: latestModule.chapters[0].order + 1
-            } : null
-          };
-        })
-      );
-
-      return res.json(bookmarksWithDetails);
-    }
-
-    return res.json([]);
+    return res.json(bookmarksWithDetails);
   } catch (error) {
     console.error('Bookmarks fetch error:', error);
     res.status(500).json({ message: 'Failed to fetch bookmarks', error: error.message });
