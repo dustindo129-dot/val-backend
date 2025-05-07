@@ -25,6 +25,11 @@ const userNovelInteractionSchema = new mongoose.Schema({
     max: 5,
     default: null 
   },
+  review: {
+    type: String,
+    default: null,
+    maxlength: 1000
+  },
   bookmarked: {
     type: Boolean,
     default: false

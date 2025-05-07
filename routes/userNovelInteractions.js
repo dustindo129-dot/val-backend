@@ -75,6 +75,7 @@ router.get('/user/:novelId', auth, async (req, res) => {
       return res.json({
         liked: false,
         rating: null,
+        review: null,
         bookmarked: false
       });
     }
@@ -82,6 +83,7 @@ router.get('/user/:novelId', auth, async (req, res) => {
     return res.json({
       liked: interaction.liked || false,
       rating: interaction.rating || null,
+      review: interaction.review || null,
       bookmarked: interaction.bookmarked || false
     });
   } catch (err) {
@@ -147,7 +149,7 @@ router.post('/like', auth, async (req, res) => {
  */
 router.post('/rate', auth, async (req, res) => {
   try {
-    const { novelId, rating } = req.body;
+    const { novelId, rating, review } = req.body;
     const userId = req.user._id;
 
     if (!novelId) {
@@ -172,10 +174,15 @@ router.post('/rate', auth, async (req, res) => {
       interaction = new UserNovelInteraction({
         userId,
         novelId,
-        rating
+        rating,
+        review: review || null
       });
     } else {
       interaction.rating = rating;
+      // Only update review if provided
+      if (review !== undefined) {
+        interaction.review = review;
+      }
     }
     await interaction.save();
 
@@ -198,6 +205,7 @@ router.post('/rate', auth, async (req, res) => {
 
     return res.json({
       rating,
+      review: interaction.review,
       totalRatings,
       averageRating
     });
@@ -367,6 +375,59 @@ router.get('/bookmarks', auth, async (req, res) => {
     res.json(novelsWithChapterCounts);
   } catch (err) {
     console.error("Error fetching bookmarks:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Get reviews for a novel
+ * @route GET /api/usernovelinteractions/reviews/:novelId
+ */
+router.get('/reviews/:novelId', async (req, res) => {
+  try {
+    const novelId = req.params.novelId;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // Check if novel exists
+    const novel = await Novel.findById(novelId);
+    if (!novel) {
+      return res.status(404).json({ message: "Novel not found" });
+    }
+
+    // Get reviews with user information
+    const reviews = await UserNovelInteraction.find({
+      novelId,
+      review: { $exists: true, $ne: null }
+    })
+    .populate('userId', 'username avatar') // Get user information
+    .sort({ updatedAt: -1 }) // Newest first
+    .skip(skip)
+    .limit(limit);
+
+    // Get total count for pagination
+    const totalReviews = await UserNovelInteraction.countDocuments({
+      novelId,
+      review: { $exists: true, $ne: null }
+    });
+
+    return res.json({
+      reviews: reviews.map(review => ({
+        id: review._id,
+        user: review.userId,
+        rating: review.rating,
+        review: review.review,
+        date: review.updatedAt
+      })),
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalReviews / limit),
+        totalItems: totalReviews
+      }
+    });
+  } catch (err) {
+    console.error("Error getting reviews:", err);
     res.status(500).json({ message: err.message });
   }
 });
