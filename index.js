@@ -88,9 +88,17 @@ app.use((req, res, next) => {
 
 // Configure CORS
 const corsOptions = {
-  origin: process.env.NODE_ENV === 'production' 
-    ? [process.env.FRONTEND_URL]
-    : ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173'],
+  origin: [
+    // Always include these development URLs
+    'http://localhost:5173', 
+    'http://127.0.0.1:5173', 
+    'http://localhost:4173', 
+    'http://127.0.0.1:4173',
+    'http://localhost:4174',  // For when port 4173 is already in use
+    'http://127.0.0.1:4174',
+    // Include production URL if in production
+    ...(process.env.NODE_ENV === 'production' ? [process.env.FRONTEND_URL] : [])
+  ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
