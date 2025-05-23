@@ -10,19 +10,8 @@ import mongoose from 'mongoose';
 const sanitizeText = (text) => {
   if (!text) return '';
   
-  // Convert special characters to HTML entities
-  const escapeHtml = (str) => {
-    const htmlEntities = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;'
-    };
-    return str.replace(/[&<>"']/g, match => htmlEntities[match]);
-  };
-
-  // Strip all HTML tags except newlines
+  // Just strip HTML tags and clean up formatting, don't escape HTML entities
+  // Let DOMPurify on the client handle the security sanitization
   const stripTags = (str) => {
     // Replace HTML tags with newlines to preserve formatting
     const withNewlines = str.replace(/<br\s*\/?>/gi, '\n')
@@ -38,8 +27,8 @@ const sanitizeText = (text) => {
                  .trim();
   };
 
-  // First strip tags, then escape any remaining HTML characters
-  return escapeHtml(stripTags(text));
+  // Only strip tags, don't escape HTML entities
+  return stripTags(text);
 };
 
 const commentSchema = new mongoose.Schema({
