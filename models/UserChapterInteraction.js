@@ -30,6 +30,10 @@ const userChapterInteractionSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  lastReadAt: {
+    type: Date,
+    default: null
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -47,6 +51,7 @@ userChapterInteractionSchema.index({ userId: 1, chapterId: 1 }, { unique: true }
 userChapterInteractionSchema.index({ chapterId: 1 });
 userChapterInteractionSchema.index({ novelId: 1 });
 userChapterInteractionSchema.index({ userId: 1 });
+userChapterInteractionSchema.index({ userId: 1, lastReadAt: -1 }); // Index for recently read queries
 
 const UserChapterInteraction = mongoose.model('UserChapterInteraction', userChapterInteractionSchema);
 export default UserChapterInteraction; 

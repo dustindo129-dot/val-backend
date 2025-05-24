@@ -526,4 +526,177 @@ router.post('/view/:chapterId', async (req, res) => {
   }
 });
 
+/**
+ * Record recently read chapter for user
+ * @route POST /api/userchapterinteractions/recently-read
+ */
+router.post('/recently-read', auth, async (req, res) => {
+  try {
+    const { chapterId, novelId, moduleId } = req.body;
+    const userId = req.user._id;
+
+    if (!chapterId || !novelId) {
+      return res.status(400).json({ message: 'Chapter ID and Novel ID are required' });
+    }
+
+    // Verify chapter exists
+    const chapter = await Chapter.findById(chapterId);
+    if (!chapter) {
+      return res.status(404).json({ message: "Chapter not found" });
+    }
+
+    // Update or create interaction with lastReadAt timestamp
+    const interaction = await UserChapterInteraction.findOneAndUpdate(
+      { userId, chapterId, novelId },
+      { 
+        $set: { 
+          lastReadAt: new Date(),
+          updatedAt: new Date()
+        },
+        $setOnInsert: {
+          userId,
+          chapterId,
+          novelId,
+          createdAt: new Date()
+        }
+      },
+      { 
+        upsert: true, 
+        new: true 
+      }
+    );
+
+    // Invalidate related caches
+    await deleteCacheValue(`user:${userId}:recently-read`);
+    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
+
+    res.json({ 
+      success: true, 
+      lastReadAt: interaction.lastReadAt 
+    });
+  } catch (err) {
+    console.error("Error recording recently read:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Get recently read chapters for user
+ * @route GET /api/userchapterinteractions/recently-read
+ */
+router.get('/recently-read', auth, async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const limit = parseInt(req.query.limit) || 4;
+
+    // Try to get from cache first
+    const cacheKey = `user:${userId}:recently-read`;
+    const cachedData = await getCacheValue(cacheKey);
+    
+    if (cachedData) {
+      return res.json(cachedData);
+    }
+
+    // Aggregate recently read chapters with novel and module info
+    // Only get the most recent chapter per novel
+    const recentlyRead = await UserChapterInteraction.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(userId),
+          lastReadAt: { $ne: null }
+        }
+      },
+      {
+        $sort: { lastReadAt: -1 }
+      },
+      {
+        $group: {
+          _id: '$novelId',
+          latestInteraction: { $first: '$$ROOT' }
+        }
+      },
+      {
+        $replaceRoot: { newRoot: '$latestInteraction' }
+      },
+      {
+        $limit: limit
+      },
+      {
+        $lookup: {
+          from: 'chapters',
+          localField: 'chapterId',
+          foreignField: '_id',
+          as: 'chapter'
+        }
+      },
+      {
+        $lookup: {
+          from: 'novels',
+          localField: 'novelId',
+          foreignField: '_id',
+          pipeline: [
+            { $project: { title: 1, illustration: 1 } }
+          ],
+          as: 'novel'
+        }
+      },
+      {
+        $lookup: {
+          from: 'modules',
+          localField: 'chapter.moduleId',
+          foreignField: '_id',
+          pipeline: [
+            { $project: { title: 1 } }
+          ],
+          as: 'module'
+        }
+      },
+      {
+        $project: {
+          chapterId: 1,
+          novelId: 1,
+          lastReadAt: 1,
+          chapter: { $arrayElemAt: ['$chapter', 0] },
+          novel: { $arrayElemAt: ['$novel', 0] },
+          module: { $arrayElemAt: ['$module', 0] }
+        }
+      },
+      {
+        $match: {
+          'chapter._id': { $exists: true },
+          'novel._id': { $exists: true }
+        }
+      }
+    ]);
+
+    // Format the response to match frontend expectations
+    const formattedData = recentlyRead.map(item => ({
+      chapterId: item.chapterId,
+      novelId: item.novelId,
+      lastReadAt: item.lastReadAt,
+      chapter: {
+        _id: item.chapterId,
+        title: item.chapter?.title || 'Unknown Chapter'
+      },
+      novel: {
+        _id: item.novelId,
+        title: item.novel?.title || 'Unknown Novel',
+        illustration: item.novel?.illustration || null
+      },
+      module: {
+        _id: item.chapter?.moduleId,
+        title: item.module?.title || 'Unknown Module'
+      }
+    }));
+
+    // Cache the result for 5 minutes
+    await setCacheValue(cacheKey, formattedData, CACHE_TTL);
+
+    res.json(formattedData);
+  } catch (err) {
+    console.error("Error getting recently read chapters:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 export default router; 
