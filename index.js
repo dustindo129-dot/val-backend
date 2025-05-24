@@ -183,6 +183,9 @@ if (!isProduction) {
           // Set proper Cache-Control headers
           if (path.endsWith('.html')) {
             res.setHeader('Cache-Control', 'no-cache');
+          } else if (path.endsWith('.xml')) {
+            res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+            res.setHeader('Cache-Control', 'public,max-age=3600'); // Cache for 1 hour
           } else if (path.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/)) {
             res.setHeader('Cache-Control', 'public,max-age=31536000,immutable');
           }
@@ -229,6 +232,44 @@ app.get('/health', (req, res) => {
   }
 });
 
+// Specific route for sitemap.xml to ensure proper content-type
+app.get('/sitemap.xml', (req, res) => {
+  const possiblePaths = [
+    path.resolve(__dirname, '../dist/client/sitemap.xml'),
+    path.resolve(__dirname, '../../dist/client/sitemap.xml'),
+    '/app/dist/client/sitemap.xml'
+  ];
+  
+  for (const sitemapPath of possiblePaths) {
+    if (fs.existsSync(sitemapPath)) {
+      res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+      return res.sendFile(sitemapPath);
+    }
+  }
+  
+  res.status(404).send('Sitemap not found');
+});
+
+// Specific route for robots.txt to ensure proper content-type
+app.get('/robots.txt', (req, res) => {
+  const possiblePaths = [
+    path.resolve(__dirname, '../dist/client/robots.txt'),
+    path.resolve(__dirname, '../../dist/client/robots.txt'),
+    '/app/dist/client/robots.txt'
+  ];
+  
+  for (const robotsPath of possiblePaths) {
+    if (fs.existsSync(robotsPath)) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
+      return res.sendFile(robotsPath);
+    }
+  }
+  
+  res.status(404).send('Robots.txt not found');
+});
+
 // Special handler for bundled assets in production
 // This must come BEFORE the SSR handler to catch static asset requests
 if (isProduction) {
@@ -244,6 +285,7 @@ if (isProduction) {
       url.endsWith('.jpg') || 
       url.endsWith('.svg') ||
       url.endsWith('.json') ||
+      url.endsWith('.xml') ||
       url.endsWith('.woff') ||
       url.endsWith('.woff2') ||
       url.endsWith('.ttf') ||
@@ -261,6 +303,10 @@ if (isProduction) {
     
     for (const assetPath of possiblePaths) {
       if (fs.existsSync(assetPath)) {
+        // Set proper content-type for XML files
+        if (url.endsWith('.xml')) {
+          res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+        }
         return res.sendFile(assetPath);
       }
     }
