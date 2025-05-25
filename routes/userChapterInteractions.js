@@ -2,6 +2,7 @@ import express from 'express';
 import mongoose from 'mongoose';
 import { auth } from '../middleware/auth.js';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
+import UserNovelInteraction from '../models/UserNovelInteraction.js';
 import Chapter from '../models/Chapter.js';
 import { getCacheValue, setCacheValue, deleteCacheValue, deleteByPattern } from '../utils/redisClient.js';
 
@@ -386,6 +387,31 @@ router.post('/bookmark', auth, async (req, res) => {
       interaction.bookmarked = !currentlyBookmarked;
     }
     await interaction.save();
+
+    // Auto-bookmark the novel when a chapter is bookmarked
+    if (interaction.bookmarked) {
+      // Find or create novel interaction
+      let novelInteraction = await UserNovelInteraction.findOne({ 
+        userId, 
+        novelId: chapter.novelId 
+      });
+      
+      if (!novelInteraction) {
+        // Create new novel interaction with bookmarked=true
+        novelInteraction = new UserNovelInteraction({
+          userId,
+          novelId: chapter.novelId,
+          bookmarked: true,
+          updatedAt: new Date()
+        });
+        await novelInteraction.save();
+      } else if (!novelInteraction.bookmarked) {
+        // Update existing interaction to bookmark the novel
+        novelInteraction.bookmarked = true;
+        novelInteraction.updatedAt = new Date();
+        await novelInteraction.save();
+      }
+    }
     
     const result = { 
       bookmarked: interaction.bookmarked,

@@ -2,6 +2,7 @@ import express from 'express';
 import mongoose from 'mongoose';
 import { auth } from '../middleware/auth.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
+import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import Novel from '../models/Novel.js';
 
 const router = express.Router();
@@ -344,7 +345,7 @@ router.get('/bookmarks', auth, async (req, res) => {
       }
     );
     
-    // Get chapter counts for each novel
+    // Get chapter counts and bookmarked chapter for each novel
     const novelsWithChapterCounts = await Promise.all(
       novels.map(async (novel) => {
         const novelObj = novel.toObject();
@@ -361,13 +362,32 @@ router.get('/bookmarks', auth, async (req, res) => {
           .select('title order')
           .lean();
 
+        // Get the bookmarked chapter for this novel
+        const bookmarkedChapterInteraction = await UserChapterInteraction
+          .findOne({ 
+            userId: userId, 
+            novelId: novel._id, 
+            bookmarked: true 
+          })
+          .populate('chapterId', 'title order')
+          .lean();
+
+        let bookmarkedChapter = null;
+        if (bookmarkedChapterInteraction && bookmarkedChapterInteraction.chapterId) {
+          bookmarkedChapter = {
+            title: bookmarkedChapterInteraction.chapterId.title,
+            number: bookmarkedChapterInteraction.chapterId.order
+          };
+        }
+
         return {
           ...novelObj,
           totalChapters: chapterCount,
           latestChapter: latestChapter ? {
             title: latestChapter.title,
             number: latestChapter.order
-          } : null
+          } : null,
+          bookmarkedChapter: bookmarkedChapter
         };
       })
     );
