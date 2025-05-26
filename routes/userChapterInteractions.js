@@ -4,12 +4,14 @@ import { auth } from '../middleware/auth.js';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
 import Chapter from '../models/Chapter.js';
-import { getCacheValue, setCacheValue, deleteCacheValue, deleteByPattern } from '../utils/redisClient.js';
+import NodeCache from 'node-cache';
 
 const router = express.Router();
 
+// Create in-memory cache for chapter interactions (5 minutes TTL)
+const interactionCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+
 // Cache keys constants
-const CACHE_TTL = 300; // 5 minutes in seconds
 const getUserInteractionCacheKey = (userId, chapterId) => `user:${userId}:chapter:${chapterId}:interaction`;
 const getChapterStatsCacheKey = (chapterId) => `chapter:${chapterId}:stats`;
 
@@ -23,7 +25,7 @@ router.get('/stats/:chapterId', async (req, res) => {
     
     // Try to get from cache first
     const cacheKey = getChapterStatsCacheKey(chapterId);
-    const cachedStats = await getCacheValue(cacheKey);
+    const cachedStats = interactionCache.get(cacheKey);
     
     if (cachedStats) {
       return res.json(cachedStats);
@@ -66,7 +68,7 @@ router.get('/stats/:chapterId', async (req, res) => {
         };
     
     // Cache the result
-    await setCacheValue(cacheKey, result, CACHE_TTL);
+    interactionCache.set(cacheKey, result);
 
     res.json(result);
   } catch (err) {
@@ -91,7 +93,7 @@ router.get('/user/:chapterId', auth, async (req, res) => {
     
     // Try to get from cache first
     const cacheKey = getUserInteractionCacheKey(userId, chapterId);
-    const cachedInteraction = await getCacheValue(cacheKey);
+    const cachedInteraction = interactionCache.get(cacheKey);
     
     if (cachedInteraction) {
       return res.json(cachedInteraction);
@@ -113,7 +115,7 @@ router.get('/user/:chapterId', auth, async (req, res) => {
     };
     
     // Cache the result
-    await setCacheValue(cacheKey, result, CACHE_TTL);
+    interactionCache.set(cacheKey, result);
     
     return res.json(result);
   } catch (err) {
@@ -183,8 +185,8 @@ router.post('/like', auth, async (req, res) => {
     };
     
     // Invalidate related caches
-    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
-    await deleteCacheValue(getChapterStatsCacheKey(chapterId));
+    interactionCache.del(getUserInteractionCacheKey(userId, chapterId));
+    interactionCache.del(getChapterStatsCacheKey(chapterId));
     
     return res.json(result);
   } catch (err) {
@@ -260,8 +262,8 @@ router.post('/rate', auth, async (req, res) => {
     };
     
     // Invalidate related caches
-    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
-    await deleteCacheValue(getChapterStatsCacheKey(chapterId));
+    interactionCache.del(getUserInteractionCacheKey(userId, chapterId));
+    interactionCache.del(getChapterStatsCacheKey(chapterId));
     
     return res.json(result);
   } catch (err) {
@@ -318,8 +320,8 @@ router.delete('/rate/:chapterId', auth, async (req, res) => {
     };
     
     // Invalidate related caches
-    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
-    await deleteCacheValue(getChapterStatsCacheKey(chapterId));
+    interactionCache.del(getUserInteractionCacheKey(userId, chapterId));
+    interactionCache.del(getChapterStatsCacheKey(chapterId));
     
     return res.json(result);
   } catch (err) {
@@ -372,7 +374,9 @@ router.post('/bookmark', auth, async (req, res) => {
       );
       
       // Invalidate all bookmark caches for this user and novel
-      await deleteByPattern(`user:${userId}:chapter:*:interaction`);
+      // Note: NodeCache doesn't support pattern deletion, so we'll clear the entire cache
+      // This is acceptable since it's in-memory and will be repopulated quickly
+      interactionCache.flushAll();
     }
 
     // Update or create interaction for this chapter
@@ -419,8 +423,8 @@ router.post('/bookmark', auth, async (req, res) => {
     };
     
     // Invalidate related caches
-    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
-    await deleteCacheValue(`user:${userId}:novel:${chapter.novelId}:bookmark`);
+    interactionCache.del(getUserInteractionCacheKey(userId, chapterId));
+    interactionCache.del(`user:${userId}:novel:${chapter.novelId}:bookmark`);
     
     return res.json(result);
   } catch (err) {
@@ -450,7 +454,7 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
     
     // Try to get from cache first
     const cacheKey = `user:${userId}:novel:${novelId}:bookmark`;
-    const cachedBookmark = await getCacheValue(cacheKey);
+    const cachedBookmark = interactionCache.get(cacheKey);
     
     if (cachedBookmark) {
       return res.json(cachedBookmark);
@@ -465,7 +469,7 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
 
     if (!interactionExists) {
       const result = { bookmarkedChapter: null };
-      await setCacheValue(cacheKey, result, CACHE_TTL);
+      interactionCache.set(cacheKey, result);
       return res.json(result);
     }
     
@@ -486,7 +490,7 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
         );
         
         const result = { bookmarkedChapter: null };
-        await setCacheValue(cacheKey, result, CACHE_TTL);
+        interactionCache.set(cacheKey, result);
         return res.json(result);
       }
       
@@ -498,12 +502,12 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
       };
       
       // Cache the result
-      await setCacheValue(cacheKey, result, CACHE_TTL);
+      interactionCache.set(cacheKey, result);
       
       return res.json(result);
     } catch (populateErr) {
       const result = { bookmarkedChapter: null };
-      await setCacheValue(cacheKey, result, CACHE_TTL);
+      interactionCache.set(cacheKey, result);
       return res.json(result);
     }
   } catch (err) {
@@ -593,8 +597,8 @@ router.post('/recently-read', auth, async (req, res) => {
     );
 
     // Invalidate related caches
-    await deleteCacheValue(`user:${userId}:recently-read`);
-    await deleteCacheValue(getUserInteractionCacheKey(userId, chapterId));
+    interactionCache.del(`user:${userId}:recently-read`);
+    interactionCache.del(getUserInteractionCacheKey(userId, chapterId));
 
     res.json({ 
       success: true, 
@@ -617,7 +621,7 @@ router.get('/recently-read', auth, async (req, res) => {
 
     // Try to get from cache first
     const cacheKey = `user:${userId}:recently-read`;
-    const cachedData = await getCacheValue(cacheKey);
+    const cachedData = interactionCache.get(cacheKey);
     
     if (cachedData) {
       return res.json(cachedData);
@@ -716,7 +720,7 @@ router.get('/recently-read', auth, async (req, res) => {
     }));
 
     // Cache the result for 5 minutes
-    await setCacheValue(cacheKey, formattedData, CACHE_TTL);
+    interactionCache.set(cacheKey, formattedData);
 
     res.json(formattedData);
   } catch (err) {

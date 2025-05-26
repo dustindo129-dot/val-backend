@@ -171,7 +171,6 @@ export const createNewChapterNotifications = async (novelId, chapterId, chapterT
     }));
 
     const savedNotifications = await Notification.insertMany(notifications);
-    console.log(`New chapter notifications created for ${bookmarkedUsers.length} users`);
     
     // Broadcast new notification events for each user
     savedNotifications.forEach(notification => {

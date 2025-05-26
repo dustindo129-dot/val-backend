@@ -25,7 +25,7 @@ export const clearNovelCaches = () => {
       cache.del(key);
     }
   });
-  console.log('Novel caches cleared');
+
 };
 
 /**
@@ -46,7 +46,7 @@ export const notifyAllClients = (eventName, data) => {
     }
   });
 
-  console.log(`Sent '${eventName}' event to ${sseClients.size} clients`);
+
 };
 
 /**

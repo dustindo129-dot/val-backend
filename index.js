@@ -230,9 +230,15 @@ app.get('/health', (req, res) => {
   const isMongoConnected = mongoose.connection.readyState === 1;
   
   if (isMongoConnected) {
-    res.status(200).json({ status: 'healthy', mongodb: 'connected' });
+    res.status(200).json({ 
+      status: 'healthy', 
+      mongodb: 'connected'
+    });
   } else {
-    res.status(503).json({ status: 'unhealthy', mongodb: 'disconnected' });
+    res.status(503).json({ 
+      status: 'unhealthy', 
+      mongodb: 'disconnected'
+    });
   }
 });
 

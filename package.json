@@ -31,7 +31,6 @@
     "node-cron": "3.0.3",
     "nodemailer": "6.10.0",
     "path-to-regexp": "8.2.0",
-    "redis": "4.7.0",
     "sirv": "3.0.1",
     "uuid": "11.1.0",
     "vite-plugin-ssr": "0.4.142"
