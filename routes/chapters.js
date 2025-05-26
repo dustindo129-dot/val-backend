@@ -235,6 +235,7 @@ router.post('/', [auth, admin], async (req, res) => {
       },
       {
         $project: {
+          mode: 1,
           lastChapterOrder: { 
             $cond: [
               { $gt: [{ $size: '$lastChapter' }, 0] },
@@ -248,6 +249,13 @@ router.post('/', [auth, admin], async (req, res) => {
 
     if (!moduleData) {
       return res.status(404).json({ message: 'Module not found' });
+    }
+
+    // Validate that paid chapters cannot be created in paid modules
+    if (mode === 'paid' && moduleData.mode === 'paid') {
+      return res.status(400).json({ 
+        message: 'Không thể tạo chương trả phí trong tập đã trả phí. Tập trả phí đã bao gồm tất cả chương bên trong.' 
+      });
     }
 
     const order = moduleData.lastChapterOrder + 1;
@@ -325,6 +333,18 @@ router.put('/:id', [auth, admin], async (req, res) => {
       chapterBalance
     } = req.body;
     const chapterId = req.params.id;
+
+    // If trying to set mode to paid, check if the module is paid
+    if (req.body.mode === 'paid') {
+      const targetModuleId = moduleId || (await Chapter.findById(chapterId, 'moduleId')).moduleId;
+      const module = await Module.findById(targetModuleId, 'mode');
+      
+      if (module && module.mode === 'paid') {
+        return res.status(400).json({ 
+          message: 'Không thể đặt chương thành trả phí trong tập đã trả phí. Tập trả phí đã bao gồm tất cả chương bên trong.' 
+        });
+      }
+    }
     
     // If moduleId is changing, handle module transition logic
     if (moduleId) {

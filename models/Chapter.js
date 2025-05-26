@@ -42,7 +42,17 @@ const chapterSchema = new mongoose.Schema({
   },
   chapterBalance: {
     type: Number,
-    default: 0
+    default: 0,
+    validate: {
+      validator: function(value) {
+        // If mode is 'paid', chapterBalance must be at least 100
+        if (this.mode === 'paid' && value < 100) {
+          return false;
+        }
+        return value >= 0;
+      },
+      message: 'Số lượng lúa cần để mở chương phải tối thiểu là 100 🌾'
+    }
   },
   views: {
     type: Number,

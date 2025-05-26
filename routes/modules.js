@@ -210,6 +210,16 @@ router.put('/:novelId/modules/reorder', auth, admin, async (req, res) => {
 // Create a new module
 router.post('/:novelId/modules', auth, admin, async (req, res) => {
   try {
+    // Validate paid module balance
+    if (req.body.mode === 'paid') {
+      const moduleBalance = parseInt(req.body.moduleBalance) || 0;
+      if (moduleBalance < 100) {
+        return res.status(400).json({ 
+          message: 'Số lượng lúa cần phải tối thiểu là 100 🌾' 
+        });
+      }
+    }
+
     // Find the highest order number for this novel
     const modules = await Module.find({ novelId: req.params.novelId })
       .sort('-order')
@@ -227,7 +237,7 @@ router.post('/:novelId/modules', auth, admin, async (req, res) => {
       order: nextOrder,
       chapters: [],
       mode: req.body.mode || 'published',
-      moduleBalance: req.body.mode === 'paid' ? (req.body.moduleBalance || 0) : 0
+      moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0
     });
 
     // Save the module
@@ -262,11 +272,21 @@ router.post('/:novelId/modules', auth, admin, async (req, res) => {
 // Update a module
 router.put('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
   try {
+    // Validate paid module balance
+    if (req.body.mode === 'paid') {
+      const moduleBalance = parseInt(req.body.moduleBalance) || 0;
+      if (moduleBalance < 100) {
+        return res.status(400).json({ 
+          message: 'Số lượng lúa cần phải tối thiểu là 100 🌾' 
+        });
+      }
+    }
+
     const updateData = {
       title: req.body.title,
       illustration: req.body.illustration,
       mode: req.body.mode || 'published',
-      moduleBalance: req.body.mode === 'paid' ? (req.body.moduleBalance || 0) : 0,
+      moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0,
       updatedAt: new Date()
     };
 

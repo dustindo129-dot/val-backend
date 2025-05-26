@@ -5,6 +5,7 @@ import User from '../models/User.js';
 import mongoose from 'mongoose';
 import { createTransaction } from './userTransaction.js';
 import { createNovelTransaction } from './novelTransactions.js';
+import ContributionHistory from '../models/ContributionHistory.js';
 
 const router = express.Router();
 
@@ -217,19 +218,36 @@ router.post('/', auth, async (req, res) => {
         }
       }
       
-      // Update novel balance with the appropriate amount (deposit minus any refund)
+      // Update novel balance and budget with the appropriate amount (deposit minus any refund)
       const effectiveDeposit = deposit - refundAmount;
       if (effectiveDeposit > 0) {
-        // Get current novel balance for transaction record
+        // Get current novel balance and budget for transaction record
         const novel = await Novel.findById(novelId).session(session);
         const oldBalance = novel ? (novel.novelBalance || 0) : 0;
+        const oldBudget = novel ? (novel.novelBudget || 0) : 0;
         const newBalance = oldBalance + effectiveDeposit;
+        const newBudget = oldBudget + effectiveDeposit;
         
         await Novel.findByIdAndUpdate(
           novelId,
-          { $inc: { novelBalance: effectiveDeposit } },
+          { 
+            $inc: { 
+              novelBalance: effectiveDeposit,
+              novelBudget: effectiveDeposit 
+            } 
+          },
           { session }
         );
+        
+        // Create contribution history record for open request
+        await ContributionHistory.create([{
+          novelId: novelId,
+          userId: req.user._id,
+          amount: effectiveDeposit,
+          note: `Yêu cầu mở ${moduleId ? 'tập' : 'chương'} tự động xử lí`,
+          budgetAfter: newBudget,
+          type: 'user'
+        }], { session });
         
         // Create novel transaction record
         await createNovelTransaction({
@@ -414,16 +432,49 @@ router.post('/:requestId/approve', auth, async (req, res) => {
     
     const totalContributions = allContributions.reduce((sum, contribution) => sum + contribution.amount, 0);
     
-    // Update novel balance with deposit + all contributions
+    // Update novel balance and budget with deposit + all contributions
     const totalAmount = request.deposit + totalContributions;
     const oldBalance = matchingNovel.novelBalance || 0;
+    const oldBudget = matchingNovel.novelBudget || 0;
     const newBalance = oldBalance + totalAmount;
+    const newBudget = oldBudget + totalAmount;
     
     await Novel.findByIdAndUpdate(
       matchingNovel._id, 
-      { $inc: { novelBalance: totalAmount } },
+      { 
+        $inc: { 
+          novelBalance: totalAmount,
+          novelBudget: totalAmount 
+        } 
+      },
       { session }
     );
+    
+    // Create contribution history record for the request deposit
+    if (request.deposit > 0) {
+      await ContributionHistory.create([{
+        novelId: matchingNovel._id,
+        userId: request.user,
+        amount: request.deposit,
+        note: request.type === 'new' 
+          ? `Tiền cọc yêu cầu truyện mới: ${request.title}`
+          : `Tiền cọc đề xuất từ nhóm dịch: ${request.title}`,
+        budgetAfter: newBudget,
+        type: 'user'
+      }], { session });
+    }
+    
+    // Create contribution history records for all approved contributions
+    for (const contribution of allContributions) {
+      await ContributionHistory.create([{
+        novelId: matchingNovel._id,
+        userId: contribution.user,
+        amount: contribution.amount,
+        note: `Đóng góp cho yêu cầu: ${request.title}${contribution.note ? ` - ${contribution.note}` : ''}`,
+        budgetAfter: newBudget, // All contributions are processed together, so they all get the final budget
+        type: 'user'
+      }], { session });
+    }
     
     // Create novel transaction record
     await createNovelTransaction({

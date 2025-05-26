@@ -32,6 +32,11 @@ const novelSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  novelBudget: { 
+    type: Number, 
+    default: 0,
+    min: 0
+  },
   views: {
     total: { type: Number, default: 0 },
     daily: [{

@@ -19,6 +19,7 @@ import chapterRoutes from './routes/chapters.js';
 import userChapterInteractionRoutes from './routes/userChapterInteractions.js';
 import userTransactionRoutes from './routes/userTransaction.js';
 import novelTransactionRoutes from './routes/novelTransactions.js';
+import giftRoutes from './routes/gifts.js';
 import redisClient, { getRedisStatus } from './utils/redisClient.js';
 import { auth } from './middleware/auth.js';
 import admin from './middleware/admin.js';
@@ -85,3 +86,4 @@ app.use('/api/chapters', chapterRoutes); // Chapter routes
 app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User chapter interactions
 app.use('/api/transactions', userTransactionRoutes); // User transaction ledger routes
 app.use('/api/novel-transactions', novelTransactionRoutes); // Novel transaction ledger routes
+app.use('/api/gifts', giftRoutes); // Gift system routes

@@ -16,7 +16,7 @@ const novelTransactionSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['request', 'open', 'admin', 'contribution', 'other'],
+    enum: ['request', 'open', 'admin', 'contribution', 'gift_received', 'other'],
     required: true
   },
   description: {
@@ -33,7 +33,7 @@ const novelTransactionSchema = new mongoose.Schema({
   },
   sourceModel: {
     type: String,
-    enum: ['Request', 'Contribution', 'User', null]
+    enum: ['Request', 'Contribution', 'User', 'GiftTransaction', null]
   },
   performedBy: {
     type: mongoose.Schema.Types.ObjectId,
