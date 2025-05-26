@@ -92,6 +92,48 @@ const setCacheControlHeaders = (req, res, next) => {
 router.use(setCacheControlHeaders);
 
 /**
+ * Lookup novel ID by slug
+ * @route GET /api/novels/slug/:slug
+ */
+router.get("/slug/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    // Extract the short ID from the slug (last 8 characters after final hyphen)
+    const parts = slug.split('-');
+    const shortId = parts[parts.length - 1];
+    
+    // If it's already a full MongoDB ID, return it
+    if (/^[0-9a-fA-F]{24}$/.test(slug)) {
+      const novel = await Novel.findById(slug).select('_id title').lean();
+      if (novel) {
+        return res.json({ id: novel._id, title: novel.title });
+      }
+      return res.status(404).json({ message: "Novel not found" });
+    }
+    
+    // If we have a short ID (8 hex characters), find the novel
+    if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
+      // Use a more robust approach - get all novels and filter in JavaScript
+      // This is more reliable than regex with ObjectIds
+      const novels = await Novel.find({}, '_id title').lean();
+      const matchingNovel = novels.find(novel => 
+        novel._id.toString().toLowerCase().endsWith(shortId.toLowerCase())
+      );
+      
+      if (matchingNovel) {
+        return res.json({ id: matchingNovel._id, title: matchingNovel.title });
+      }
+    }
+    
+    res.status(404).json({ message: "Novel not found" });
+  } catch (err) {
+    console.error('Error in novel slug lookup:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
  * Search novels by title
  * Supports partial matches and case-insensitive search
  * @route GET /api/novels/search

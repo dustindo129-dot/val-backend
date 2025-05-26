@@ -12,6 +12,48 @@ import { clearNovelCaches, notifyAllClients } from '../utils/cacheUtils.js';
 
 const router = express.Router();
 
+/**
+ * Lookup chapter ID by slug
+ * @route GET /api/chapters/slug/:slug
+ */
+router.get("/slug/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    // Extract the short ID from the slug (last 8 characters after final hyphen)
+    const parts = slug.split('-');
+    const shortId = parts[parts.length - 1];
+    
+    // If it's already a full MongoDB ID, return it
+    if (/^[0-9a-fA-F]{24}$/.test(slug)) {
+      const chapter = await Chapter.findById(slug).select('_id title').lean();
+      if (chapter) {
+        return res.json({ id: chapter._id, title: chapter.title });
+      }
+      return res.status(404).json({ message: "Chapter not found" });
+    }
+    
+    // If we have a short ID (8 hex characters), find the chapter
+    if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
+      // Use a more robust approach - get all chapters and filter in JavaScript
+      // This is more reliable than regex with ObjectIds
+      const chapters = await Chapter.find({}, '_id title').lean();
+      const matchingChapter = chapters.find(chapter => 
+        chapter._id.toString().toLowerCase().endsWith(shortId.toLowerCase())
+      );
+      
+      if (matchingChapter) {
+        return res.json({ id: matchingChapter._id, title: matchingChapter.title });
+      }
+    }
+    
+    res.status(404).json({ message: "Chapter not found" });
+  } catch (err) {
+    console.error('Error in chapter slug lookup:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Get all chapters for a module
 router.get('/module/:moduleId', async (req, res) => {
   try {
