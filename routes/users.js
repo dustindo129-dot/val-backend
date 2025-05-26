@@ -84,6 +84,63 @@ router.put('/:username/email', auth, async (req, res) => {
 });
 
 /**
+ * Update user's display name
+ * Can only be changed once per month
+ * @route PUT /api/users/:username/display-name
+ */
+router.put('/:username/display-name', auth, async (req, res) => {
+  try {
+    // Check if user exists and matches the authenticated user
+    if (req.user.username !== req.params.username) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    const { displayName } = req.body;
+
+    // Validate display name
+    if (!displayName || displayName.trim().length === 0) {
+      return res.status(400).json({ message: 'Display name cannot be empty' });
+    }
+
+    if (displayName.trim().length > 50) {
+      return res.status(400).json({ message: 'Display name cannot exceed 50 characters' });
+    }
+
+    // Get user
+    const user = await User.findById(req.user._id);
+
+    // Check if user can change display name (once per month)
+    if (user.displayNameLastChanged) {
+      const oneMonthAgo = new Date();
+      oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+      
+      if (user.displayNameLastChanged > oneMonthAgo) {
+        const nextChangeDate = new Date(user.displayNameLastChanged);
+        nextChangeDate.setMonth(nextChangeDate.getMonth() + 1);
+        
+        return res.status(400).json({ 
+          message: 'You can only change your display name once per month',
+          nextChangeDate: nextChangeDate.toISOString()
+        });
+      }
+    }
+
+    // Update display name and timestamp
+    user.displayName = displayName.trim();
+    user.displayNameLastChanged = new Date();
+    await user.save();
+
+    res.json({ 
+      displayName: user.displayName,
+      displayNameLastChanged: user.displayNameLastChanged
+    });
+  } catch (error) {
+    console.error('Display name update error:', error);
+    res.status(500).json({ message: 'Failed to update display name' });
+  }
+});
+
+/**
  * Update user's password
  * Requires current password verification
  * @route PUT /api/users/:username/password
@@ -416,7 +473,7 @@ router.delete('/:username/block/:blockedUsername', auth, async (req, res) => {
 router.get('/:username/blocked', auth, async (req, res) => {
   try {
     const user = await User.findById(req.user._id)
-      .populate('blockedUsers', 'username avatar');
+      .populate('blockedUsers', 'username displayName avatar');
     
     res.json(user.blockedUsers);
   } catch (error) {
@@ -512,7 +569,7 @@ router.get('/banned', auth, async (req, res) => {
     }
 
     const bannedUsers = await User.find({ isBanned: true })
-      .select('username avatar');
+      .select('username displayName avatar');
 
     res.json(bannedUsers);
   } catch (error) {
@@ -533,13 +590,14 @@ router.get('/search', auth, async (req, res) => {
       return res.status(400).json({ message: 'Search query must be at least 2 characters' });
     }
     
-    // Search for users by username or email
+    // Search for users by username, displayName, or email
     const users = await User.find({
       $or: [
         { username: { $regex: query, $options: 'i' } },
+        { displayName: { $regex: query, $options: 'i' } },
         { email: { $regex: query, $options: 'i' } }
       ]
-    }).select('username avatar balance');
+    }).select('username displayName avatar balance');
     
     res.json(users);
   } catch (error) {

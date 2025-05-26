@@ -48,7 +48,7 @@ router.post('/register-admin', async (req, res) => {
       { expiresIn: '24h' }
     );
 
-    res.status(201).json({ token, user: { id: user._id, username: user.username, email: user.email, role: user.role } });
+    res.status(201).json({ token, user: { id: user._id, username: user.username, displayName: user.displayName, email: user.email, role: user.role, displayNameLastChanged: user.displayNameLastChanged } });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -111,9 +111,11 @@ router.post('/signup', async (req, res) => {
       user: { 
         id: user._id, 
         username: user.username,
+        displayName: user.displayName,
         email: user.email, 
         role: user.role,
-        avatar: user.avatar
+        avatar: user.avatar,
+        displayNameLastChanged: user.displayNameLastChanged
       } 
     });
     console.log('--- Signup process completed ---\n');
@@ -164,9 +166,11 @@ router.post('/login', async (req, res) => {
       user: { 
         id: user._id, 
         username: user.username,
+        displayName: user.displayName,
         email: user.email,
         role: user.role,
-        avatar: user.avatar
+        avatar: user.avatar,
+        displayNameLastChanged: user.displayNameLastChanged
       } 
     });
   } catch (error) {

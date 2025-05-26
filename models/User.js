@@ -12,6 +12,14 @@ const userSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  displayName: {
+    type: String,
+    trim: true
+  },
+  displayNameLastChanged: {
+    type: Date,
+    default: null
+  },
   email: {
     type: String,
     required: true,
@@ -81,10 +89,17 @@ userSchema.index({ username: 1 }, { unique: true, background: true });
 userSchema.index({ email: 1 }, { unique: true, background: true });
 
 /**
- * Pre-save middleware to hash password before saving
+ * Pre-save middleware to hash password and set displayName default
  * Only hashes password if it has been modified
+ * Sets displayName to username if not provided
  */
 userSchema.pre('save', async function(next) {
+  // Set displayName to username if not provided
+  if (!this.displayName) {
+    this.displayName = this.username;
+  }
+  
+  // Only hash password if it has been modified
   if (!this.isModified('password')) return next();
   
   try {
