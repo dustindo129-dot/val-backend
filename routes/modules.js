@@ -9,6 +9,48 @@ import mongoose from 'mongoose';
 
 const router = express.Router();
 
+/**
+ * Lookup module ID by slug
+ * @route GET /api/modules/slug/:slug
+ */
+router.get("/slug/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    // Extract the short ID from the slug (last 8 characters after final hyphen)
+    const parts = slug.split('-');
+    const shortId = parts[parts.length - 1];
+    
+    // If it's already a full MongoDB ID, return it
+    if (/^[0-9a-fA-F]{24}$/.test(slug)) {
+      const module = await Module.findById(slug).select('_id title').lean();
+      if (module) {
+        return res.json({ id: module._id, title: module.title });
+      }
+      return res.status(404).json({ message: "Module not found" });
+    }
+    
+    // If we have a short ID (8 hex characters), find the module
+    if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
+      // Use a more robust approach - get all modules and filter in JavaScript
+      // This is more reliable than regex with ObjectIds
+      const modules = await Module.find({}, '_id title').lean();
+      const matchingModule = modules.find(module => 
+        module._id.toString().toLowerCase().endsWith(shortId.toLowerCase())
+      );
+      
+      if (matchingModule) {
+        return res.json({ id: matchingModule._id, title: matchingModule.title });
+      }
+    }
+    
+    res.status(404).json({ message: "Module not found" });
+  } catch (err) {
+    console.error('Error in module slug lookup:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // New optimized route to get all modules with chapters for a novel
 router.get('/:novelId/modules-with-chapters', async (req, res) => {
   try {
