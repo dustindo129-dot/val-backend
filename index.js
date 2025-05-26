@@ -35,6 +35,7 @@ import moduleRoutes from './routes/modules.js';
 import userChapterInteractionRoutes from './routes/userChapterInteractions.js';
 import userNovelInteractionRoutes from './routes/userNovelInteractions.js';
 import reportRoutes from './routes/reports.js';
+import notificationRoutes from './routes/notifications.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import requestRoutes from './routes/requests.js';
 import topupRoutes from './routes/topup.js';
@@ -212,6 +213,7 @@ app.use('/api/modules', moduleRoutes);   // Module management endpoints
 app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User chapter interactions endpoints
 app.use('/api/usernovelinteractions', userNovelInteractionRoutes); // User novel interactions endpoints
 app.use('/api/reports', reportRoutes); // Report endpoints
+app.use('/api/notifications', notificationRoutes); // Notification endpoints
 app.use('/api/upload', uploadRoutes); // File upload endpoints
 app.use('/api/requests', requestRoutes); // Request system endpoints
 app.use('/api/topup', topupRoutes); // Top-up transaction endpoints

@@ -59,10 +59,6 @@ const userSchema = new mongoose.Schema({
       message: 'Cannot block more than 50 users'
     }
   }],
-  bookmarks: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Novel'
-  }],
   favorites: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Novel'

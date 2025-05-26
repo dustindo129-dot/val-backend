@@ -1,6 +1,7 @@
 import express from 'express';
 import Report from '../models/Report.js';
 import { auth, checkRole } from '../middleware/auth.js';
+import { createReportFeedbackNotification } from '../services/notificationService.js';
 
 const router = express.Router();
 
@@ -71,6 +72,7 @@ router.get('/', auth, checkRole(['admin', 'moderator']), async (req, res) => {
  */
 router.put('/:id/resolve', auth, checkRole(['admin', 'moderator']), async (req, res) => {
   try {
+    const { responseMessage } = req.body;
     const report = await Report.findById(req.params.id);
     
     if (!report) {
@@ -79,6 +81,18 @@ router.put('/:id/resolve', auth, checkRole(['admin', 'moderator']), async (req, 
     
     report.status = 'resolved';
     await report.save();
+    
+    // Always create notification (with or without response message)
+    await createReportFeedbackNotification(
+      report.reporter.toString(),
+      report._id.toString(),
+      responseMessage || '',
+      {
+        contentType: report.contentType,
+        contentId: report.contentId,
+        novelId: report.novelId
+      }
+    );
     
     res.json({ message: 'Report resolved successfully' });
   } catch (error) {

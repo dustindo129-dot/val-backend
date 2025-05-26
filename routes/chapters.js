@@ -9,6 +9,7 @@ import UserChapterInteraction from '../models/UserChapterInteraction.js';
 
 // Import the novel cache clearing function
 import { clearNovelCaches, notifyAllClients } from '../utils/cacheUtils.js';
+import { createNewChapterNotifications } from '../services/notificationService.js';
 
 const router = express.Router();
 
@@ -302,6 +303,13 @@ router.post('/', [auth, admin], async (req, res) => {
       Novel.findById(novelId).select('title'),
       Chapter.findById(newChapter._id).populate('moduleId', 'title')
     ]);
+
+    // Create notifications for users who bookmarked this novel
+    await createNewChapterNotifications(
+      novelId.toString(),
+      newChapter._id.toString(),
+      newChapter.title
+    );
 
     // Notify all clients about the new chapter
     notifyAllClients('new_chapter', {
@@ -694,6 +702,130 @@ router.get('/:id/full', async (req, res) => {
   } catch (err) {
     console.error('Error getting full chapter data:', err);
     res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Create a new chapter
+ * @route POST /api/chapters
+ */
+router.post('/', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    const { 
+      title, 
+      content, 
+      novelId, 
+      moduleId, 
+      order, 
+      translator, 
+      editor, 
+      proofreader,
+      mode = 'free',
+      chapterBalance = 0,
+      footnotes = []
+    } = req.body;
+
+    // Validate required fields
+    if (!title || !content || !novelId || !moduleId) {
+      await session.abortTransaction();
+      return res.status(400).json({ 
+        message: 'Title, content, novelId, and moduleId are required' 
+      });
+    }
+
+    // Verify the novel exists
+    const novel = await Novel.findById(novelId).session(session);
+    if (!novel) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Novel not found' });
+    }
+
+    // Verify the module exists
+    const module = await Module.findById(moduleId).session(session);
+    if (!module) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Module not found' });
+    }
+
+    // Determine the order if not provided
+    let chapterOrder = order;
+    if (!chapterOrder) {
+      const lastChapter = await Chapter.findOne(
+        { moduleId },
+        { order: 1 }
+      ).sort({ order: -1 }).session(session);
+      chapterOrder = lastChapter ? lastChapter.order + 1 : 1;
+    }
+
+    // Create the new chapter
+    const chapter = new Chapter({
+      title,
+      content,
+      novelId,
+      moduleId,
+      order: chapterOrder,
+      translator,
+      editor,
+      proofreader,
+      mode,
+      chapterBalance: mode === 'paid' ? chapterBalance : 0,
+      footnotes
+    });
+
+    // Save the chapter
+    await chapter.save({ session });
+
+    // Add chapter to module's chapters array
+    await Module.findByIdAndUpdate(
+      moduleId,
+      { 
+        $addToSet: { chapters: chapter._id },
+        $set: { updatedAt: new Date() }
+      },
+      { session }
+    );
+
+    // Update novel's timestamp
+    await Novel.findByIdAndUpdate(
+      novelId,
+      { $set: { updatedAt: new Date() } },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    // Create notifications for users who bookmarked this novel
+    await createNewChapterNotifications(
+      novelId.toString(),
+      chapter._id.toString(),
+      title
+    );
+
+    // Clear novel caches
+    clearNovelCaches();
+
+    // Notify clients of the new chapter
+    notifyAllClients('update', {
+      type: 'chapter_created',
+      novelId: novelId,
+      chapterId: chapter._id,
+      chapterTitle: title,
+      timestamp: new Date().toISOString()
+    });
+
+    // Populate and return the created chapter
+    await chapter.populate('novelId', 'title');
+    res.status(201).json(chapter);
+
+  } catch (err) {
+    await session.abortTransaction();
+    console.error('Error creating chapter:', err);
+    res.status(400).json({ message: err.message });
+  } finally {
+    session.endSession();
   }
 });
 

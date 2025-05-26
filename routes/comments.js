@@ -2,6 +2,7 @@ import express from 'express';
 import { auth, checkBan } from '../middleware/auth.js';
 import Comment from '../models/Comment.js';
 import { broadcastEvent } from '../services/sseService.js';
+import { createCommentReplyNotification } from '../services/notificationService.js';
 
 const router = express.Router();
 
@@ -273,6 +274,36 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     
     // Populate user info
     await reply.populate('user', 'username avatar');
+
+    // Create notification for the original commenter
+    if (parentComment.user.toString() !== req.user._id.toString()) {
+      // Extract novelId and chapterId from contentId and contentType
+      let novelId = null;
+      let chapterId = null;
+      
+      if (parentComment.contentType === 'novels') {
+        novelId = parentComment.contentId;
+      } else if (parentComment.contentType === 'chapters') {
+        // For chapters, contentId might be in format "novelId-chapterId"
+        const parts = parentComment.contentId.split('-');
+        if (parts.length === 2) {
+          novelId = parts[0];
+          chapterId = parts[1];
+        } else {
+          chapterId = parentComment.contentId;
+        }
+      }
+      
+      if (novelId || chapterId) {
+        await createCommentReplyNotification(
+          parentComment.user.toString(),
+          reply._id.toString(),
+          req.user.username,
+          novelId,
+          chapterId
+        );
+      }
+    }
 
     // Notify clients about the new comment via SSE
     broadcastEvent('new_comment', {
