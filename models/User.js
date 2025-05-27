@@ -1,6 +1,11 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 
+// Helper function to escape regex special characters
+const escapeRegex = (string) => {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
 /**
  * User Schema
  * Represents a user in the system with authentication, profile, and preferences
@@ -80,9 +85,10 @@ const userSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Create unique indexes for username and email
+// Create unique indexes for username, email, and displayName
 userSchema.index({ username: 1 }, { unique: true, background: true });
 userSchema.index({ email: 1 }, { unique: true, background: true });
+userSchema.index({ displayName: 1 }, { unique: true, sparse: true, background: true });
 
 /**
  * Pre-save middleware to hash password and set displayName default
@@ -93,6 +99,20 @@ userSchema.pre('save', async function(next) {
   // Set displayName to username if not provided
   if (!this.displayName) {
     this.displayName = this.username;
+  }
+  
+  // Check for duplicate displayName if it's being modified (case-insensitive)
+  if (this.isModified('displayName')) {
+    const existingUser = await mongoose.model('User').findOne({
+      displayName: { $regex: new RegExp(`^${escapeRegex(this.displayName)}$`, 'i') },
+      _id: { $ne: this._id }
+    });
+    
+    if (existingUser) {
+      const error = new Error('Tên hiển thị đã tồn tại');
+      error.code = 11000; // Duplicate key error code
+      return next(error);
+    }
   }
   
   // Only hash password if it has been modified

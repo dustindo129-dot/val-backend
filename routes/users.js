@@ -5,6 +5,11 @@ import UserNovelInteraction from '../models/UserNovelInteraction.js';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 
+// Helper function to escape regex special characters
+const escapeRegex = (string) => {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
 const router = express.Router();
 
 /**
@@ -123,6 +128,18 @@ router.put('/:username/display-name', auth, async (req, res) => {
           nextChangeDate: nextChangeDate.toISOString()
         });
       }
+    }
+
+    // Check if display name is already taken by another user (case-insensitive)
+    const existingUser = await User.findOne({ 
+      displayName: { $regex: new RegExp(`^${escapeRegex(displayName.trim())}$`, 'i') },
+      _id: { $ne: user._id }
+    });
+    
+    if (existingUser) {
+      return res.status(400).json({ 
+        message: 'Tên hiển thị đã tồn tại. Vui lòng chọn tên khác.'
+      });
     }
 
     // Update display name and timestamp
