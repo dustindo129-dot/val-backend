@@ -50,6 +50,50 @@ router.get('/unread-count', auth, async (req, res) => {
   }
 });
 
+// Mark all notifications as read
+router.put('/read-all', auth, async (req, res) => {
+  try {
+    await Notification.updateMany(
+      { 
+        userId: req.user._id,
+        isRead: false
+      },
+      { isRead: true }
+    );
+
+    // Broadcast notifications cleared event
+    broadcastEvent('notifications_cleared', {
+      userId: req.user._id,
+      allRead: true
+    });
+
+    res.json({ message: 'Đã đánh dấu tất cả thông báo đã đọc' });
+  } catch (error) {
+    console.error('Error marking all notifications as read:', error);
+    res.status(500).json({ message: 'Không thể đánh dấu tất cả thông báo đã đọc' });
+  }
+});
+
+// Delete all notifications
+router.delete('/delete-all', auth, async (req, res) => {
+  try {
+    await Notification.deleteMany({
+      userId: req.user._id
+    });
+
+    // Broadcast notifications deleted event
+    broadcastEvent('notifications_deleted', {
+      userId: req.user._id,
+      allDeleted: true
+    });
+
+    res.json({ message: 'Đã xóa tất cả thông báo' });
+  } catch (error) {
+    console.error('Error deleting all notifications:', error);
+    res.status(500).json({ message: 'Không thể xóa tất cả thông báo' });
+  }
+});
+
 // Mark notification as read
 router.put('/:id/read', auth, async (req, res) => {
   try {
@@ -80,27 +124,28 @@ router.put('/:id/read', auth, async (req, res) => {
   }
 });
 
-// Mark all notifications as read
-router.put('/read-all', auth, async (req, res) => {
+// Delete individual notification
+router.delete('/:id', auth, async (req, res) => {
   try {
-    await Notification.updateMany(
-      { 
-        userId: req.user._id,
-        isRead: false
-      },
-      { isRead: true }
-    );
-
-    // Broadcast notifications cleared event
-    broadcastEvent('notifications_cleared', {
-      userId: req.user._id,
-      allRead: true
+    const notification = await Notification.findOneAndDelete({
+      _id: req.params.id,
+      userId: req.user._id
     });
 
-    res.json({ message: 'Đã đánh dấu tất cả thông báo đã đọc' });
+    if (!notification) {
+      return res.status(404).json({ message: 'Không tìm thấy thông báo' });
+    }
+
+    // Broadcast notification deleted event
+    broadcastEvent('notification_deleted', {
+      userId: req.user._id,
+      notificationId: req.params.id
+    });
+
+    res.json({ message: 'Đã xóa thông báo' });
   } catch (error) {
-    console.error('Error marking all notifications as read:', error);
-    res.status(500).json({ message: 'Không thể đánh dấu tất cả thông báo đã đọc' });
+    console.error('Error deleting notification:', error);
+    res.status(500).json({ message: 'Không thể xóa thông báo' });
   }
 });
 

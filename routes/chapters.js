@@ -259,6 +259,13 @@ router.post('/', [auth, admin], async (req, res) => {
       });
     }
 
+    // Validate minimum chapter balance for paid chapters
+    if (mode === 'paid' && parseInt(chapterBalance) < 50) {
+      return res.status(400).json({ 
+        message: 'Số lúa chương tối thiểu là 50 🌾 cho chương trả phí.' 
+      });
+    }
+
     const order = moduleData.lastChapterOrder + 1;
 
     // Create the new chapter with staff fields and footnotes
@@ -363,6 +370,13 @@ router.put('/:id', [auth, admin], async (req, res) => {
       if (module && module.mode === 'paid') {
         return res.status(400).json({ 
           message: 'Không thể đặt chương thành trả phí trong tập đã trả phí. Tập trả phí đã bao gồm tất cả chương bên trong.' 
+        });
+      }
+
+      // Validate minimum chapter balance for paid chapters
+      if (parseInt(chapterBalance) < 50) {
+        return res.status(400).json({ 
+          message: 'Số lúa chương tối thiểu là 50 🌾 cho chương trả phí.' 
         });
       }
     }
