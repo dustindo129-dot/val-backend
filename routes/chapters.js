@@ -320,6 +320,13 @@ router.post('/', [auth, admin], async (req, res) => {
       timestamp: new Date().toISOString()
     });
 
+    // Check for auto-unlock if a paid chapter was created
+    if (mode === 'paid') {
+      // Import the checkAndUnlockContent function from novels.js
+      const { checkAndUnlockContent } = await import('./novels.js');
+      await checkAndUnlockContent(novelId);
+    }
+
     res.status(201).json(populatedChapter);
   } catch (err) {
     console.error('Error creating chapter:', err);
@@ -342,9 +349,15 @@ router.put('/:id', [auth, admin], async (req, res) => {
     } = req.body;
     const chapterId = req.params.id;
 
+    // Get the original chapter data to check for mode changes
+    const originalChapter = await Chapter.findById(chapterId, 'mode novelId moduleId');
+    if (!originalChapter) {
+      return res.status(404).json({ message: 'Chapter not found' });
+    }
+
     // If trying to set mode to paid, check if the module is paid
     if (req.body.mode === 'paid') {
-      const targetModuleId = moduleId || (await Chapter.findById(chapterId, 'moduleId')).moduleId;
+      const targetModuleId = moduleId || originalChapter.moduleId;
       const module = await Module.findById(targetModuleId, 'mode');
       
       if (module && module.mode === 'paid') {
@@ -440,6 +453,13 @@ router.put('/:id', [auth, admin], async (req, res) => {
           
           // Clear novel caches to ensure fresh data
           clearNovelCaches();
+
+          // Check for auto-unlock if chapter was changed to paid mode
+          if (req.body.mode === 'paid' && originalChapter.mode !== 'paid') {
+            // Import the checkAndUnlockContent function from novels.js
+            const { checkAndUnlockContent } = await import('./novels.js');
+            await checkAndUnlockContent(originalChapter.novelId);
+          }
           
           // Get updated chapter to return to client
           const updatedChapter = await Chapter.findById(chapterId);
@@ -489,6 +509,13 @@ router.put('/:id', [auth, admin], async (req, res) => {
     if (title || content) {
       // Clear novel caches
       clearNovelCaches();
+    }
+
+    // Check for auto-unlock if chapter was changed to paid mode
+    if (req.body.mode === 'paid' && originalChapter.mode !== 'paid') {
+      // Import the checkAndUnlockContent function from novels.js
+      const { checkAndUnlockContent } = await import('./novels.js');
+      await checkAndUnlockContent(originalChapter.novelId);
     }
     
     res.json(updatedChapter);

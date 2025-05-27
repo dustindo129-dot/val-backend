@@ -254,6 +254,13 @@ router.post('/:novelId/modules', auth, admin, async (req, res) => {
     
     // Clear novel caches in one operation
     clearNovelCaches();
+
+    // Check for auto-unlock if a paid module was created
+    if (req.body.mode === 'paid') {
+      // Import the checkAndUnlockContent function from novels.js
+      const { checkAndUnlockContent } = await import('./novels.js');
+      await checkAndUnlockContent(req.params.novelId);
+    }
     
     // Return the created module
     res.status(201).json(newModule);
@@ -272,6 +279,12 @@ router.post('/:novelId/modules', auth, admin, async (req, res) => {
 // Update a module
 router.put('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
   try {
+    // Get the current module to check if mode is changing to paid
+    const currentModule = await Module.findById(req.params.moduleId);
+    if (!currentModule) {
+      return res.status(404).json({ message: 'Module not found' });
+    }
+
     // Validate paid module balance
     if (req.body.mode === 'paid') {
       const moduleBalance = parseInt(req.body.moduleBalance) || 0;
@@ -308,6 +321,13 @@ router.put('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
     
     // Clear novel caches to ensure fresh data on next request
     clearNovelCaches();
+
+    // Check for auto-unlock if module was changed to paid mode
+    if (req.body.mode === 'paid' && currentModule.mode !== 'paid') {
+      // Import the checkAndUnlockContent function from novels.js
+      const { checkAndUnlockContent } = await import('./novels.js');
+      await checkAndUnlockContent(req.params.novelId);
+    }
     
     res.json(updatedModule);
   } catch (err) {

@@ -10,6 +10,7 @@ import Request from '../models/Request.js';
 import Contribution from '../models/Contribution.js';
 import { createNovelTransaction } from '../routes/novelTransactions.js';
 import ContributionHistory from '../models/ContributionHistory.js';
+import Comment from '../models/Comment.js';
 import mongoose from 'mongoose';
 
 const router = express.Router();
@@ -808,33 +809,103 @@ router.put("/:id", auth, async (req, res) => {
  * @route DELETE /api/novels/:id
  */
 router.delete("/:id", auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
   try {
     console.log(`Deleting novel with ID: ${req.params.id}`);
-    const novel = await Novel.findByIdAndDelete(req.params.id);
+    const novel = await Novel.findById(req.params.id).session(session);
     if (!novel) {
+      await session.abortTransaction();
       return res.status(404).json({ message: "Novel not found" });
     }
 
-    // Also remove all chapters associated with this novel
-    await Chapter.deleteMany({ novelId: req.params.id });
+    const novelId = req.params.id;
+
+    // First get all chapter IDs for this novel (before deleting them)
+    const chapterIds = await Chapter.find({ novelId: novelId })
+      .select('_id')
+      .session(session)
+      .lean();
+
+    // Delete all comments for this novel (contentType: 'novels' and contentId: novelId)
+    await Comment.deleteMany({ 
+      contentType: 'novels', 
+      contentId: novelId 
+    }).session(session);
+
+    // Delete all comments for chapters of this novel
+    if (chapterIds.length > 0) {
+      const chapterIdStrings = chapterIds.map(ch => ch._id.toString());
+      // Delete comments for chapters (contentType: 'chapters' and contentId contains chapter ID)
+      await Comment.deleteMany({
+        contentType: 'chapters',
+        contentId: { $in: chapterIdStrings.map(id => new RegExp(id)) }
+      }).session(session);
+    }
+
+    // Delete all chapters associated with this novel
+    await Chapter.deleteMany({ novelId: novelId }).session(session);
     
-    // Also remove all modules associated with this novel
-    await Module.deleteMany({ novelId: req.params.id });
+    // Delete all modules associated with this novel
+    await Module.deleteMany({ novelId: novelId }).session(session);
+
+    // Delete all user interactions with this novel (ratings, reviews, likes, bookmarks)
+    await UserNovelInteraction.deleteMany({ novelId: novelId }).session(session);
+
+    // Delete all contribution history for this novel
+    await ContributionHistory.deleteMany({ novelId: novelId }).session(session);
+
+    // Delete all novel transactions for this novel
+    const NovelTransaction = mongoose.model('NovelTransaction');
+    await NovelTransaction.deleteMany({ novel: novelId }).session(session);
+
+    // First find all request IDs for this novel (before deleting them)
+    const novelRequests = await Request.find({ novel: novelId })
+      .select('_id')
+      .session(session)
+      .lean();
+    
+    // Delete all contributions to requests related to this novel
+    if (novelRequests.length > 0) {
+      const requestIds = novelRequests.map(req => req._id);
+      await Contribution.deleteMany({ 
+        request: { $in: requestIds } 
+      }).session(session);
+    }
+
+    // Delete all requests related to this novel
+    await Request.deleteMany({ novel: novelId }).session(session);
+
+    // Remove this novel from all users' favorites
+    const User = mongoose.model('User');
+    await User.updateMany(
+      { favorites: novelId },
+      { $pull: { favorites: novelId } }
+    ).session(session);
+
+    // Finally, delete the novel itself
+    await Novel.findByIdAndDelete(novelId).session(session);
+
+    await session.commitTransaction();
 
     // Clear all novel-related caches after deletion
     clearNovelCaches();
     
     // Send special notification about novel deletion
     notifyAllClients('novel_deleted', { 
-      id: req.params.id,
+      id: novelId,
       title: novel.title,
       timestamp: new Date().toISOString()
     });
     
     res.json({ message: "Novel and all related content deleted successfully" });
   } catch (err) {
+    await session.abortTransaction();
     console.error("Error deleting novel:", err);
     res.status(500).json({ message: err.message });
+  } finally {
+    session.endSession();
   }
 });
 
@@ -1538,7 +1609,7 @@ router.get("/:id/contribution-history", async (req, res) => {
  * This function checks if any paid modules/chapters can be unlocked in sequential order
  * It stops at the first paid content that cannot be afforded
  */
-async function checkAndUnlockContent(novelId) {
+export async function checkAndUnlockContent(novelId) {
   try {
     const novel = await Novel.findById(novelId);
     if (!novel || novel.novelBudget <= 0) return;

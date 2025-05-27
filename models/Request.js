@@ -13,7 +13,7 @@ const requestSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['new', 'open', 'web'],
+    enum: ['new', 'web'],
     required: true
   },
   title: {
@@ -27,9 +27,7 @@ const requestSchema = new mongoose.Schema({
   novel: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Novel',
-    required: function() {
-      return this.type === 'open';
-    }
+    required: false
   },
   module: {
     type: mongoose.Schema.Types.ObjectId,
