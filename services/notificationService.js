@@ -18,7 +18,7 @@ export const createReportFeedbackNotification = async (reporterId, reportId, res
     // Create message based on whether there's a custom response
     let message;
     if (responseMessage && responseMessage.trim()) {
-      message = `Báo cáo của bạn đã được xử lí cùng lời nhắn: ${responseMessage.trim()}`;
+      message = `Báo cáo của bạn đã được xử lí cùng lời nhắn: <i>${responseMessage.trim()}</i>`;
     } else {
       message = 'Báo cáo của bạn đã được xử lí';
     }
@@ -81,7 +81,7 @@ export const createReportFeedbackNotification = async (reporterId, reportId, res
  * Create a notification for comment reply
  * @param {string} originalCommenterId - ID of the user who made the original comment
  * @param {string} replyCommentId - ID of the reply comment
- * @param {string} replierUsername - Username of the person who replied
+ * @param {string} replierUsername - Username of the person who replied (deprecated, now using display name from user object)
  * @param {string} novelId - ID of the novel where the comment was made
  * @param {string} chapterId - ID of the chapter where the comment was made (optional)
  */
@@ -96,13 +96,16 @@ export const createCommentReplyNotification = async (originalCommenterId, replyC
     const novel = await Novel.findById(novelId);
     if (!novel) return;
 
-    let message = `${replierUsername} đã trả lời bình luận của bạn trong "${novel.title}"`;
+    // Use display name from the populated user object
+    const replierDisplayName = replyComment.user.displayName || replyComment.user.username;
+
+    let message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn tại <b>${novel.title}</b>`;
     let linkData = { novelId };
 
     if (chapterId) {
       const chapter = await Chapter.findById(chapterId);
       if (chapter) {
-        message = `${replierUsername} đã trả lời bình luận của bạn trong chương "${chapter.title}"`;
+        message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn tại <b>${chapter.title}</b>`;
         linkData.chapterId = chapterId;
       }
     }
@@ -153,7 +156,7 @@ export const createNewChapterNotifications = async (novelId, chapterId, chapterT
 
     if (bookmarkedUsers.length === 0) return;
 
-    const message = `${novel.title} đã cập nhật ${chapterTitle}`;
+    const message = `<b>${novel.title}</b> đã cập nhật <b>${chapterTitle}</b>`;
 
     // Create notifications for all bookmarked users
     const notifications = bookmarkedUsers.map(user => ({
