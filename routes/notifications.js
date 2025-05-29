@@ -9,24 +9,42 @@ const router = express.Router();
 router.get('/', auth, async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
-    const skip = (page - 1) * limit;
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    
+    // Calculate skip based on our infinite scroll pattern:
+    // Page 1: 20 items (skip = 0)
+    // Page 2: 10 items (skip = 20) 
+    // Page 3: 10 items (skip = 30)
+    // Page 4: 10 items (skip = 40)
+    // etc.
+    let skip;
+    if (pageNum === 1) {
+      skip = 0;
+    } else {
+      // For pages 2+, we skip the first 20 items from page 1, 
+      // then (page-2) * 10 additional items from previous pages
+      skip = 20 + (pageNum - 2) * 10;
+    }
 
     const notifications = await Notification.find({ 
       userId: req.user._id 
     })
     .sort({ createdAt: -1 })
     .skip(skip)
-    .limit(parseInt(limit))
+    .limit(limitNum)
     .populate('relatedUser', 'username displayName avatar')
     .populate('relatedNovel', 'title')
     .populate('relatedChapter', 'title');
 
+    const totalItems = await Notification.countDocuments({ userId: req.user._id });
+
     res.json({ 
       notifications,
       pagination: {
-        currentPage: parseInt(page),
-        totalPages: Math.ceil(await Notification.countDocuments({ userId: req.user._id }) / limit),
-        totalItems: await Notification.countDocuments({ userId: req.user._id })
+        currentPage: pageNum,
+        totalPages: Math.ceil((totalItems - 20) / 10) + 1, // Adjusted for our pattern
+        totalItems: totalItems
       }
     });
   } catch (error) {
