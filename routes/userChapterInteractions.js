@@ -628,12 +628,18 @@ router.get('/recently-read', auth, async (req, res) => {
     }
 
     // Aggregate recently read chapters with novel and module info
-    // Only get the most recent chapter per novel
+    // Only get the most recent chapter per novel within the last 2 weeks
+    const twoWeeksAgo = new Date();
+    twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+    
     const recentlyRead = await UserChapterInteraction.aggregate([
       {
         $match: {
           userId: new mongoose.Types.ObjectId(userId),
-          lastReadAt: { $ne: null }
+          lastReadAt: { 
+            $ne: null,
+            $gte: twoWeeksAgo // Only include chapters read within the last 2 weeks
+          }
         }
       },
       {
@@ -648,8 +654,9 @@ router.get('/recently-read', auth, async (req, res) => {
       {
         $replaceRoot: { newRoot: '$latestInteraction' }
       },
+      // Re-sort after grouping to restore proper order by lastReadAt
       {
-        $limit: limit
+        $sort: { lastReadAt: -1 }
       },
       {
         $lookup: {
@@ -670,6 +677,13 @@ router.get('/recently-read', auth, async (req, res) => {
           as: 'novel'
         }
       },
+      // First extract the chapter from array, then do module lookup
+      {
+        $addFields: {
+          chapter: { $arrayElemAt: ['$chapter', 0] },
+          novel: { $arrayElemAt: ['$novel', 0] }
+        }
+      },
       {
         $lookup: {
           from: 'modules',
@@ -682,12 +696,7 @@ router.get('/recently-read', auth, async (req, res) => {
         }
       },
       {
-        $project: {
-          chapterId: 1,
-          novelId: 1,
-          lastReadAt: 1,
-          chapter: { $arrayElemAt: ['$chapter', 0] },
-          novel: { $arrayElemAt: ['$novel', 0] },
+        $addFields: {
           module: { $arrayElemAt: ['$module', 0] }
         }
       },
@@ -695,6 +704,20 @@ router.get('/recently-read', auth, async (req, res) => {
         $match: {
           'chapter._id': { $exists: true },
           'novel._id': { $exists: true }
+        }
+      },
+      // Apply limit AFTER filtering to ensure we get exactly the number we want
+      {
+        $limit: limit
+      },
+      {
+        $project: {
+          chapterId: 1,
+          novelId: 1,
+          lastReadAt: 1,
+          chapter: 1,
+          novel: 1,
+          module: 1
         }
       }
     ]);
