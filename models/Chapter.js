@@ -45,13 +45,13 @@ const chapterSchema = new mongoose.Schema({
     default: 0,
     validate: {
       validator: function(value) {
-        // If mode is 'paid', chapterBalance must be at least 100
-        if (this.mode === 'paid' && value < 100) {
+        // If mode is 'paid', chapterBalance must be at least 1
+        if (this.mode === 'paid' && value < 1) {
           return false;
         }
         return value >= 0;
       },
-      message: 'Số lượng lúa cần để mở chương phải tối thiểu là 100 🌾'
+      message: 'Số lượng lúa cần để mở chương phải tối thiểu là 1 🌾'
     }
   },
   views: {
