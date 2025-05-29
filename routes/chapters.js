@@ -260,9 +260,9 @@ router.post('/', [auth, admin], async (req, res) => {
     }
 
     // Validate minimum chapter balance for paid chapters
-    if (mode === 'paid' && parseInt(chapterBalance) < 50) {
+    if (mode === 'paid' && parseInt(chapterBalance) < 1) {
       return res.status(400).json({ 
-        message: 'Số lúa chương tối thiểu là 50 🌾 cho chương trả phí.' 
+        message: 'Số lúa chương tối thiểu là 1 🌾 cho chương trả phí.' 
       });
     }
 
@@ -374,9 +374,9 @@ router.put('/:id', [auth, admin], async (req, res) => {
       }
 
       // Validate minimum chapter balance for paid chapters
-      if (parseInt(chapterBalance) < 50) {
+      if (parseInt(chapterBalance) < 1) {
         return res.status(400).json({ 
-          message: 'Số lúa chương tối thiểu là 50 🌾 cho chương trả phí.' 
+          message: 'Số lúa chương tối thiểu là 1 🌾 cho chương trả phí.' 
         });
       }
     }

@@ -213,9 +213,9 @@ router.post('/:novelId/modules', auth, admin, async (req, res) => {
     // Validate paid module balance
     if (req.body.mode === 'paid') {
       const moduleBalance = parseInt(req.body.moduleBalance) || 0;
-      if (moduleBalance < 100) {
+      if (moduleBalance < 1) {
         return res.status(400).json({ 
-          message: 'Số lượng lúa cần phải tối thiểu là 100 🌾' 
+          message: 'Số lượng lúa cần phải tối thiểu là 1 🌾' 
         });
       }
     }
@@ -288,9 +288,9 @@ router.put('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
     // Validate paid module balance
     if (req.body.mode === 'paid') {
       const moduleBalance = parseInt(req.body.moduleBalance) || 0;
-      if (moduleBalance < 100) {
+      if (moduleBalance < 1) {
         return res.status(400).json({ 
-          message: 'Số lượng lúa cần phải tối thiểu là 100 🌾' 
+          message: 'Số lượng lúa cần phải tối thiểu là 1 🌾' 
         });
       }
     }
