@@ -320,79 +320,130 @@ router.get('/bookmarks', auth, async (req, res) => {
   try {
     const userId = req.user._id;
 
-    // Find all bookmarked interactions for this user
-    const bookmarkedInteractions = await UserNovelInteraction.find({ 
-      userId: userId,
-      bookmarked: true 
-    });
-    
-    if (bookmarkedInteractions.length === 0) {
-      return res.json([]);
-    }
-
-    // Extract novel IDs
-    const novelIds = bookmarkedInteractions.map(interaction => interaction.novelId);
-    
-    // Fetch novel details with more information
-    const novels = await Novel.find(
-      { _id: { $in: novelIds } },
+    // Use aggregation pipeline to reduce database queries
+    const bookmarkedNovels = await UserNovelInteraction.aggregate([
+      // Match bookmarked interactions for this user
       { 
-        title: 1, 
-        illustration: 1, 
-        status: 1, 
-        updatedAt: 1,
-        createdAt: 1
-      }
-    );
-    
-    // Get chapter counts and bookmarked chapter for each novel
-    const novelsWithChapterCounts = await Promise.all(
-      novels.map(async (novel) => {
-        const novelObj = novel.toObject();
-        
-        // Count all chapters for this novel
-        const chapterCount = await mongoose.model('Chapter').countDocuments({ 
-          novelId: novel._id 
-        });
-        
-        // Get the latest chapter if available
-        const latestChapter = await mongoose.model('Chapter')
-          .findOne({ novelId: novel._id })
-          .sort({ order: -1 })
-          .select('title order')
-          .lean();
-
-        // Get the bookmarked chapter for this novel
-        const bookmarkedChapterInteraction = await UserChapterInteraction
-          .findOne({ 
-            userId: userId, 
-            novelId: novel._id, 
-            bookmarked: true 
-          })
-          .populate('chapterId', 'title order')
-          .lean();
-
-        let bookmarkedChapter = null;
-        if (bookmarkedChapterInteraction && bookmarkedChapterInteraction.chapterId) {
-          bookmarkedChapter = {
-            title: bookmarkedChapterInteraction.chapterId.title,
-            number: bookmarkedChapterInteraction.chapterId.order
-          };
+        $match: { 
+          userId: userId,
+          bookmarked: true 
+        } 
+      },
+      // Lookup novel details
+      {
+        $lookup: {
+          from: 'novels',
+          localField: 'novelId',
+          foreignField: '_id',
+          as: 'novel',
+          pipeline: [
+            {
+              $project: {
+                title: 1,
+                illustration: 1,
+                status: 1,
+                updatedAt: 1,
+                createdAt: 1
+              }
+            }
+          ]
         }
-
-        return {
-          ...novelObj,
-          totalChapters: chapterCount,
-          latestChapter: latestChapter ? {
-            title: latestChapter.title,
-            number: latestChapter.order
-          } : null,
-          bookmarkedChapter: bookmarkedChapter
-        };
-      })
-    );
+      },
+      // Unwind the novel array
+      { $unwind: '$novel' },
+      // Lookup chapter count
+      {
+        $lookup: {
+          from: 'chapters',
+          localField: 'novelId',
+          foreignField: 'novelId',
+          as: 'chapters'
+        }
+      },
+      // Lookup latest chapter
+      {
+        $lookup: {
+          from: 'chapters',
+          let: { novelId: '$novelId' },
+          pipeline: [
+            { $match: { $expr: { $eq: ['$novelId', '$$novelId'] } } },
+            { $sort: { createdAt: -1 } },
+            { $limit: 1 },
+            { $project: { title: 1, order: 1, createdAt: 1 } }
+          ],
+          as: 'latestChapter'
+        }
+      },
+      // Lookup bookmarked chapter
+      {
+        $lookup: {
+          from: 'userchapterinteractions',
+          let: { userId: '$userId', novelId: '$novelId' },
+          pipeline: [
+            { 
+              $match: { 
+                $expr: { 
+                  $and: [
+                    { $eq: ['$userId', '$$userId'] },
+                    { $eq: ['$novelId', '$$novelId'] },
+                    { $eq: ['$bookmarked', true] }
+                  ]
+                }
+              }
+            },
+            {
+              $lookup: {
+                from: 'chapters',
+                localField: 'chapterId',
+                foreignField: '_id',
+                as: 'chapter',
+                pipeline: [
+                  { $project: { title: 1, order: 1 } }
+                ]
+              }
+            },
+            { $unwind: '$chapter' },
+            { $project: { chapter: 1 } }
+          ],
+          as: 'bookmarkedChapter'
+        }
+      },
+      // Project final structure
+      {
+        $project: {
+          _id: '$novel._id',
+          title: '$novel.title',
+          illustration: '$novel.illustration',
+          status: '$novel.status',
+          updatedAt: '$novel.updatedAt',
+          createdAt: '$novel.createdAt',
+          totalChapters: { $size: '$chapters' },
+          latestChapter: {
+            $cond: {
+              if: { $gt: [{ $size: '$latestChapter' }, 0] },
+              then: {
+                title: { $arrayElemAt: ['$latestChapter.title', 0] },
+                number: { $arrayElemAt: ['$latestChapter.order', 0] },
+                createdAt: { $arrayElemAt: ['$latestChapter.createdAt', 0] }
+              },
+              else: null
+            }
+          },
+          bookmarkedChapter: {
+            $cond: {
+              if: { $gt: [{ $size: '$bookmarkedChapter' }, 0] },
+              then: {
+                title: { $arrayElemAt: ['$bookmarkedChapter.chapter.title', 0] },
+                number: { $arrayElemAt: ['$bookmarkedChapter.chapter.order', 0] }
+              },
+              else: null
+            }
+          }
+        }
+      }
+    ]);
     
-    res.json(novelsWithChapterCounts);
+    res.json(bookmarkedNovels);
   } catch (err) {
     console.error("Error fetching bookmarks:", err);
     res.status(500).json({ message: err.message });
