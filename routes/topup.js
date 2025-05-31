@@ -388,11 +388,12 @@ router.get('/pricing', async (req, res) => {
   try {
     // In a real implementation, these might come from a database
     const pricingOptions = [
-      { price: 12000, balance: 100, note: "Chỉ với 12.000đ mỗi tháng bạn sẽ không bao giờ thấy bất kì quảng cáo nào trên page trong cuộc đời này" },
-      { price: 20000, balance: 200, note: "Gói bình dân hạt dẻ" },
-      { price: 50000, balance: 550, note: "Thêm tí bonus gọi là" },
-      { price: 250000, balance: 2800, note: "Với gói này phú hào có thể unlock ngay một tập truyện dịch từ ngôn ngữ Anh/Trung" },
-      { price: 350000, balance: 4000, note: "Với gói này đại gia đủ sức bao trọn một tập truyện bất kì dịch từ ngôn ngữ Nhật" }
+      { price: 12000, balance: 100, note: "Gói chặn quảng cáo vĩnh viễn 🛡️" },
+      { price: 20000, balance: 200, note: "Gói bim bim 🍟" },
+      { price: 50000, balance: 520, note: "Gói cốc cà phê ☕" },
+      { price: 100000, balance: 1100, note: "Gói bát phở 🍜" },
+      { price: 200000, balance: 2250, note: "Gói bao trọn 1 vol tiếng Anh/Trung 💸" },
+      { price: 350000, balance: 4000, note: "Gói siêu VIP bao trọn 1 vol tiếng Nhật 👑" }
     ];
     
     res.json(pricingOptions);
