@@ -25,7 +25,18 @@ export const auth = async (req, res, next) => {
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (tokenError) {
-      console.error('Token verification failed:', tokenError.message);
+      // Log different types of token errors with appropriate severity
+      if (tokenError.name === 'JsonWebTokenError') {
+        // Malformed token - reduce log noise for common case
+        console.warn(`JWT malformed from ${req.ip} - ${req.originalUrl}`);
+      } else if (tokenError.name === 'TokenExpiredError') {
+        console.log(`JWT expired from ${req.ip} - ${req.originalUrl}`);
+      } else if (tokenError.name === 'NotBeforeError') {
+        console.warn(`JWT not active from ${req.ip} - ${req.originalUrl}`);
+      } else {
+        // Other JWT errors - full logging
+        console.error('Token verification failed:', tokenError.message);
+      }
       return res.status(401).json({ message: 'Invalid or expired token' });
     }
 
