@@ -34,17 +34,33 @@ router.get("/slug/:slug", async (req, res) => {
       return res.status(404).json({ message: "Chapter not found" });
     }
     
-    // If we have a short ID (8 hex characters), find the chapter
+    // If we have a short ID (8 hex characters), find the chapter using aggregation
     if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
-      // Use a more robust approach - get all chapters and filter in JavaScript
-      // This is more reliable than regex with ObjectIds
-      const chapters = await Chapter.find({}, '_id title').lean();
-      const matchingChapter = chapters.find(chapter => 
-        chapter._id.toString().toLowerCase().endsWith(shortId.toLowerCase())
-      );
+      // Use aggregation to convert ObjectId to string and match with regex
+      const [chapter] = await Chapter.aggregate([
+        {
+          $addFields: {
+            idString: { $toString: "$_id" }
+          }
+        },
+        {
+          $match: {
+            idString: { $regex: new RegExp(shortId.toLowerCase() + '$', 'i') }
+          }
+        },
+        {
+          $project: {
+            _id: 1,
+            title: 1
+          }
+        },
+        {
+          $limit: 1
+        }
+      ]);
       
-      if (matchingChapter) {
-        return res.json({ id: matchingChapter._id, title: matchingChapter.title });
+      if (chapter) {
+        return res.json({ id: chapter._id, title: chapter.title });
       }
     }
     

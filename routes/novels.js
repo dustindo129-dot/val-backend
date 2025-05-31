@@ -114,17 +114,33 @@ router.get("/slug/:slug", async (req, res) => {
       return res.status(404).json({ message: "Novel not found" });
     }
     
-    // If we have a short ID (8 hex characters), find the novel
+    // If we have a short ID (8 hex characters), find the novel using aggregation
     if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
-      // Use a more robust approach - get all novels and filter in JavaScript
-      // This is more reliable than regex with ObjectIds
-      const novels = await Novel.find({}, '_id title').lean();
-      const matchingNovel = novels.find(novel => 
-        novel._id.toString().toLowerCase().endsWith(shortId.toLowerCase())
-      );
+      // Use aggregation to convert ObjectId to string and match with regex
+      const [novel] = await Novel.aggregate([
+        {
+          $addFields: {
+            idString: { $toString: "$_id" }
+          }
+        },
+        {
+          $match: {
+            idString: { $regex: new RegExp(shortId.toLowerCase() + '$', 'i') }
+          }
+        },
+        {
+          $project: {
+            _id: 1,
+            title: 1
+          }
+        },
+        {
+          $limit: 1
+        }
+      ]);
       
-      if (matchingNovel) {
-        return res.json({ id: matchingNovel._id, title: matchingNovel.title });
+      if (novel) {
+        return res.json({ id: novel._id, title: novel.title });
       }
     }
     
