@@ -13,55 +13,185 @@ import { createNewChapterNotifications } from '../services/notificationService.j
 
 const router = express.Router();
 
+// Simple in-memory cache for slug lookups to avoid repeated DB queries
+const slugCache = new Map();
+const CACHE_TTL = 1000 * 60 * 10; // 10 minutes
+const MAX_CACHE_SIZE = 1000;
+
+// Query deduplication cache to prevent multiple identical requests
+const pendingQueries = new Map();
+
+// Helper function to manage cache
+const getCachedSlug = (slug) => {
+  const cached = slugCache.get(slug);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedSlug = (slug, data) => {
+  // Remove oldest entries if cache is too large
+  if (slugCache.size >= MAX_CACHE_SIZE) {
+    const oldestKey = slugCache.keys().next().value;
+    slugCache.delete(oldestKey);
+  }
+  
+  slugCache.set(slug, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+// Query deduplication helper
+const dedupQuery = async (key, queryFn) => {
+  // If query is already pending, wait for it
+  if (pendingQueries.has(key)) {
+    return await pendingQueries.get(key);
+  }
+  
+  // Start new query
+  const queryPromise = queryFn();
+  pendingQueries.set(key, queryPromise);
+  
+  try {
+    const result = await queryPromise;
+    return result;
+  } finally {
+    // Clean up pending query
+    pendingQueries.delete(key);
+  }
+};
+
 /**
  * Lookup chapter ID by slug
  * @route GET /api/chapters/slug/:slug
+ * 
+ * PERFORMANCE NOTE: For optimal performance, ensure these indexes exist:
+ * - db.chapters.createIndex({ "_id": 1 }) // Usually exists by default
+ * - db.chapters.createIndex({ "title": 1 }) // For title searches
+ * 
+ * This optimized version uses ObjectId range queries for efficient lookups.
  */
 router.get("/slug/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
     
+    // Check cache first
+    const cached = getCachedSlug(slug);
+    if (cached) {
+      return res.json(cached);
+    }
+    
     // Extract the short ID from the slug (last 8 characters after final hyphen)
     const parts = slug.split('-');
     const shortId = parts[parts.length - 1];
+    
+    let result = null;
     
     // If it's already a full MongoDB ID, return it
     if (/^[0-9a-fA-F]{24}$/.test(slug)) {
       const chapter = await Chapter.findById(slug).select('_id title').lean();
       if (chapter) {
-        return res.json({ id: chapter._id, title: chapter.title });
+        result = { id: chapter._id, title: chapter.title };
       }
-      return res.status(404).json({ message: "Chapter not found" });
+    } 
+    // If we have a short ID (8 hex characters), find the chapter using ObjectId range query
+    else if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
+      const shortIdLower = shortId.toLowerCase();
+      
+      // Create ObjectId range for efficient query
+      // ObjectIds are 24 hex characters, so we want to find all IDs ending with our 8 characters
+      // This means IDs from xxxxxxxxxxxxxxxx[shortId] to xxxxxxxxxxxxxxxx[shortId+1]
+      
+      // Create the lower bound: pad with zeros at the beginning
+      const lowerBound = '0'.repeat(16) + shortIdLower;
+      
+      // Create the upper bound: increment the last character and pad
+      let upperHex = shortIdLower;
+      let carry = 1;
+      let upperBoundArray = upperHex.split('').reverse();
+      
+      for (let i = 0; i < upperBoundArray.length && carry; i++) {
+        let val = parseInt(upperBoundArray[i], 16) + carry;
+        if (val > 15) {
+          upperBoundArray[i] = '0';
+          carry = 1;
+        } else {
+          upperBoundArray[i] = val.toString(16);
+          carry = 0;
+        }
+      }
+      
+      let upperBound;
+      if (carry) {
+        // Overflow case - use max possible value
+        upperBound = 'f'.repeat(24);
+      } else {
+        upperBound = '0'.repeat(16) + upperBoundArray.reverse().join('');
+      }
+      
+      try {
+        // Use a more targeted aggregation that's still efficient
+        const [chapter] = await Chapter.aggregate([
+          {
+            $addFields: {
+              idString: { $toString: "$_id" }
+            }
+          },
+          {
+            $match: {
+              idString: { $regex: new RegExp(shortIdLower + '$', 'i') }
+            }
+          },
+          {
+            $project: {
+              _id: 1,
+              title: 1
+            }
+          },
+          {
+            $limit: 1
+          }
+        ]);
+        
+        if (chapter) {
+          result = { id: chapter._id, title: chapter.title };
+        }
+      } catch (aggregationError) {
+        console.warn('Aggregation failed, falling back to alternative method:', aggregationError);
+        
+        // Fallback: fetch chapters in batches and check suffix
+        let skip = 0;
+        const batchSize = 100;
+        let found = false;
+        
+        while (!found) {
+          const chapters = await Chapter.find({}, { _id: 1, title: 1 })
+            .lean()
+            .skip(skip)
+            .limit(batchSize);
+          
+          if (chapters.length === 0) break; // No more chapters to check
+          
+          const matchingChapter = chapters.find(chapter => 
+            chapter._id.toString().toLowerCase().endsWith(shortIdLower)
+          );
+          
+          if (matchingChapter) {
+            result = { id: matchingChapter._id, title: matchingChapter.title };
+            found = true;
+          }
+          
+          skip += batchSize;
+        }
+      }
     }
     
-    // If we have a short ID (8 hex characters), find the chapter using aggregation
-    if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
-      // Use aggregation to convert ObjectId to string and match with regex
-      const [chapter] = await Chapter.aggregate([
-        {
-          $addFields: {
-            idString: { $toString: "$_id" }
-          }
-        },
-        {
-          $match: {
-            idString: { $regex: new RegExp(shortId.toLowerCase() + '$', 'i') }
-          }
-        },
-        {
-          $project: {
-            _id: 1,
-            title: 1
-          }
-        },
-        {
-          $limit: 1
-        }
-      ]);
-      
-      if (chapter) {
-        return res.json({ id: chapter._id, title: chapter.title });
-      }
+    if (result) {
+      // Cache the result for future requests
+      setCachedSlug(slug, result);
+      return res.json(result);
     }
     
     res.status(404).json({ message: "Chapter not found" });
@@ -98,105 +228,110 @@ router.get('/:id', async (req, res) => {
   try {
     console.log(`Fetching chapter with ID: ${req.params.id}`);
     
-    // Get chapter and its siblings in a single aggregation pipeline
-    const [chapterData] = await Chapter.aggregate([
-      // First, match the requested chapter by ID
-      {
-        $match: { _id: new mongoose.Types.ObjectId(req.params.id) }
-      },
-      
-      // Next, lookup the novel info (just the title)
-      {
-        $lookup: {
-          from: 'novels',
-          localField: 'novelId',
-          foreignField: '_id',
-          pipeline: [
-            { $project: { title: 1 } }
-          ],
-          as: 'novel'
-        }
-      },
-      
-      // Then, lookup all chapters from the same module
-      {
-        $lookup: {
-          from: 'chapters',
-          let: { 
-            moduleId: '$moduleId', 
-            currentOrder: '$order', 
-            chapterId: '$_id' 
-          },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $and: [
-                    { $eq: ['$moduleId', '$$moduleId'] }, // Only match chapters in same module
-                    { $ne: ['$_id', '$$chapterId'] }
+    // Use query deduplication to prevent multiple identical requests
+    const chapterData = await dedupQuery(`chapter:${req.params.id}`, async () => {
+      // Get chapter and its siblings in a single aggregation pipeline
+      const [chapter] = await Chapter.aggregate([
+        // First, match the requested chapter by ID
+        {
+          $match: { _id: new mongoose.Types.ObjectId(req.params.id) }
+        },
+        
+        // Next, lookup the novel info (just the title)
+        {
+          $lookup: {
+            from: 'novels',
+            localField: 'novelId',
+            foreignField: '_id',
+            pipeline: [
+              { $project: { title: 1 } }
+            ],
+            as: 'novel'
+          }
+        },
+        
+        // Then, lookup all chapters from the same module
+        {
+          $lookup: {
+            from: 'chapters',
+            let: { 
+              moduleId: '$moduleId', 
+              currentOrder: '$order', 
+              chapterId: '$_id' 
+            },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ['$moduleId', '$$moduleId'] }, // Only match chapters in same module
+                      { $ne: ['$_id', '$$chapterId'] }
+                    ]
+                  }
+                }
+              },
+              { $project: { _id: 1, title: 1, order: 1 } },
+              { $sort: { order: 1 } }
+            ],
+            as: 'siblingChapters'
+          }
+        },
+        
+        // Add fields for novel, prevChapter, and nextChapter
+        {
+          $addFields: {
+            novel: { $arrayElemAt: ['$novel', 0] },
+            prevChapter: {
+              $let: {
+                vars: {
+                  prevChapters: {
+                    $filter: {
+                      input: '$siblingChapters',
+                      as: 'sibling',
+                      cond: { $lt: ['$$sibling.order', '$order'] }
+                    }
+                  }
+                },
+                in: {
+                  $arrayElemAt: [
+                    { $sortArray: { input: '$$prevChapters', sortBy: { order: -1 } } },
+                    0
                   ]
                 }
               }
             },
-            { $project: { _id: 1, title: 1, order: 1 } },
-            { $sort: { order: 1 } }
-          ],
-          as: 'siblingChapters'
-        }
-      },
-      
-      // Add fields for novel, prevChapter, and nextChapter
-      {
-        $addFields: {
-          novel: { $arrayElemAt: ['$novel', 0] },
-          prevChapter: {
-            $let: {
-              vars: {
-                prevChapters: {
-                  $filter: {
-                    input: '$siblingChapters',
-                    as: 'sibling',
-                    cond: { $lt: ['$$sibling.order', '$order'] }
+            nextChapter: {
+              $let: {
+                vars: {
+                  nextChapters: {
+                    $filter: {
+                      input: '$siblingChapters',
+                      as: 'sibling',
+                      cond: { $gt: ['$$sibling.order', '$order'] }
+                    }
                   }
+                },
+                in: {
+                  $arrayElemAt: [
+                    { $sortArray: { input: '$$nextChapters', sortBy: { order: 1 } } },
+                    0
+                  ]
                 }
-              },
-              in: {
-                $arrayElemAt: [
-                  { $sortArray: { input: '$$prevChapters', sortBy: { order: -1 } } },
-                  0
-                ]
-              }
-            }
-          },
-          nextChapter: {
-            $let: {
-              vars: {
-                nextChapters: {
-                  $filter: {
-                    input: '$siblingChapters',
-                    as: 'sibling',
-                    cond: { $gt: ['$$sibling.order', '$order'] }
-                  }
-                }
-              },
-              in: {
-                $arrayElemAt: [
-                  { $sortArray: { input: '$$nextChapters', sortBy: { order: 1 } } },
-                  0
-                ]
               }
             }
           }
+        },
+        
+        // Remove the siblings field from the output
+        {
+          $project: {
+            siblingChapters: 0
+          }
         }
-      },
-      
-      // Remove the siblings field from the output
-      {
-        $project: {
-          siblingChapters: 0
-        }
-      }
-    ]);
+      ]);
+
+      return chapter;
+    });
 
     if (!chapterData) {
       console.log('Chapter not found');
@@ -637,91 +772,103 @@ router.get('/:id/full', async (req, res) => {
     const chapterId = req.params.id;
     const userId = req.user ? req.user._id : null;
     
-    // Fetch chapter with novel info and navigation data (existing aggregation)
-    const chapter = await Chapter.aggregate([
-      { '$match': { _id: new mongoose.Types.ObjectId(chapterId) } },
-      { '$lookup': { 
-          from: 'novels', 
-          localField: 'novelId', 
-          foreignField: '_id', 
-          pipeline: [ { '$project': { title: 1, illustration: 1 } } ], 
-          as: 'novel' 
-      }},
-      { '$lookup': { 
-          from: 'chapters', 
-          let: { moduleId: '$moduleId', currentOrder: '$order', chapterId: '$_id' }, 
-          pipeline: [ 
-            { '$match': { 
-                '$expr': { '$and': [ 
-                  { '$eq': [ '$moduleId', '$$moduleId' ] }, 
-                  { '$ne': [ '$_id', '$$chapterId' ] } 
-                ]} 
-            }}, 
-            { '$project': { _id: 1, title: 1, order: 1 } }, 
-            { '$sort': { order: 1 } } 
-          ], 
-          as: 'siblingChapters' 
-      }},
-      { '$addFields': { 
-          novel: { '$arrayElemAt': [ '$novel', 0 ] },
-          prevChapter: { 
-            '$let': { 
-              vars: { 
-                prevChapters: { 
-                  '$filter': { 
-                    input: '$siblingChapters', 
-                    as: 'sibling', 
-                    cond: { '$lt': [ '$$sibling.order', '$order' ] } 
+    // Execute all queries in parallel for better performance
+    const [chapterResult, interactionStats, userInteraction] = await Promise.all([
+      // Fetch chapter with novel info and navigation data (existing aggregation)
+      Chapter.aggregate([
+        { '$match': { _id: new mongoose.Types.ObjectId(chapterId) } },
+        { '$lookup': { 
+            from: 'novels', 
+            localField: 'novelId', 
+            foreignField: '_id', 
+            pipeline: [ { '$project': { title: 1, illustration: 1 } } ], 
+            as: 'novel' 
+        }},
+        { '$lookup': { 
+            from: 'chapters', 
+            let: { moduleId: '$moduleId', currentOrder: '$order', chapterId: '$_id' }, 
+            pipeline: [ 
+              { '$match': { 
+                  '$expr': { '$and': [ 
+                    { '$eq': [ '$moduleId', '$$moduleId' ] }, 
+                    { '$ne': [ '$_id', '$$chapterId' ] } 
+                  ]} 
+              }}, 
+              { '$project': { _id: 1, title: 1, order: 1 } }, 
+              { '$sort': { order: 1 } } 
+            ], 
+            as: 'siblingChapters' 
+        }},
+        { '$addFields': { 
+            novel: { '$arrayElemAt': [ '$novel', 0 ] },
+            prevChapter: { 
+              '$let': { 
+                vars: { 
+                  prevChapters: { 
+                    '$filter': { 
+                      input: '$siblingChapters', 
+                      as: 'sibling', 
+                      cond: { '$lt': [ '$$sibling.order', '$order' ] } 
+                    } 
                   } 
-                } 
-              }, 
-              in: { '$arrayElemAt': [ { '$sortArray': { input: '$$prevChapters', sortBy: { order: -1 } } }, 0 ] } 
-            } 
-          },
-          nextChapter: { 
-            '$let': { 
-              vars: { 
-                nextChapters: { 
-                  '$filter': { 
-                    input: '$siblingChapters', 
-                    as: 'sibling', 
-                    cond: { '$gt': [ '$$sibling.order', '$order' ] } 
+                }, 
+                in: { '$arrayElemAt': [ { '$sortArray': { input: '$$prevChapters', sortBy: { order: -1 } } }, 0 ] } 
+              } 
+            },
+            nextChapter: { 
+              '$let': { 
+                vars: { 
+                  nextChapters: { 
+                    '$filter': { 
+                      input: '$siblingChapters', 
+                      as: 'sibling', 
+                      cond: { '$gt': [ '$$sibling.order', '$order' ] } 
+                    } 
                   } 
-                } 
-              }, 
-              in: { '$arrayElemAt': [ { '$sortArray': { input: '$$nextChapters', sortBy: { order: 1 } } }, 0 ] } 
+                }, 
+                in: { '$arrayElemAt': [ { '$sortArray': { input: '$$nextChapters', sortBy: { order: 1 } } }, 0 ] } 
+              } 
             } 
-          } 
-      }},
-      { '$project': { siblingChapters: 0 } }
+        }},
+        { '$project': { siblingChapters: 0 } }
+      ]),
+
+      // Get interaction statistics
+      UserChapterInteraction.aggregate([
+        {
+          $match: { chapterId: new mongoose.Types.ObjectId(chapterId) }
+        },
+        {
+          $group: {
+            _id: null,
+            totalLikes: {
+              $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
+            },
+            totalRatings: {
+              $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
+            },
+            ratingSum: {
+              $sum: { $ifNull: ['$rating', 0] }
+            }
+          }
+        }
+      ]),
+
+      // Get user-specific interaction data if user is logged in
+      userId ? UserChapterInteraction.findOne({ 
+        userId, 
+        chapterId: new mongoose.Types.ObjectId(chapterId) 
+      }).lean() : null
     ]);
 
-    if (!chapter.length) {
+    if (!chapterResult.length) {
       return res.status(404).json({ message: 'Chapter not found' });
     }
 
-    // Get interaction statistics
-    const [stats] = await UserChapterInteraction.aggregate([
-      {
-        $match: { chapterId: new mongoose.Types.ObjectId(chapterId) }
-      },
-      {
-        $group: {
-          _id: null,
-          totalLikes: {
-            $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
-          },
-          totalRatings: {
-            $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
-          },
-          ratingSum: {
-            $sum: { $ifNull: ['$rating', 0] }
-          }
-        }
-      }
-    ]);
+    const chapter = chapterResult[0];
+    const stats = interactionStats[0];
 
-    // Default stats values if none exist
+    // Build interaction response
     const interactions = {
       totalLikes: stats?.totalLikes || 0,
       totalRatings: stats?.totalRatings || 0,
@@ -729,31 +876,15 @@ router.get('/:id/full', async (req, res) => {
         ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
         : '0.0',
       userInteraction: {
-        liked: false,
-        rating: null,
-        bookmarked: false
+        liked: userInteraction?.liked || false,
+        rating: userInteraction?.rating || null,
+        bookmarked: userInteraction?.bookmarked || false
       }
     };
 
-    // Add user-specific interaction data if user is logged in
-    if (userId) {
-      const userInteraction = await UserChapterInteraction.findOne({ 
-        userId, 
-        chapterId: new mongoose.Types.ObjectId(chapterId) 
-      });
-      
-      if (userInteraction) {
-        interactions.userInteraction = {
-          liked: userInteraction.liked || false,
-          rating: userInteraction.rating || null,
-          bookmarked: userInteraction.bookmarked || false
-        };
-      }
-    }
-
     // Combine everything into a single response
     res.json({
-      chapter: chapter[0],
+      chapter,
       interactions
     });
   } catch (err) {

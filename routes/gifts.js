@@ -12,6 +12,58 @@ import mongoose from 'mongoose';
 
 const router = express.Router();
 
+// Simple in-memory cache for gifts to avoid repeated aggregations
+const giftsCache = new Map();
+const GIFTS_CACHE_TTL = 1000 * 60 * 2; // 2 minutes (shorter for dynamic data)
+const MAX_GIFTS_CACHE_SIZE = 500;
+
+// Query deduplication cache
+const pendingGiftQueries = new Map();
+
+// Helper function to manage gifts cache
+const getCachedGifts = (novelId) => {
+  const cached = giftsCache.get(novelId);
+  if (cached && Date.now() - cached.timestamp < GIFTS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedGifts = (novelId, data) => {
+  // Remove oldest entries if cache is too large
+  if (giftsCache.size >= MAX_GIFTS_CACHE_SIZE) {
+    const oldestKey = giftsCache.keys().next().value;
+    giftsCache.delete(oldestKey);
+  }
+  
+  giftsCache.set(novelId, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+// Clear gifts cache for a specific novel
+const clearGiftsCache = (novelId) => {
+  giftsCache.delete(novelId);
+};
+
+// Query deduplication helper for gifts
+const dedupGiftQuery = async (key, queryFn) => {
+  if (pendingGiftQueries.has(key)) {
+    return await pendingGiftQueries.get(key);
+  }
+  
+  const queryPromise = queryFn();
+  pendingGiftQueries.set(key, queryPromise);
+  
+  try {
+    const result = await queryPromise;
+    return result;
+  } finally {
+    pendingGiftQueries.delete(key);
+  }
+};
+
 // Get all available gifts
 router.get('/', async (req, res) => {
   try {
@@ -23,54 +75,66 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Get gift counts for a specific novel
+// Get gift counts for a specific novel (OPTIMIZED)
 router.get('/novel/:novelId', async (req, res) => {
   try {
     const { novelId } = req.params;
     
-    // Get all gifts with their counts for this novel
-    const giftCounts = await Gift.aggregate([
-      {
-        $lookup: {
-          from: 'novelgifts',
-          let: { giftId: '$_id' },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $and: [
-                    { $eq: ['$giftId', '$$giftId'] },
-                    { $eq: ['$novelId', new mongoose.Types.ObjectId(novelId)] }
-                  ]
+    // Check cache first
+    const cached = getCachedGifts(novelId);
+    if (cached) {
+      return res.json(cached);
+    }
+    
+    // Use query deduplication to prevent multiple identical requests
+    const giftCounts = await dedupGiftQuery(`novel-gifts:${novelId}`, async () => {
+      // Get all gifts with their counts for this novel
+      return await Gift.aggregate([
+        {
+          $lookup: {
+            from: 'novelgifts',
+            let: { giftId: '$_id' },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ['$giftId', '$$giftId'] },
+                      { $eq: ['$novelId', new mongoose.Types.ObjectId(novelId)] }
+                    ]
+                  }
                 }
               }
-            }
-          ],
-          as: 'novelGift'
-        }
-      },
-      {
-        $addFields: {
-          count: {
-            $ifNull: [{ $arrayElemAt: ['$novelGift.count', 0] }, 0]
+            ],
+            as: 'novelGift'
           }
+        },
+        {
+          $addFields: {
+            count: {
+              $ifNull: [{ $arrayElemAt: ['$novelGift.count', 0] }, 0]
+            }
+          }
+        },
+        {
+          $project: {
+            _id: 1,
+            name: 1,
+            icon: 1,
+            price: 1,
+            order: 1,
+            count: 1
+          }
+        },
+        {
+          $sort: { order: 1 }
         }
-      },
-      {
-        $project: {
-          _id: 1,
-          name: 1,
-          icon: 1,
-          price: 1,
-          order: 1,
-          count: 1
-        }
-      },
-      {
-        $sort: { order: 1 }
-      }
-    ]);
+      ]);
+    });
 
+    // Cache the result for future requests
+    setCachedGifts(novelId, giftCounts);
+    
     res.json(giftCounts);
   } catch (error) {
     console.error('Error fetching novel gifts:', error);
@@ -197,6 +261,9 @@ router.post('/send', auth, async (req, res) => {
     }], { session });
 
     await session.commitTransaction();
+
+    // Clear gifts cache for this novel since counts have changed
+    clearGiftsCache(novelId);
 
     res.json({
       message: `Đã tặng ${gift.icon} ${gift.name} thành công!`,

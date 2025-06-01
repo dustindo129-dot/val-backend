@@ -23,13 +23,18 @@ import giftRoutes from './routes/gifts.js';
 import redisClient, { getRedisStatus } from './utils/redisClient.js';
 import { auth } from './middleware/auth.js';
 import admin from './middleware/admin.js';
+import { preWarmAdminCache } from './utils/userCache.js';
 
 // Initialize Express application
 const app = express();
 
-// Check Redis connection
+// Initialize caches and Redis connection
 (async () => {
   try {
+    // Pre-warm user cache with admin user for better performance
+    await preWarmAdminCache();
+    
+    // Check Redis connection
     if (!redisClient.isOpen) {
       await redisClient.connect();
     }

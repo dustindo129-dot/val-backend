@@ -1,15 +1,12 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
-import NodeCache from 'node-cache';
-
-// Create in-memory cache for user data (1 hour TTL)
-const userCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
+import { getCachedUserById } from '../utils/userCache.js';
 
 /**
  * Authentication middleware to verify user's JWT token
  * Extracts token from cookies or Authorization header
  * Verifies token and attaches user object to request
- * Uses in-memory caching to reduce database load
+ * Uses global user caching to reduce database load
  */
 export const auth = async (req, res, next) => {
   try {
@@ -40,34 +37,21 @@ export const auth = async (req, res, next) => {
       return res.status(401).json({ message: 'Invalid or expired token' });
     }
 
-    // Try to get user from cache first
-    const cacheKey = `user:${decoded.userId}`;
-    const cachedUser = userCache.get(cacheKey);
-
-    let user;
-    if (cachedUser) {
-      // Use cached user data
-      user = cachedUser;
-    } else {
-      // Find user by ID and exclude password from result
-      try {
-        user = await User.findById(decoded.userId).select('-password').lean();
-        
-        if (!user) {
-          return res.status(401).json({ message: 'User not found' });
-        }
-
-        // Cache user data for 1 hour
-        userCache.set(cacheKey, user);
-      } catch (dbError) {
-        console.error('Database error during authentication:', dbError);
-        return res.status(500).json({ message: 'Authentication failed' });
+    // Use global cached user lookup
+    try {
+      const user = await getCachedUserById(decoded.userId);
+      
+      if (!user) {
+        return res.status(401).json({ message: 'User not found' });
       }
-    }
 
-    // Attach user to request object
-    req.user = user;
-    next();
+      // Attach user to request object
+      req.user = user;
+      next();
+    } catch (dbError) {
+      console.error('Database error during authentication:', dbError);
+      return res.status(500).json({ message: 'Authentication failed' });
+    }
   } catch (error) {
     console.error('Authentication error:', error);
     res.status(401).json({ message: 'Authentication failed' });

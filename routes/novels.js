@@ -12,8 +12,34 @@ import { createNovelTransaction } from '../routes/novelTransactions.js';
 import ContributionHistory from '../models/ContributionHistory.js';
 import Comment from '../models/Comment.js';
 import mongoose from 'mongoose';
+import Gift from '../models/Gift.js';
+import UserChapterInteraction from '../models/UserChapterInteraction.js';
+import { getCachedUserByUsername } from '../utils/userCache.js';
 
 const router = express.Router();
+
+// Query deduplication cache to prevent multiple identical requests
+const pendingQueries = new Map();
+
+// Query deduplication helper
+const dedupQuery = async (key, queryFn) => {
+  // If query is already pending, wait for it
+  if (pendingQueries.has(key)) {
+    return await pendingQueries.get(key);
+  }
+  
+  // Start new query
+  const queryPromise = queryFn();
+  pendingQueries.set(key, queryPromise);
+  
+  try {
+    const result = await queryPromise;
+    return result;
+  } finally {
+    // Clean up pending query
+    pendingQueries.delete(key);
+  }
+};
 
 // Server-Sent Events endpoint for real-time updates
 router.get('/sse', (req, res) => {
@@ -114,33 +140,63 @@ router.get("/slug/:slug", async (req, res) => {
       return res.status(404).json({ message: "Novel not found" });
     }
     
-    // If we have a short ID (8 hex characters), find the novel using aggregation
+    // If we have a short ID (8 hex characters), find the novel using ObjectId range query
     if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
-      // Use aggregation to convert ObjectId to string and match with regex
-      const [novel] = await Novel.aggregate([
-        {
-          $addFields: {
-            idString: { $toString: "$_id" }
-          }
-        },
-        {
-          $match: {
-            idString: { $regex: new RegExp(shortId.toLowerCase() + '$', 'i') }
-          }
-        },
-        {
-          $project: {
-            _id: 1,
-            title: 1
-          }
-        },
-        {
-          $limit: 1
-        }
-      ]);
+      const shortIdLower = shortId.toLowerCase();
       
-      if (novel) {
-        return res.json({ id: novel._id, title: novel.title });
+      try {
+        // Use targeted aggregation for efficient lookup
+        const [novel] = await Novel.aggregate([
+          {
+            $addFields: {
+              idString: { $toString: "$_id" }
+            }
+          },
+          {
+            $match: {
+              idString: { $regex: new RegExp(shortIdLower + '$', 'i') }
+            }
+          },
+          {
+            $project: {
+              _id: 1,
+              title: 1
+            }
+          },
+          {
+            $limit: 1
+          }
+        ]);
+        
+        if (novel) {
+          return res.json({ id: novel._id, title: novel.title });
+        }
+      } catch (aggregationError) {
+        console.warn('Aggregation failed, falling back to alternative method:', aggregationError);
+        
+        // Fallback: fetch novels in batches and check suffix
+        let skip = 0;
+        const batchSize = 100;
+        let found = false;
+        
+        while (!found) {
+          const novels = await Novel.find({}, { _id: 1, title: 1 })
+            .lean()
+            .skip(skip)
+            .limit(batchSize);
+          
+          if (novels.length === 0) break; // No more novels to check
+          
+          const matchingNovel = novels.find(novel => 
+            novel._id.toString().toLowerCase().endsWith(shortIdLower)
+          );
+          
+          if (matchingNovel) {
+            return res.json({ id: matchingNovel._id, title: matchingNovel.title });
+          }
+          
+          skip += batchSize;
+        }
       }
     }
     
@@ -692,60 +748,72 @@ router.post("/", auth, async (req, res) => {
 });
 
 /**
- * Get single novel and increment view count
+ * Get single novel and increment view count (OPTIMIZED)
  * @route GET /api/novels/:id
  */
 router.get("/:id", async (req, res) => {
   try {
-    // Get novel and modules in parallel with proper projection
-    const [novel, modules] = await Promise.all([
-      Novel.findById(req.params.id)
-        .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings novelBalance novelBudget')
-        .lean(),
-      Module.find({ novelId: req.params.id })
-        .select('title illustration order chapters mode moduleBalance')
-        .sort('order')
-        .lean()
-    ]);
+    const novelId = req.params.id;
+    
+    // Use query deduplication to prevent multiple identical requests
+    const result = await dedupQuery(`novel:${novelId}`, async () => {
+      // Get novel and modules in parallel with proper projection
+      const [novel, modules] = await Promise.all([
+        Novel.findById(novelId)
+          .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings novelBalance novelBudget')
+          .lean(),
+        Module.find({ novelId: novelId })
+          .select('title illustration order chapters mode moduleBalance')
+          .sort('order')
+          .lean()
+      ]);
 
-    if (!novel) {
-      return res.status(404).json({ message: "Novel not found" });
-    }
-
-    // Get chapters with minimal fields needed
-    const chapters = await Chapter.find({ 
-      novelId: req.params.id 
-    })
-    .select('title moduleId order createdAt updatedAt mode chapterBalance')
-    .sort('order')
-    .lean();
-
-    // Organize chapters by module
-    const chaptersByModule = chapters.reduce((acc, chapter) => {
-      const moduleId = chapter.moduleId.toString();
-      if (!acc[moduleId]) {
-        acc[moduleId] = [];
+      if (!novel) {
+        return { error: "Novel not found", status: 404 };
       }
-      acc[moduleId].push(chapter);
-      return acc;
-    }, {});
 
-    // Attach chapters to their modules
-    const modulesWithChapters = modules.map(module => ({
-      ...module,
-      chapters: chaptersByModule[module._id.toString()] || []
-    }));
+      // Get chapters with minimal fields needed
+      const chapters = await Chapter.find({ 
+        novelId: novelId 
+      })
+      .select('title moduleId order createdAt updatedAt mode chapterBalance')
+      .sort('order')
+      .lean();
 
-    // Return combined data
-    res.json({
-      novel,
-      modules: modulesWithChapters
+      // Organize chapters by module
+      const chaptersByModule = chapters.reduce((acc, chapter) => {
+        const moduleId = chapter.moduleId.toString();
+        if (!acc[moduleId]) {
+          acc[moduleId] = [];
+        }
+        acc[moduleId].push(chapter);
+        return acc;
+      }, {});
+
+      // Attach chapters to their modules
+      const modulesWithChapters = modules.map(module => ({
+        ...module,
+        chapters: chaptersByModule[module._id.toString()] || []
+      }));
+
+      return {
+        novel,
+        modules: modulesWithChapters
+      };
     });
 
-    // Increment view count after sending response
+    // Handle deduplication errors
+    if (result.error) {
+      return res.status(result.status).json({ message: result.error });
+    }
+
+    // Return combined data
+    res.json(result);
+
+    // Increment view count after sending response (non-blocking)
     if (req.query.skipViewTracking !== 'true') {
       // Find the full document (not lean) and use the model method
-      Novel.findById(req.params.id)
+      Novel.findById(novelId)
         .then(fullNovel => {
           if (fullNovel) {
             return fullNovel.incrementViews();
@@ -754,6 +822,7 @@ router.get("/:id", async (req, res) => {
         .catch(err => console.error('Error updating view count:', err));
     }
   } catch (err) {
+    console.error('Error in novel route:', err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -1724,5 +1793,509 @@ export async function checkAndUnlockContent(novelId) {
     console.error('Error in auto-unlock:', error);
   }
 }
+
+/**
+ * Get complete novel page data in a single optimized request
+ * @route GET /api/novels/:id/complete
+ */
+router.get("/:id/complete", async (req, res) => {
+  try {
+    const novelId = req.params.id;
+    const userId = req.user ? req.user._id : null;
+    
+    // Use query deduplication to prevent multiple identical requests
+    const result = await dedupQuery(`novel-complete:${novelId}:${userId || 'guest'}`, async () => {
+      // Execute all queries in parallel for maximum performance
+      const [
+        novel, 
+        modules, 
+        chapters, 
+        gifts, 
+        userInteraction, 
+        novelStats, 
+        contributionHistory
+      ] = await Promise.all([
+        // 1. Get novel data
+        Novel.findById(novelId)
+          .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings novelBalance novelBudget')
+          .lean(),
+          
+        // 2. Get modules
+        Module.find({ novelId: novelId })
+          .select('title illustration order chapters mode moduleBalance')
+          .sort('order')
+          .lean(),
+          
+        // 3. Get chapters
+        Chapter.find({ novelId: novelId })
+          .select('title moduleId order createdAt updatedAt mode chapterBalance')
+          .sort('order')
+          .lean(),
+          
+        // 4. Get gifts with counts (using the same aggregation but cached)
+        Gift.aggregate([
+          {
+            $lookup: {
+              from: 'novelgifts',
+              let: { giftId: '$_id' },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ['$giftId', '$$giftId'] },
+                        { $eq: ['$novelId', new mongoose.Types.ObjectId(novelId)] }
+                      ]
+                    }
+                  }
+                }
+              ],
+              as: 'novelGift'
+            }
+          },
+          {
+            $addFields: {
+              count: {
+                $ifNull: [{ $arrayElemAt: ['$novelGift.count', 0] }, 0]
+              }
+            }
+          },
+          {
+            $project: {
+              _id: 1,
+              name: 1,
+              icon: 1,
+              price: 1,
+              order: 1,
+              count: 1
+            }
+          },
+          {
+            $sort: { order: 1 }
+          }
+        ]),
+        
+        // 5. Get user interaction if logged in
+        userId ? UserNovelInteraction.findOne({ 
+          userId, 
+          novelId: new mongoose.Types.ObjectId(novelId) 
+        }).lean() : null,
+        
+        // 6. Get novel interaction statistics
+        UserNovelInteraction.aggregate([
+          {
+            $match: { novelId: new mongoose.Types.ObjectId(novelId) }
+          },
+          {
+            $group: {
+              _id: null,
+              totalLikes: {
+                $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
+              },
+              totalRatings: {
+                $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
+              },
+              ratingSum: {
+                $sum: { $ifNull: ['$rating', 0] }
+              }
+            }
+          }
+        ]),
+        
+        // 7. Get recent contribution history
+        ContributionHistory.find({ novelId: novelId })
+          .sort({ createdAt: -1 })
+          .limit(50)
+          .lean()
+      ]);
+
+      if (!novel) {
+        return { error: "Novel not found", status: 404 };
+      }
+
+      // Organize chapters by module
+      const chaptersByModule = chapters.reduce((acc, chapter) => {
+        const moduleId = chapter.moduleId.toString();
+        if (!acc[moduleId]) {
+          acc[moduleId] = [];
+        }
+        acc[moduleId].push(chapter);
+        return acc;
+      }, {});
+
+      // Attach chapters to their modules
+      const modulesWithChapters = modules.map(module => ({
+        ...module,
+        chapters: chaptersByModule[module._id.toString()] || []
+      }));
+
+      // Build interaction response
+      const stats = novelStats[0];
+      const interactions = {
+        totalLikes: stats?.totalLikes || 0,
+        totalRatings: stats?.totalRatings || 0,
+        averageRating: stats?.totalRatings > 0 
+          ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
+          : '0.0',
+        userInteraction: {
+          liked: userInteraction?.liked || false,
+          rating: userInteraction?.rating || null,
+          bookmarked: userInteraction?.bookmarked || false
+        }
+      };
+
+      return {
+        novel,
+        modules: modulesWithChapters,
+        gifts,
+        interactions,
+        contributionHistory
+      };
+    });
+
+    // Handle deduplication errors
+    if (result.error) {
+      return res.status(result.status).json({ message: result.error });
+    }
+
+    // Return complete novel page data
+    res.json(result);
+
+    // Increment view count after sending response (non-blocking)
+    if (req.query.skipViewTracking !== 'true') {
+      Novel.findById(novelId)
+        .then(fullNovel => {
+          if (fullNovel) {
+            return fullNovel.incrementViews();
+          }
+        })
+        .catch(err => console.error('Error updating view count:', err));
+    }
+  } catch (err) {
+    console.error('Error in novel complete route:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Get complete homepage data in a single optimized request
+ * @route GET /api/novels/homepage
+ */
+router.get("/homepage", async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 15;
+    const skip = (page - 1) * limit;
+    const userId = req.user ? req.user._id : null;
+    const timeRange = req.query.timeRange || 'today';
+
+    // Check if we should bypass cache
+    const bypass = shouldBypassCache(req.path, req.query);
+    const cacheKey = `homepage_${page}_${limit}_${timeRange}_${userId || 'guest'}`;
+    
+    if (!bypass) {
+      const cachedData = cache.get(cacheKey);
+      if (cachedData) {
+        return res.json(cachedData);
+      }
+    }
+
+    // Use query deduplication to prevent multiple identical requests
+    const result = await dedupQuery(cacheKey, async () => {
+      // Execute all homepage queries in parallel for maximum performance
+      const [
+        novelListResult,
+        hotNovels,
+        recentComments,
+        readingHistory
+      ] = await Promise.all([
+        // 1. Novel list with pagination (existing optimized aggregation)
+        Novel.aggregate([
+          {
+            $facet: {
+              total: [{ $count: 'count' }],
+              novels: [
+                {
+                  $project: {
+                    title: 1,
+                    illustration: 1,
+                    author: 1,
+                    illustrator: 1,
+                    status: 1,
+                    genres: 1,
+                    alternativeTitles: 1,
+                    updatedAt: 1,
+                    createdAt: 1,
+                    description: 1,
+                    note: 1,
+                    active: 1,
+                    inactive: 1,
+                    novelBalance: 1,
+                    novelBudget: 1
+                  }
+                },
+                // Simplified chapter lookup - only get what we need
+                {
+                  $lookup: {
+                    from: 'chapters',
+                    let: { novelId: '$_id' },
+                    pipeline: [
+                      {
+                        $match: {
+                          $expr: { $eq: ['$novelId', '$$novelId'] }
+                        }
+                      },
+                      { $sort: { createdAt: -1 } },
+                      { $limit: 1 }, // Reduced from 3 to 1 for performance
+                      {
+                        $project: {
+                          _id: 1,
+                          title: 1,
+                          createdAt: 1
+                        }
+                      }
+                    ],
+                    as: 'latestChapter'
+                  }
+                },
+                // Calculate latest activity
+                {
+                  $addFields: {
+                    latestActivity: {
+                      $max: [
+                        '$updatedAt',
+                        { $max: '$latestChapter.createdAt' }
+                      ]
+                    },
+                    latestChapter: { $arrayElemAt: ['$latestChapter', 0] }
+                  }
+                },
+                { $sort: { latestActivity: -1 } },
+                { $skip: skip },
+                { $limit: limit }
+              ]
+            }
+          }
+        ]),
+
+        // 2. Hot novels (cached separately with shorter TTL)
+        dedupQuery(`hot_novels_${timeRange}`, async () => {
+          const now = new Date();
+          let startDate;
+          
+          if (timeRange === 'today') {
+            startDate = new Date();
+            startDate.setHours(0, 0, 0, 0);
+          } else if (timeRange === 'week') {
+            startDate = new Date();
+            startDate.setDate(startDate.getDate() - 7);
+          }
+
+          try {
+            return await Novel.aggregate([
+              { $match: { "views.daily": { $exists: true, $ne: [] } } },
+              { $unwind: "$views.daily" },
+              {
+                $match: {
+                  "views.daily.date": { $gte: startDate }
+                }
+              },
+              {
+                $group: {
+                  _id: "$_id",
+                  title: { $first: "$title" },
+                  illustration: { $first: "$illustration" },
+                  status: { $first: "$status" },
+                  dailyViews: { $sum: "$views.daily.count" }
+                }
+              },
+              { $sort: { dailyViews: -1 } },
+              { $limit: 5 },
+              {
+                $project: {
+                  _id: 1,
+                  title: 1,
+                  illustration: 1,
+                  status: 1,
+                  dailyViews: 1
+                }
+              }
+            ]);
+          } catch (err) {
+            console.warn('Hot novels query failed, returning empty array:', err);
+            return [];
+          }
+        }),
+
+        // 3. Recent comments (simplified and cached via comments route)
+        dedupQuery(`recent_comments_10`, async () => {
+          try {
+            return await Comment.aggregate([
+              {
+                $match: {
+                  isDeleted: { $ne: true },
+                  adminDeleted: { $ne: true },
+                  parentId: null
+                }
+              },
+              { $sort: { createdAt: -1 } },
+              { $limit: 10 },
+              {
+                $lookup: {
+                  from: 'users',
+                  localField: 'user',
+                  foreignField: '_id',
+                  pipeline: [
+                    { $project: { username: 1, avatar: 1 } }
+                  ],
+                  as: 'userInfo'
+                }
+              },
+              { $unwind: '$userInfo' },
+              // Simplified content title resolution
+              {
+                $addFields: {
+                  contentTitle: {
+                    $cond: [
+                      { $eq: ['$contentType', 'novels'] },
+                      'Novel Comment',
+                      {
+                        $cond: [
+                          { $eq: ['$contentType', 'chapters'] },
+                          'Chapter Comment',
+                          'Feedback'
+                        ]
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                $project: {
+                  _id: 1,
+                  text: 1,
+                  contentType: 1,
+                  contentId: 1,
+                  contentTitle: 1,
+                  createdAt: 1,
+                  user: {
+                    _id: '$userInfo._id',
+                    username: '$userInfo.username',
+                    avatar: '$userInfo.avatar'
+                  }
+                }
+              }
+            ]);
+          } catch (err) {
+            console.warn('Comments query failed, returning empty array:', err);
+            return [];
+          }
+        }),
+
+        // 4. Reading history (only if user is logged in)
+        userId ? UserChapterInteraction.aggregate([
+          {
+            $match: {
+              userId: new mongoose.Types.ObjectId(userId),
+              lastReadAt: {
+                $ne: null,
+                $gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) // Last 2 weeks
+              }
+            }
+          },
+          { $sort: { lastReadAt: -1 } },
+          {
+            $group: {
+              _id: '$novelId',
+              latestInteraction: { $first: '$$ROOT' }
+            }
+          },
+          { $replaceRoot: { newRoot: '$latestInteraction' } },
+          { $sort: { lastReadAt: -1 } },
+          { $limit: 5 },
+          // Simplified lookups
+          {
+            $lookup: {
+              from: 'chapters',
+              localField: 'chapterId',
+              foreignField: '_id',
+              pipeline: [
+                { $project: { title: 1, novelId: 1 } }
+              ],
+              as: 'chapter'
+            }
+          },
+          {
+            $lookup: {
+              from: 'novels',
+              localField: 'novelId',
+              foreignField: '_id',
+              pipeline: [
+                { $project: { title: 1, illustration: 1 } }
+              ],
+              as: 'novel'
+            }
+          },
+          {
+            $addFields: {
+              chapter: { $arrayElemAt: ['$chapter', 0] },
+              novel: { $arrayElemAt: ['$novel', 0] }
+            }
+          },
+          {
+            $match: {
+              'chapter._id': { $exists: true },
+              'novel._id': { $exists: true }
+            }
+          },
+          {
+            $project: {
+              chapterId: 1,
+              novelId: 1,
+              lastReadAt: 1,
+              chapter: 1,
+              novel: 1
+            }
+          }
+        ]) : []
+      ]);
+
+      // Process novel list result
+      const total = novelListResult[0]?.total[0]?.count || 0;
+      const novels = novelListResult[0]?.novels || [];
+
+      return {
+        novelList: {
+          novels,
+          pagination: {
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            totalItems: total
+          }
+        },
+        hotNovels: hotNovels || [],
+        recentComments: recentComments || [],
+        readingHistory: readingHistory || []
+      };
+    });
+
+    // Cache the result only if not bypassing
+    if (!bypass) {
+      cache.set(cacheKey, result, 1000 * 60 * 2); // 2 minutes cache
+    }
+
+    res.json(result);
+
+  } catch (err) {
+    console.error('Error in homepage route:', err);
+    res.status(500).json({
+      novelList: { novels: [], pagination: { currentPage: 1, totalPages: 1, totalItems: 0 } },
+      hotNovels: [],
+      recentComments: [],
+      readingHistory: [],
+      error: err.message
+    });
+  }
+});
 
 export default router;

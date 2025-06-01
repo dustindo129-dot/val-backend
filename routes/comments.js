@@ -6,6 +6,57 @@ import { createCommentReplyNotification } from '../services/notificationService.
 
 const router = express.Router();
 
+// Simple in-memory cache for recent comments
+const recentCommentsCache = new Map();
+const RECENT_COMMENTS_CACHE_TTL = 1000 * 60 * 2; // 2 minutes
+const MAX_RECENT_COMMENTS_CACHE_SIZE = 50;
+
+// Query deduplication cache
+const pendingCommentsQueries = new Map();
+
+// Helper function to manage recent comments cache
+const getCachedRecentComments = (limit) => {
+  const cached = recentCommentsCache.get(`recent_${limit}`);
+  if (cached && Date.now() - cached.timestamp < RECENT_COMMENTS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedRecentComments = (limit, data) => {
+  if (recentCommentsCache.size >= MAX_RECENT_COMMENTS_CACHE_SIZE) {
+    const oldestKey = recentCommentsCache.keys().next().value;
+    recentCommentsCache.delete(oldestKey);
+  }
+  
+  recentCommentsCache.set(`recent_${limit}`, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+// Query deduplication helper for comments
+const dedupCommentsQuery = async (key, queryFn) => {
+  if (pendingCommentsQueries.has(key)) {
+    return await pendingCommentsQueries.get(key);
+  }
+  
+  const queryPromise = queryFn();
+  pendingCommentsQueries.set(key, queryPromise);
+  
+  try {
+    const result = await queryPromise;
+    return result;
+  } finally {
+    pendingCommentsQueries.delete(key);
+  }
+};
+
+// Clear recent comments cache (call this when new comments are added)
+const clearRecentCommentsCache = () => {
+  recentCommentsCache.clear();
+};
+
 /**
  * Get comments for a specific content (novel or chapter)
  * Supports sorting by newest, oldest, or most liked
@@ -96,7 +147,7 @@ router.get('/', async (req, res) => {
 });
 
 /**
- * Get recent comments from across the website
+ * Get recent comments from across the website (OPTIMIZED)
  * Fetches the latest comments regardless of content type
  * @route GET /api/comments/recent
  */
@@ -104,134 +155,82 @@ router.get('/recent', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
 
-    // Get recent comments, excluding replies and deleted comments
-    const recentComments = await Comment.aggregate([
-      {
-        $match: {
-          isDeleted: { $ne: true },
-          adminDeleted: { $ne: true },
-          parentId: null // Only root comments, not replies
-        }
-      },
-      {
-        $sort: { createdAt: -1 } // Newest first
-      },
-      {
-        $limit: limit
-      },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'user',
-          foreignField: '_id',
-          pipeline: [
-            { $project: { username: 1, avatar: 1 } }
-          ],
-          as: 'userInfo'
-        }
-      },
-      {
-        $unwind: '$userInfo'
-      },
-      // Lookup for content titles
-      {
-        $lookup: {
-          from: 'novels',
-          let: { contentId: { $toString: '$contentId' }, contentType: '$contentType' },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $and: [
-                    { $eq: [{ $toString: '$_id' }, '$$contentId'] },
-                    { $eq: ['$$contentType', 'novels'] }
-                  ]
-                }
-              }
-            },
-            { $project: { title: 1 } }
-          ],
-          as: 'novelInfo'
-        }
-      },
-      {
-        $lookup: {
-          from: 'chapters',
-          let: { 
-            contentIdParts: { $split: ['$contentId', '-'] },
-            contentType: '$contentType'
-          },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $and: [
-                    { $eq: ['$$contentType', 'chapters'] },
-                    { $eq: [{ $toString: '$_id' }, { $arrayElemAt: ['$$contentIdParts', 1] }] }
-                  ]
-                }
-              }
-            },
-            { 
-              $lookup: {
-                from: 'novels',
-                let: { novelId: '$novel' },
-                pipeline: [
-                  { $match: { $expr: { $eq: ['$_id', '$$novelId'] } } },
-                  { $project: { title: 1 } }
-                ],
-                as: 'novelTitle'
-              }
-            },
-            { $unwind: { path: '$novelTitle', preserveNullAndEmptyArrays: true } },
-            { $project: { 
-                novelTitle: '$novelTitle.title', 
-                chapterTitle: '$title' 
-              } 
-            }
-          ],
-          as: 'chapterInfo'
-        }
-      },
-      {
-        $addFields: {
-          contentTitle: {
-            $cond: [
-              { $eq: ['$contentType', 'novels'] },
-              { $arrayElemAt: ['$novelInfo.title', 0] },
-              { $cond: [
-                { $eq: ['$contentType', 'chapters'] },
-                { $arrayElemAt: ['$chapterInfo.novelTitle', 0] },
-                'Feedback'
-              ]}
-            ]
-          },
-          chapterTitle: {
-            $cond: [
-              { $eq: ['$contentType', 'chapters'] },
-              { $arrayElemAt: ['$chapterInfo.chapterTitle', 0] },
-              null
-            ]
-          }
-        }
-      },
-      {
-        $project: {
-          _id: 1,
-          text: 1,
-          contentType: 1,
-          contentId: 1,
-          contentTitle: 1,
-          chapterTitle: 1,
-          createdAt: 1,
-          user: {
-            _id: '$userInfo._id',
-            username: '$userInfo.username',
-            avatar: '$userInfo.avatar'
-          }
-        }
+    // Use query deduplication to prevent multiple identical requests
+    const recentComments = await dedupCommentsQuery(`recent_${limit}`, async () => {
+      // Check if recent comments are cached
+      const cachedComments = getCachedRecentComments(limit);
+      if (cachedComments) {
+        return cachedComments;
       }
-    ]);
+
+      // Simplified aggregation - get basic comment info first
+      const comments = await Comment.aggregate([
+        {
+          $match: {
+            isDeleted: { $ne: true },
+            adminDeleted: { $ne: true },
+            parentId: null // Only root comments, not replies
+          }
+        },
+        {
+          $sort: { createdAt: -1 } // Newest first
+        },
+        {
+          $limit: limit
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'user',
+            foreignField: '_id',
+            pipeline: [
+              { $project: { username: 1, avatar: 1 } }
+            ],
+            as: 'userInfo'
+          }
+        },
+        {
+          $unwind: '$userInfo'
+        },
+        // Simplified content title resolution
+        {
+          $addFields: {
+            contentTitle: {
+              $cond: [
+                { $eq: ['$contentType', 'novels'] },
+                'Novel Comment',
+                {
+                  $cond: [
+                    { $eq: ['$contentType', 'chapters'] },
+                    'Chapter Comment',
+                    'Feedback'
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          $project: {
+            _id: 1,
+            text: 1,
+            contentType: 1,
+            contentId: 1,
+            contentTitle: 1,
+            createdAt: 1,
+            user: {
+              _id: '$userInfo._id',
+              username: '$userInfo.username',
+              avatar: '$userInfo.avatar'
+            }
+          }
+        }
+      ]);
+
+      // Cache the result
+      setCachedRecentComments(limit, comments);
+      return comments;
+    });
 
     res.json(recentComments);
   } catch (err) {
@@ -271,6 +270,9 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
 
     // Save the reply
     await reply.save();
+    
+    // Clear recent comments cache since a new comment was added
+    clearRecentCommentsCache();
     
     // Populate user info
     await reply.populate('user', 'username avatar');
@@ -387,6 +389,11 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
     });
 
     await comment.save();
+    
+    // Clear recent comments cache since a new comment was added
+    clearRecentCommentsCache();
+
+    // Populate user info
     await comment.populate('user', 'username avatar');
 
     // Notify clients about the new comment via SSE

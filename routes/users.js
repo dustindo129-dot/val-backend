@@ -4,11 +4,14 @@ import User from '../models/User.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
-
-// Helper function to escape regex special characters
-const escapeRegex = (string) => {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-};
+import Novel from '../models/Novel.js';
+import admin from '../middleware/admin.js';
+import path from 'path';
+import fs from 'fs';
+import Comment from '../models/Comment.js';
+import Chapter from '../models/Chapter.js';
+import UserChapterInteraction from '../models/UserChapterInteraction.js';
+import { getCachedUserById, getCachedUserByUsername, clearUserCache } from '../utils/userCache.js';
 
 const router = express.Router();
 
@@ -197,32 +200,40 @@ router.put('/:username/password', auth, async (req, res) => {
 });
 
 /**
- * Get user profile
+ * Get user profile (OPTIMIZED)
  * @route GET /api/users/:username/profile
  */
 router.get('/:username/profile', auth, async (req, res) => {
   try {
-    let user;
-    const identifier = req.params.username;
-
-    // First try to find by username
-    user = await User.findOne({ username: identifier })
-      .select('-password');
-
-    // If not found by username, check if it's a valid ObjectId and try finding by ID
-    if (!user && mongoose.Types.ObjectId.isValid(identifier)) {
-      user = await User.findById(identifier)
-        .select('-password');
-    }
-
+    const username = req.params.username;
+    
+    // Use cached lookup
+    const user = await getCachedUserByUsername(username);
+    
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    res.json(user);
-  } catch (error) {
-    console.error('Profile fetch error:', error);
-    res.status(500).json({ message: 'Failed to fetch profile' });
+    // Get user statistics in parallel
+    const [commentsCount, chaptersReadCount, novelsRatedCount] = await Promise.all([
+      Comment.countDocuments({ user: user._id, isDeleted: { $ne: true } }),
+      UserChapterInteraction.countDocuments({ userId: user._id }),
+      UserNovelInteraction.countDocuments({ userId: user._id, rating: { $ne: null } })
+    ]);
+
+    const profile = {
+      ...user,
+      stats: {
+        commentsCount,
+        chaptersReadCount,
+        novelsRatedCount
+      }
+    };
+
+    res.json(profile);
+  } catch (err) {
+    console.error('Error getting user profile:', err);
+    res.status(500).json({ message: err.message });
   }
 });
 
@@ -620,6 +631,76 @@ router.get('/search', auth, async (req, res) => {
   } catch (error) {
     console.error('User search failed:', error);
     res.status(500).json({ message: 'Failed to search users' });
+  }
+});
+
+// Get user by username
+router.get('/:username', async (req, res) => {
+  try {
+    const username = req.params.username;
+    
+    // Use cached lookup to prevent duplicate queries
+    const user = await getCachedUserByUsername(username);
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    res.json(user);
+  } catch (err) {
+    console.error('Error getting user:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Update user route with cache invalidation
+router.put('/:id', auth, async (req, res) => {
+  try {
+    // Only allow users to update their own profile or admin to update any
+    if (req.user._id.toString() !== req.params.id && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const updateData = { ...req.body };
+    delete updateData.password; // Don't allow password updates through this route
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { new: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Clear user cache when data changes
+    clearUserCache(user._id, user.username);
+
+    res.json(user);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
+// Helper function to escape regex special characters
+const escapeRegex = (string) => {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+// Search users (admin only)
+router.get('/search/:query', [auth, admin], async (req, res) => {
+  try {
+    const query = escapeRegex(req.params.query);
+    const users = await User.find({
+      username: { $regex: query, $options: 'i' }
+    })
+    .select('-password')
+    .limit(10);
+    
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 });
 
