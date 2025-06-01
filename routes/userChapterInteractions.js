@@ -8,12 +8,50 @@ import NodeCache from 'node-cache';
 
 const router = express.Router();
 
+/**
+ * PERFORMANCE OPTIMIZATION NOTES:
+ * 
+ * For optimal performance of userChapterInteractions queries, ensure these indexes exist:
+ * 
+ * 1. db.userchapterinteractions.createIndex({ "chapterId": 1 }) // For stats queries
+ * 2. db.userchapterinteractions.createIndex({ "userId": 1, "chapterId": 1 }) // For user interaction queries
+ * 3. db.userchapterinteractions.createIndex({ "userId": 1, "novelId": 1, "bookmarked": 1 }) // For bookmark queries
+ * 4. db.userchapterinteractions.createIndex({ "userId": 1, "lastReadAt": -1 }) // For recently read queries
+ * 5. db.userchapterinteractions.createIndex({ "chapterId": 1, "liked": 1 }) // For like count queries
+ * 6. db.userchapterinteractions.createIndex({ "chapterId": 1, "rating": 1 }) // For rating queries
+ * 
+ * These indexes will eliminate the duplicate query patterns and improve response times significantly.
+ */
+
 // Create in-memory cache for chapter interactions (5 minutes TTL)
 const interactionCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+
+// Query deduplication cache to prevent multiple identical requests
+const pendingQueries = new Map();
 
 // Cache keys constants
 const getUserInteractionCacheKey = (userId, chapterId) => `user:${userId}:chapter:${chapterId}:interaction`;
 const getChapterStatsCacheKey = (chapterId) => `chapter:${chapterId}:stats`;
+
+// Helper function for query deduplication
+const dedupQuery = async (key, queryFn) => {
+  // If query is already pending, wait for it
+  if (pendingQueries.has(key)) {
+    return await pendingQueries.get(key);
+  }
+  
+  // Start new query
+  const queryPromise = queryFn();
+  pendingQueries.set(key, queryPromise);
+  
+  try {
+    const result = await queryPromise;
+    return result;
+  } finally {
+    // Clean up pending query
+    pendingQueries.delete(key);
+  }
+};
 
 /**
  * Get chapter interaction statistics
@@ -31,41 +69,44 @@ router.get('/stats/:chapterId', async (req, res) => {
       return res.json(cachedStats);
     }
     
-    // Aggregate interactions data
-    const [stats] = await UserChapterInteraction.aggregate([
-      {
-        $match: { chapterId: new mongoose.Types.ObjectId(chapterId) }
-      },
-      {
-        $group: {
-          _id: null,
-          totalLikes: {
-            $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
-          },
-          totalRatings: {
-            $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
-          },
-          ratingSum: {
-            $sum: { $ifNull: ['$rating', 0] }
+    // Use query deduplication for the aggregation
+    const result = await dedupQuery(`stats:${chapterId}`, async () => {
+      // Aggregate interactions data
+      const [stats] = await UserChapterInteraction.aggregate([
+        {
+          $match: { chapterId: new mongoose.Types.ObjectId(chapterId) }
+        },
+        {
+          $group: {
+            _id: null,
+            totalLikes: {
+              $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
+            },
+            totalRatings: {
+              $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
+            },
+            ratingSum: {
+              $sum: { $ifNull: ['$rating', 0] }
+            }
           }
         }
-      }
-    ]);
+      ]);
 
-    // If no interactions exist yet, return default values
-    const result = stats 
-      ? {
-          totalLikes: stats.totalLikes,
-          totalRatings: stats.totalRatings,
-          averageRating: stats.totalRatings > 0 
-            ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
-            : '0.0'
-        }
-      : {
-          totalLikes: 0,
-          totalRatings: 0,
-          averageRating: '0.0'
-        };
+      // If no interactions exist yet, return default values
+      return stats 
+        ? {
+            totalLikes: stats.totalLikes,
+            totalRatings: stats.totalRatings,
+            averageRating: stats.totalRatings > 0 
+              ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
+              : '0.0'
+          }
+        : {
+            totalLikes: 0,
+            totalRatings: 0,
+            averageRating: '0.0'
+          };
+    });
     
     // Cache the result
     interactionCache.set(cacheKey, result);
@@ -99,20 +140,23 @@ router.get('/user/:chapterId', auth, async (req, res) => {
       return res.json(cachedInteraction);
     }
 
-    // Use lean() for better performance and only select needed fields
-    const interaction = await UserChapterInteraction.findOne(
-      { userId, chapterId },
-      { liked: 1, rating: 1, bookmarked: 1, _id: 0 }  // Only select needed fields
-    )
-    .lean()
-    .maxTimeMS(2000);  // Set timeout to prevent long-running queries
-    
-    // Default response
-    const result = {
-      liked: interaction?.liked || false,
-      rating: interaction?.rating || null,
-      bookmarked: interaction?.bookmarked || false
-    };
+    // Use query deduplication for the database lookup
+    const result = await dedupQuery(`user-interaction:${userId}:${chapterId}`, async () => {
+      // Use lean() for better performance and only select needed fields
+      const interaction = await UserChapterInteraction.findOne(
+        { userId, chapterId },
+        { liked: 1, rating: 1, bookmarked: 1, _id: 0 }  // Only select needed fields
+      )
+      .lean()
+      .maxTimeMS(2000);  // Set timeout to prevent long-running queries
+      
+      // Default response
+      return {
+        liked: interaction?.liked || false,
+        rating: interaction?.rating || null,
+        bookmarked: interaction?.bookmarked || false
+      };
+    });
     
     // Cache the result
     interactionCache.set(cacheKey, result);

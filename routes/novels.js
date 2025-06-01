@@ -757,31 +757,91 @@ router.get("/:id", async (req, res) => {
     
     // Use query deduplication to prevent multiple identical requests
     const result = await dedupQuery(`novel:${novelId}`, async () => {
-      // Get novel and modules in parallel with proper projection
-      const [novel, modules] = await Promise.all([
-        Novel.findById(novelId)
-          .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings novelBalance novelBudget')
-          .lean(),
-        Module.find({ novelId: novelId })
-          .select('title illustration order chapters mode moduleBalance')
-          .sort('order')
-          .lean()
+      // Use a single aggregation pipeline to get all required data in one query
+      const [novelWithData] = await Novel.aggregate([
+        // Match the specific novel
+        {
+          $match: { _id: new mongoose.Types.ObjectId(novelId) }
+        },
+        
+        // Lookup modules for this novel
+        {
+          $lookup: {
+            from: 'modules',
+            localField: '_id',
+            foreignField: 'novelId',
+            pipeline: [
+              {
+                $project: {
+                  title: 1,
+                  illustration: 1,
+                  order: 1,
+                  mode: 1,
+                  moduleBalance: 1
+                }
+              },
+              { $sort: { order: 1 } }
+            ],
+            as: 'modules'
+          }
+        },
+        
+        // Lookup all chapters for this novel
+        {
+          $lookup: {
+            from: 'chapters',
+            localField: '_id',
+            foreignField: 'novelId',
+            pipeline: [
+              {
+                $project: {
+                  title: 1,
+                  moduleId: 1,
+                  order: 1,
+                  createdAt: 1,
+                  updatedAt: 1,
+                  mode: 1,
+                  chapterBalance: 1
+                }
+              },
+              { $sort: { order: 1 } }
+            ],
+            as: 'allChapters'
+          }
+        },
+        
+        // Project only the fields we need from the novel
+        {
+          $project: {
+            title: 1,
+            description: 1,
+            alternativeTitles: 1,
+            author: 1,
+            illustrator: 1,
+            illustration: 1,
+            status: 1,
+            active: 1,
+            inactive: 1,
+            genres: 1,
+            note: 1,
+            updatedAt: 1,
+            createdAt: 1,
+            views: 1,
+            ratings: 1,
+            novelBalance: 1,
+            novelBudget: 1,
+            modules: 1,
+            allChapters: 1
+          }
+        }
       ]);
 
-      if (!novel) {
+      if (!novelWithData) {
         return { error: "Novel not found", status: 404 };
       }
 
-      // Get chapters with minimal fields needed
-      const chapters = await Chapter.find({ 
-        novelId: novelId 
-      })
-      .select('title moduleId order createdAt updatedAt mode chapterBalance')
-      .sort('order')
-      .lean();
-
-      // Organize chapters by module
-      const chaptersByModule = chapters.reduce((acc, chapter) => {
+      // Organize chapters by module efficiently
+      const chaptersByModule = novelWithData.allChapters.reduce((acc, chapter) => {
         const moduleId = chapter.moduleId.toString();
         if (!acc[moduleId]) {
           acc[moduleId] = [];
@@ -791,11 +851,14 @@ router.get("/:id", async (req, res) => {
       }, {});
 
       // Attach chapters to their modules
-      const modulesWithChapters = modules.map(module => ({
+      const modulesWithChapters = novelWithData.modules.map(module => ({
         ...module,
         chapters: chaptersByModule[module._id.toString()] || []
       }));
 
+      // Clean up the response structure
+      const { allChapters, ...novel } = novelWithData;
+      
       return {
         novel,
         modules: modulesWithChapters
@@ -2369,6 +2432,179 @@ router.get("/homepage", async (req, res) => {
       readingHistory: [],
       error: err.message
     });
+  }
+});
+
+/**
+ * Get optimized dashboard data for a novel (eliminates duplicate queries)
+ * @route GET /api/novels/:id/dashboard
+ */
+router.get("/:id/dashboard", async (req, res) => {
+  try {
+    const novelId = req.params.id;
+    const moduleId = req.query.moduleId;
+    
+    // Check if we should bypass cache
+    const bypass = shouldBypassCache(req.path, req.query);
+    const cacheKey = `novel-dashboard:${novelId}:${moduleId || 'all'}`;
+    
+    // Try to get from cache first (short TTL for dashboard data)
+    if (!bypass) {
+      const cachedData = cache.get(cacheKey);
+      if (cachedData) {
+        return res.json(cachedData);
+      }
+    }
+    
+    // Use query deduplication to prevent multiple identical requests
+    const result = await dedupQuery(cacheKey, async () => {
+      // Single aggregation pipeline that gets all required dashboard data
+      const [dashboardData] = await Novel.aggregate([
+        // Match the specific novel
+        {
+          $match: { _id: new mongoose.Types.ObjectId(novelId) }
+        },
+        
+        // Lookup all modules for this novel with full details
+        {
+          $lookup: {
+            from: 'modules',
+            localField: '_id',
+            foreignField: 'novelId',
+            pipeline: [
+              { $sort: { order: 1 } }
+            ],
+            as: 'modules'
+          }
+        },
+        
+        // Lookup all chapters for this novel
+        {
+          $lookup: {
+            from: 'chapters',
+            localField: '_id',
+            foreignField: 'novelId',
+            pipeline: [
+              { $sort: { order: 1 } }
+            ],
+            as: 'chapters'
+          }
+        },
+        
+        // If specific moduleId is provided, also get that module's details
+        ...(moduleId ? [
+          {
+            $lookup: {
+              from: 'modules',
+              let: { novelId: '$_id' },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ['$_id', new mongoose.Types.ObjectId(moduleId)] },
+                        { $eq: ['$novelId', '$$novelId'] }
+                      ]
+                    }
+                  }
+                }
+              ],
+              as: 'selectedModule'
+            }
+          }
+        ] : []),
+        
+        // Project the final structure
+        {
+          $project: {
+            // Novel fields
+            title: 1,
+            description: 1,
+            alternativeTitles: 1,
+            author: 1,
+            illustrator: 1,
+            illustration: 1,
+            status: 1,
+            active: 1,
+            inactive: 1,
+            genres: 1,
+            note: 1,
+            updatedAt: 1,
+            createdAt: 1,
+            views: 1,
+            ratings: 1,
+            novelBalance: 1,
+            novelBudget: 1,
+            // Module and chapter data
+            modules: 1,
+            chapters: 1,
+            ...(moduleId ? { selectedModule: { $arrayElemAt: ['$selectedModule', 0] } } : {})
+          }
+        }
+      ]);
+
+      if (!dashboardData) {
+        return { error: "Novel not found", status: 404 };
+      }
+
+      // Organize chapters by module for efficient lookup
+      const chaptersByModule = dashboardData.chapters.reduce((acc, chapter) => {
+        const moduleId = chapter.moduleId.toString();
+        if (!acc[moduleId]) {
+          acc[moduleId] = [];
+        }
+        acc[moduleId].push(chapter);
+        return acc;
+      }, {});
+
+      // Attach chapters to their respective modules
+      const modulesWithChapters = dashboardData.modules.map(module => ({
+        ...module,
+        chapters: chaptersByModule[module._id.toString()] || []
+      }));
+
+      return {
+        novel: {
+          _id: dashboardData._id,
+          title: dashboardData.title,
+          description: dashboardData.description,
+          alternativeTitles: dashboardData.alternativeTitles,
+          author: dashboardData.author,
+          illustrator: dashboardData.illustrator,
+          illustration: dashboardData.illustration,
+          status: dashboardData.status,
+          active: dashboardData.active,
+          inactive: dashboardData.inactive,
+          genres: dashboardData.genres,
+          note: dashboardData.note,
+          updatedAt: dashboardData.updatedAt,
+          createdAt: dashboardData.createdAt,
+          views: dashboardData.views,
+          ratings: dashboardData.ratings,
+          novelBalance: dashboardData.novelBalance,
+          novelBudget: dashboardData.novelBudget
+        },
+        modules: modulesWithChapters,
+        chapters: dashboardData.chapters,
+        selectedModule: dashboardData.selectedModule || null
+      };
+    });
+
+    // Handle deduplication errors
+    if (result.error) {
+      return res.status(result.status).json({ message: result.error });
+    }
+
+    // Cache the result for a short time (30 seconds for dashboard data)
+    if (!bypass) {
+      cache.set(cacheKey, result, 1000 * 30); // 30 seconds cache
+    }
+
+    // Return dashboard data
+    res.json(result);
+  } catch (err) {
+    console.error('Error in novel dashboard route:', err);
+    res.status(500).json({ message: err.message });
   }
 });
 

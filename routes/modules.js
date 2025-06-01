@@ -9,6 +9,29 @@ import mongoose from 'mongoose';
 
 const router = express.Router();
 
+// Query deduplication cache to prevent multiple identical requests
+const pendingQueries = new Map();
+
+// Helper function for query deduplication
+const dedupQuery = async (key, queryFn) => {
+  // If query is already pending, wait for it
+  if (pendingQueries.has(key)) {
+    return await pendingQueries.get(key);
+  }
+  
+  // Start new query
+  const queryPromise = queryFn();
+  pendingQueries.set(key, queryPromise);
+  
+  try {
+    const result = await queryPromise;
+    return result;
+  } finally {
+    // Clean up pending query
+    pendingQueries.delete(key);
+  }
+};
+
 /**
  * Lookup module ID by slug
  * @route GET /api/modules/slug/:slug
@@ -17,31 +40,86 @@ router.get("/slug/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
     
-    // Extract the short ID from the slug (last 8 characters after final hyphen)
-    const parts = slug.split('-');
-    const shortId = parts[parts.length - 1];
-    
-    // If it's already a full MongoDB ID, return it
-    if (/^[0-9a-fA-F]{24}$/.test(slug)) {
-      const module = await Module.findById(slug).select('_id title').lean();
-      if (module) {
-        return res.json({ id: module._id, title: module.title });
-      }
-      return res.status(404).json({ message: "Module not found" });
-    }
-    
-    // If we have a short ID (8 hex characters), find the module
-    if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
-      // Use a more robust approach - get all modules and filter in JavaScript
-      // This is more reliable than regex with ObjectIds
-      const modules = await Module.find({}, '_id title').lean();
-      const matchingModule = modules.find(module => 
-        module._id.toString().toLowerCase().endsWith(shortId.toLowerCase())
-      );
+    // Use query deduplication for this lookup
+    const result = await dedupQuery(`module-slug:${slug}`, async () => {
+      // Extract the short ID from the slug (last 8 characters after final hyphen)
+      const parts = slug.split('-');
+      const shortId = parts[parts.length - 1];
       
-      if (matchingModule) {
-        return res.json({ id: matchingModule._id, title: matchingModule.title });
+      // If it's already a full MongoDB ID, return it
+      if (/^[0-9a-fA-F]{24}$/.test(slug)) {
+        const module = await Module.findById(slug).select('_id title').lean();
+        if (module) {
+          return { id: module._id, title: module.title };
+        }
+        return null;
       }
+      
+      // If we have a short ID (8 hex characters), find the module using efficient aggregation
+      if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
+        const shortIdLower = shortId.toLowerCase();
+        
+        try {
+          // Use efficient aggregation similar to chapters and novels
+          const [module] = await Module.aggregate([
+            {
+              $addFields: {
+                idString: { $toString: "$_id" }
+              }
+            },
+            {
+              $match: {
+                idString: { $regex: new RegExp(shortIdLower + '$', 'i') }
+              }
+            },
+            {
+              $project: {
+                _id: 1,
+                title: 1
+              }
+            },
+            {
+              $limit: 1
+            }
+          ]);
+          
+          if (module) {
+            return { id: module._id, title: module.title };
+          }
+        } catch (aggregationError) {
+          console.warn('Module aggregation failed, falling back to batch method:', aggregationError);
+          
+          // Fallback: Use a more targeted approach by querying in batches
+          // This is still better than loading all modules at once
+          let skip = 0;
+          const batchSize = 100;
+          
+          while (true) {
+            const modules = await Module.find({}, { _id: 1, title: 1 })
+              .lean()
+              .skip(skip)
+              .limit(batchSize);
+            
+            if (modules.length === 0) break; // No more modules to check
+            
+            const matchingModule = modules.find(module => 
+              module._id.toString().toLowerCase().endsWith(shortIdLower)
+            );
+            
+            if (matchingModule) {
+              return { id: matchingModule._id, title: matchingModule.title };
+            }
+            
+            skip += batchSize;
+          }
+        }
+      }
+      
+      return null;
+    });
+    
+    if (result) {
+      return res.json(result);
     }
     
     res.status(404).json({ message: "Module not found" });
@@ -104,12 +182,17 @@ router.get('/:novelId/modules', async (req, res) => {
 // Get a specific module
 router.get('/:novelId/modules/:moduleId', async (req, res) => {
   try {
-    const module = await Module.findOne({
-      _id: req.params.moduleId,
-      novelId: req.params.novelId
-    }).populate({
-      path: 'chapters',
-      options: { sort: { order: 1 } }
+    const { novelId, moduleId } = req.params;
+    
+    // Use query deduplication to prevent multiple identical requests
+    const module = await dedupQuery(`module:${novelId}:${moduleId}`, async () => {
+      return await Module.findOne({
+        _id: moduleId,
+        novelId: novelId
+      }).populate({
+        path: 'chapters',
+        options: { sort: { order: 1 } }
+      });
     });
     
     if (!module) {
