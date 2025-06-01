@@ -2127,7 +2127,7 @@ router.get("/homepage", async (req, res) => {
           }
         }),
 
-        // 3. Recent comments (simplified and cached via comments route)
+        // 3. Recent comments (optimized with proper title lookups)
         dedupQuery(`recent_comments_10`, async () => {
           try {
             return await Comment.aggregate([
@@ -2152,20 +2152,93 @@ router.get("/homepage", async (req, res) => {
                 }
               },
               { $unwind: '$userInfo' },
-              // Simplified content title resolution
+              // Lookup novel titles for novel comments
+              {
+                $lookup: {
+                  from: 'novels',
+                  let: { 
+                    contentId: '$contentId',
+                    contentType: '$contentType'
+                  },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $and: [
+                            { $eq: ['$$contentType', 'novels'] },
+                            { $eq: [{ $toString: '$_id' }, '$$contentId'] }
+                          ]
+                        }
+                      }
+                    },
+                    { $project: { title: 1 } }
+                  ],
+                  as: 'novelInfo'
+                }
+              },
+              // Lookup chapter and novel info for chapter comments
+              {
+                $lookup: {
+                  from: 'chapters',
+                  let: { 
+                    contentId: '$contentId',
+                    contentType: '$contentType'
+                  },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $and: [
+                            { $eq: ['$$contentType', 'chapters'] },
+                            { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      $lookup: {
+                        from: 'novels',
+                        localField: 'novelId',
+                        foreignField: '_id',
+                        pipeline: [
+                          { $project: { title: 1 } }
+                        ],
+                        as: 'novel'
+                      }
+                    },
+                    {
+                      $project: {
+                        title: 1,
+                        novelTitle: { $arrayElemAt: ['$novel.title', 0] }
+                      }
+                    }
+                  ],
+                  as: 'chapterInfo'
+                }
+              },
+              // Resolve content titles properly
               {
                 $addFields: {
                   contentTitle: {
+                    $switch: {
+                      branches: [
+                        {
+                          case: { $eq: ['$contentType', 'novels'] },
+                          then: { $arrayElemAt: ['$novelInfo.title', 0] }
+                        },
+                        {
+                          case: { $eq: ['$contentType', 'chapters'] },
+                          then: { $arrayElemAt: ['$chapterInfo.novelTitle', 0] }
+                        }
+                      ],
+                      default: 'Feedback'
+                    }
+                  },
+                  chapterTitle: {
                     $cond: [
-                      { $eq: ['$contentType', 'novels'] },
-                      'Novel Comment',
-                      {
-                        $cond: [
-                          { $eq: ['$contentType', 'chapters'] },
-                          'Chapter Comment',
-                          'Feedback'
-                        ]
-                      }
+                      { $eq: ['$contentType', 'chapters'] },
+                      { $arrayElemAt: ['$chapterInfo.title', 0] },
+                      null
                     ]
                   }
                 }
@@ -2177,6 +2250,7 @@ router.get("/homepage", async (req, res) => {
                   contentType: 1,
                   contentId: 1,
                   contentTitle: 1,
+                  chapterTitle: 1,
                   createdAt: 1,
                   user: {
                     _id: '$userInfo._id',

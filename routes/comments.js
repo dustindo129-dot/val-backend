@@ -57,6 +57,9 @@ const clearRecentCommentsCache = () => {
   recentCommentsCache.clear();
 };
 
+// Export the cache clearing function for use in other routes
+export { clearRecentCommentsCache };
+
 /**
  * Get comments for a specific content (novel or chapter)
  * Supports sorting by newest, oldest, or most liked
@@ -163,7 +166,7 @@ router.get('/recent', async (req, res) => {
         return cachedComments;
       }
 
-      // Simplified aggregation - get basic comment info first
+      // Optimized aggregation with proper title lookups
       const comments = await Comment.aggregate([
         {
           $match: {
@@ -192,20 +195,94 @@ router.get('/recent', async (req, res) => {
         {
           $unwind: '$userInfo'
         },
-        // Simplified content title resolution
+        // Lookup novel titles for novel comments
+        {
+          $lookup: {
+            from: 'novels',
+            let: { 
+              contentId: '$contentId',
+              contentType: '$contentType'
+            },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ['$$contentType', 'novels'] },
+                      { $eq: [{ $toString: '$_id' }, '$$contentId'] }
+                    ]
+                  }
+                }
+              },
+              { $project: { title: 1 } }
+            ],
+            as: 'novelInfo'
+          }
+        },
+        // Lookup chapter and novel info for chapter comments
+        {
+          $lookup: {
+            from: 'chapters',
+            let: { 
+              contentId: '$contentId',
+              contentType: '$contentType'
+            },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ['$$contentType', 'chapters'] },
+                      // Handle contentId format: "novelId-chapterId"
+                      { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] }
+                    ]
+                  }
+                }
+              },
+              {
+                $lookup: {
+                  from: 'novels',
+                  localField: 'novelId',
+                  foreignField: '_id',
+                  pipeline: [
+                    { $project: { title: 1 } }
+                  ],
+                  as: 'novel'
+                }
+              },
+              {
+                $project: {
+                  title: 1,
+                  novelTitle: { $arrayElemAt: ['$novel.title', 0] }
+                }
+              }
+            ],
+            as: 'chapterInfo'
+          }
+        },
+        // Resolve content titles properly
         {
           $addFields: {
             contentTitle: {
+              $switch: {
+                branches: [
+                  {
+                    case: { $eq: ['$contentType', 'novels'] },
+                    then: { $arrayElemAt: ['$novelInfo.title', 0] }
+                  },
+                  {
+                    case: { $eq: ['$contentType', 'chapters'] },
+                    then: { $arrayElemAt: ['$chapterInfo.novelTitle', 0] }
+                  }
+                ],
+                default: 'Feedback'
+              }
+            },
+            chapterTitle: {
               $cond: [
-                { $eq: ['$contentType', 'novels'] },
-                'Novel Comment',
-                {
-                  $cond: [
-                    { $eq: ['$contentType', 'chapters'] },
-                    'Chapter Comment',
-                    'Feedback'
-                  ]
-                }
+                { $eq: ['$contentType', 'chapters'] },
+                { $arrayElemAt: ['$chapterInfo.title', 0] },
+                null
               ]
             }
           }
@@ -217,6 +294,7 @@ router.get('/recent', async (req, res) => {
             contentType: 1,
             contentId: 1,
             contentTitle: 1,
+            chapterTitle: 1,
             createdAt: 1,
             user: {
               _id: '$userInfo._id',
