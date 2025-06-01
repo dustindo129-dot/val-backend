@@ -78,16 +78,6 @@ app.use(express.urlencoded({
 // Add compression for performance
 app.use(compression());
 
-// Add request size logging middleware
-app.use((req, res, next) => {
-  if (req.headers['content-length']) {
-    const sizeMB = (parseInt(req.headers['content-length']) / (1024 * 1024)).toFixed(2);
-    console.log(`Request size: ${sizeMB} MB`);
-    console.log('Content-Type:', req.headers['content-type']);
-  }
-  next();
-});
-
 // Configure CORS
 const corsOptions = {
   origin: [
