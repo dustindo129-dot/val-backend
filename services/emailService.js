@@ -47,7 +47,7 @@ export const sendPasswordResetEmail = async (to, resetToken) => {
     console.log('Attempting to send password reset email to:', to);
     
     // Create reset password URL
-    const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+    const resetUrl = `${process.env.FRONTEND_URL}/phuc-hoi-mat-khau/${resetToken}`;
     console.log('Reset URL:', resetUrl);
 
     // Email content
