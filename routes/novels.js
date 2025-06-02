@@ -2458,7 +2458,7 @@ router.get("/:id/dashboard", async (req, res) => {
     
     // Use query deduplication to prevent multiple identical requests
     const result = await dedupQuery(cacheKey, async () => {
-      // Single aggregation pipeline that gets all required dashboard data
+      // Optimized aggregation pipeline that minimizes data transfer
       const [dashboardData] = await Novel.aggregate([
         // Match the specific novel
         {
@@ -2478,18 +2478,56 @@ router.get("/:id/dashboard", async (req, res) => {
           }
         },
         
-        // Lookup all chapters for this novel
-        {
-          $lookup: {
-            from: 'chapters',
-            localField: '_id',
-            foreignField: 'novelId',
-            pipeline: [
-              { $sort: { order: 1 } }
-            ],
-            as: 'chapters'
+        // Only lookup chapters for the specific module if moduleId is provided
+        // Otherwise, just get chapter counts per module for performance
+        ...(moduleId ? [
+          {
+            $lookup: {
+              from: 'chapters',
+              let: { moduleId: new mongoose.Types.ObjectId(moduleId) },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: { $eq: ['$moduleId', '$$moduleId'] }
+                  }
+                },
+                { $sort: { order: 1 } },
+                // Project only essential fields for dashboard
+                {
+                  $project: {
+                    title: 1,
+                    order: 1,
+                    mode: 1,
+                    chapterBalance: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    moduleId: 1
+                  }
+                }
+              ],
+              as: 'moduleChapters'
+            }
           }
-        },
+        ] : [
+          // If no specific module, get chapter counts per module for overview
+          {
+            $lookup: {
+              from: 'chapters',
+              localField: '_id',
+              foreignField: 'novelId',
+              pipeline: [
+                {
+                  $group: {
+                    _id: '$moduleId',
+                    count: { $sum: 1 },
+                    lastUpdated: { $max: '$updatedAt' }
+                  }
+                }
+              ],
+              as: 'chapterCounts'
+            }
+          }
+        ]),
         
         // If specific moduleId is provided, also get that module's details
         ...(moduleId ? [
@@ -2535,10 +2573,15 @@ router.get("/:id/dashboard", async (req, res) => {
             ratings: 1,
             novelBalance: 1,
             novelBudget: 1,
-            // Module and chapter data
+            // Module data
             modules: 1,
-            chapters: 1,
-            ...(moduleId ? { selectedModule: { $arrayElemAt: ['$selectedModule', 0] } } : {})
+            // Conditional chapter data
+            ...(moduleId ? { 
+              moduleChapters: 1,
+              selectedModule: { $arrayElemAt: ['$selectedModule', 0] }
+            } : { 
+              chapterCounts: 1 
+            })
           }
         }
       ]);
@@ -2547,21 +2590,42 @@ router.get("/:id/dashboard", async (req, res) => {
         return { error: "Novel not found", status: 404 };
       }
 
-      // Organize chapters by module for efficient lookup
-      const chaptersByModule = dashboardData.chapters.reduce((acc, chapter) => {
-        const moduleId = chapter.moduleId.toString();
-        if (!acc[moduleId]) {
-          acc[moduleId] = [];
-        }
-        acc[moduleId].push(chapter);
-        return acc;
-      }, {});
-
-      // Attach chapters to their respective modules
-      const modulesWithChapters = dashboardData.modules.map(module => ({
-        ...module,
-        chapters: chaptersByModule[module._id.toString()] || []
-      }));
+      let modulesWithChapters;
+      
+      if (moduleId && dashboardData.moduleChapters) {
+        // If specific module requested, only attach chapters to that module
+        modulesWithChapters = dashboardData.modules.map(module => {
+          if (module._id.toString() === moduleId) {
+            return {
+              ...module,
+              chapters: dashboardData.moduleChapters || []
+            };
+          }
+          return {
+            ...module,
+            chapters: [] // Empty for other modules to save memory
+          };
+        });
+      } else if (dashboardData.chapterCounts) {
+        // If no specific module, add chapter counts to modules
+        const countsByModule = dashboardData.chapterCounts.reduce((acc, count) => {
+          acc[count._id.toString()] = count;
+          return acc;
+        }, {});
+        
+        modulesWithChapters = dashboardData.modules.map(module => ({
+          ...module,
+          chapterCount: countsByModule[module._id.toString()]?.count || 0,
+          lastChapterUpdate: countsByModule[module._id.toString()]?.lastUpdated || null,
+          chapters: [] // Don't load all chapters for overview
+        }));
+      } else {
+        // Fallback: modules without chapter data
+        modulesWithChapters = dashboardData.modules.map(module => ({
+          ...module,
+          chapters: []
+        }));
+      }
 
       return {
         novel: {
@@ -2585,7 +2649,8 @@ router.get("/:id/dashboard", async (req, res) => {
           novelBudget: dashboardData.novelBudget
         },
         modules: modulesWithChapters,
-        chapters: dashboardData.chapters,
+        // Only include chapters array if specific module requested
+        chapters: moduleId ? (dashboardData.moduleChapters || []) : [],
         selectedModule: dashboardData.selectedModule || null
       };
     });
