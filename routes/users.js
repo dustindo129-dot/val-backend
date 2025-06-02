@@ -634,6 +634,39 @@ router.get('/search', auth, async (req, res) => {
   }
 });
 
+/**
+ * Get user by ObjectId (Admin/Moderator only)
+ * @route GET /api/users/id/:userId
+ */
+router.get('/id/:userId', auth, async (req, res) => {
+  try {
+    // Check if user has admin or moderator privileges
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+    }
+
+    const { userId } = req.params;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
+    }
+    
+    // Find user by ObjectId
+    const user = await User.findById(userId)
+      .select('username displayName avatar balance role');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    res.json(user);
+  } catch (error) {
+    console.error('Get user by ID error:', error);
+    res.status(500).json({ message: 'Failed to get user' });
+  }
+});
+
 // Get user by username
 router.get('/:username', async (req, res) => {
   try {

@@ -695,68 +695,84 @@ router.put('/:id', [auth, admin], async (req, res) => {
  * @route DELETE /api/chapters/:id
  */
 router.delete('/:id', auth, async (req, res) => {
+  // Check if user is admin or moderator
+  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction();
   
   try {
-    // Get chapter info before deletion
-    const chapter = await Chapter.findOne(
-      { _id: req.params.id },
-      { novelId: 1, moduleId: 1, order: 1 }
-    ).session(session);
+    const chapterId = req.params.id;
 
+    // Validate chapter ID format
+    if (!mongoose.Types.ObjectId.isValid(chapterId)) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'Invalid chapter ID format' });
+    }
+
+    // Find the chapter to delete
+    const chapter = await Chapter.findById(chapterId).session(session);
     if (!chapter) {
       await session.abortTransaction();
       return res.status(404).json({ message: 'Chapter not found' });
     }
 
-    // Remove chapter from module's chapters array
-    await Module.findOneAndUpdate(
-      { _id: chapter.moduleId },
-      {
-        $setOnInsert: { createdAt: new Date() },
-        $set: { updatedAt: new Date() },
-        $pull: { chapters: chapter._id }
-      },
-      { session }
-    );
+    // Store IDs for cleanup operations
+    const { novelId, moduleId } = chapter;
 
     // Delete the chapter
-    await Chapter.findOneAndDelete(
-      { _id: req.params.id },
-      { session }
-    );
+    await Chapter.findByIdAndDelete(chapterId).session(session);
 
-    // Update order of remaining chapters
-    await Chapter.updateMany(
-      {
-        novelId: chapter.novelId,
-        moduleId: chapter.moduleId,
-        order: { $gt: chapter.order }
+    // Remove chapter reference from module
+    await Module.findByIdAndUpdate(
+      moduleId,
+      { 
+        $pull: { chapters: chapterId },
+        $set: { updatedAt: new Date() }
       },
-      { $inc: { order: -1 } },
       { session }
     );
 
-    // Update novel's timestamp and optionally increment view count
-    const shouldSkipViewTracking = req.query.skipViewTracking === 'true';
-  
+    // Delete all user interactions for this chapter
+    await UserChapterInteraction.deleteMany(
+      { chapterId: new mongoose.Types.ObjectId(chapterId) },
+      { session }
+    );
+
+    // Update novel's timestamp
+    await Novel.findByIdAndUpdate(
+      novelId,
+      { $set: { updatedAt: new Date() } },
+      { session }
+    );
+
     await session.commitTransaction();
-    
+
     // Clear novel caches
     clearNovelCaches();
-    
-    // Notify clients of update
+
+    // Notify clients of the chapter deletion
     notifyAllClients('update', {
       type: 'chapter_deleted',
-      novelId: chapter.novelId,
-      chapterId: chapter._id,
+      novelId: novelId,
+      chapterId: chapterId,
+      chapterTitle: chapter.title,
       timestamp: new Date().toISOString()
     });
 
-    res.json({ message: 'Chapter deleted successfully' });
+    res.json({ 
+      message: 'Chapter deleted successfully',
+      deletedChapter: {
+        id: chapterId,
+        title: chapter.title
+      }
+    });
+
   } catch (err) {
     await session.abortTransaction();
+    console.error('Error deleting chapter:', err);
     res.status(500).json({ message: err.message });
   } finally {
     session.endSession();

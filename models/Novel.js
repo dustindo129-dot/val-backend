@@ -11,11 +11,13 @@ const novelSchema = new mongoose.Schema({
   author: { type: String, required: true },
   illustrator: { type: String },
   active: {
-    translator: [{ type: String }],
-    editor: [{ type: String }],
-    proofreader: [{ type: String }]
+    pj_user: [{ type: mongoose.Schema.Types.Mixed }],
+    translator: [{ type: mongoose.Schema.Types.Mixed }],
+    editor: [{ type: mongoose.Schema.Types.Mixed }],
+    proofreader: [{ type: mongoose.Schema.Types.Mixed }]
   },
   inactive: {
+    pj_user: [{ type: String }],
     translator: [{ type: String }],
     editor: [{ type: String }],
     proofreader: [{ type: String }]

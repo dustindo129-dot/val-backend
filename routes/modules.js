@@ -206,7 +206,12 @@ router.get('/:novelId/modules/:moduleId', async (req, res) => {
 });
 
 // Reorder modules - MOVED UP before other module-specific routes
-router.put('/:novelId/modules/reorder', auth, admin, async (req, res) => {
+router.put('/:novelId/modules/reorder', auth, async (req, res) => {
+  // Check if user is admin or moderator
+  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -291,7 +296,12 @@ router.put('/:novelId/modules/reorder', auth, admin, async (req, res) => {
 });
 
 // Create a new module
-router.post('/:novelId/modules', auth, admin, async (req, res) => {
+router.post('/:novelId/modules', auth, async (req, res) => {
+  // Check if user is admin or moderator
+  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+  }
+
   try {
     // Validate paid module balance
     if (req.body.mode === 'paid') {
@@ -360,7 +370,12 @@ router.post('/:novelId/modules', auth, admin, async (req, res) => {
 });
 
 // Update a module
-router.put('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
+router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
+  // Check if user is admin or moderator
+  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+  }
+
   try {
     // Get the current module to check if mode is changing to paid
     const currentModule = await Module.findById(req.params.moduleId);
@@ -419,7 +434,12 @@ router.put('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
 });
 
 // Delete a module
-router.delete('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
+router.delete('/:novelId/modules/:moduleId', auth, async (req, res) => {
+  // Check if user is admin or moderator
+  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+  }
+
   try {
     // Use findOneAndDelete to ensure we only run one query operation
     // Also check that the moduleId belongs to the correct novel for security
@@ -501,7 +521,12 @@ router.delete('/:novelId/modules/:moduleId', auth, admin, async (req, res) => {
 });
 
 // Add chapter to module - update to maintain chapters array
-router.post('/:novelId/modules/:moduleId/chapters/:chapterId', auth, admin, async (req, res) => {
+router.post('/:novelId/modules/:moduleId/chapters/:chapterId', auth, async (req, res) => {
+  // Check if user is admin or moderator
+  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+  }
+
   try {
     const module = await Module.findById(req.params.moduleId);
     if (!module) {
@@ -535,7 +560,12 @@ router.post('/:novelId/modules/:moduleId/chapters/:chapterId', auth, admin, asyn
 });
 
 // Remove chapter from module
-router.delete('/:novelId/modules/:moduleId/chapters/:chapterId', auth, admin, async (req, res) => {
+router.delete('/:novelId/modules/:moduleId/chapters/:chapterId', auth, async (req, res) => {
+  // Check if user is admin or moderator
+  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+  }
+
   try {
     const module = await Module.findById(req.params.moduleId);
     if (!module) {
@@ -557,7 +587,12 @@ router.delete('/:novelId/modules/:moduleId/chapters/:chapterId', auth, admin, as
 });
 
 // Reorder chapters within a module
-router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, admin, async (req, res) => {
+router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, async (req, res) => {
+  // Check if user is admin or moderator
+  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
