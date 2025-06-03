@@ -32,22 +32,72 @@ export const populateStaffNames = async (obj) => {
       return id;
     };
 
+    // Collect all unique ObjectIds from the entire object first
+    const allObjectIds = new Set();
+    
+    // Helper function to collect ObjectIds from a value
+    const collectObjectIds = (value) => {
+      if (isValidObjectId(value)) {
+        allObjectIds.add(objectIdToString(value));
+      } else if (Array.isArray(value)) {
+        value.forEach(item => {
+          if (isValidObjectId(item)) {
+            allObjectIds.add(objectIdToString(item));
+          }
+        });
+      }
+    };
+
+    // Collect ObjectIds from novel staff arrays
+    if (obj.active) {
+      for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
+        if (obj.active[role]) {
+          collectObjectIds(obj.active[role]);
+        }
+      }
+    }
+    if (obj.inactive) {
+      for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
+        if (obj.inactive[role]) {
+          collectObjectIds(obj.inactive[role]);
+        }
+      }
+    }
+
+    // Collect ObjectIds from chapter staff fields
+    const chapterStaffFields = ['translator', 'editor', 'proofreader'];
+    for (const field of chapterStaffFields) {
+      if (obj.hasOwnProperty(field)) {
+        collectObjectIds(obj[field]);
+      }
+    }
+
+    // If no ObjectIds found, return original object
+    if (allObjectIds.size === 0) {
+      return obj;
+    }
+
+    // Fetch all users in one batched query
+    const users = await User.find(
+      { _id: { $in: Array.from(allObjectIds) } },
+      { displayName: 1, username: 1 }
+    ).lean();
+
+    // Create user lookup map
+    const userMap = {};
+    users.forEach(user => {
+      userMap[user._id.toString()] = user.displayName || user.username;
+    });
+
     // Helper function to process a single staff field (for chapters)
-    const processStaffField = async (staffValue) => {
+    const processStaffField = (staffValue) => {
       if (!staffValue) {
         return staffValue;
       }
 
       if (isValidObjectId(staffValue)) {
         const stringId = objectIdToString(staffValue);
-        try {
-          const user = await User.findById(stringId, { displayName: 1, username: 1 }).lean();
-          const result = user ? (user.displayName || user.username) : staffValue;
-          return result;
-        } catch (error) {
-          console.warn(`Failed to fetch user ${stringId}:`, error);
-          return staffValue;
-        }
+        return userMap[stringId] || staffValue; // Use cached user data or fallback to original
       }
 
       // If not an ObjectId, return as is (already a display name or text)
@@ -55,55 +105,18 @@ export const populateStaffNames = async (obj) => {
     };
 
     // Helper function to process a staff array (for novels)
-    const processStaffArray = async (staffArray, arrayName) => {
+    const processStaffArray = (staffArray) => {
       if (!Array.isArray(staffArray) || staffArray.length === 0) {
         return staffArray;
       }
 
-      // Separate ObjectIds from text strings
-      const objectIds = [];
-      const textItems = [];
-      const indexMap = {}; // To track original positions
-
-      staffArray.forEach((item, index) => {
+      return staffArray.map(item => {
         if (isValidObjectId(item)) {
           const stringId = objectIdToString(item);
-          objectIds.push(stringId);
-          indexMap[stringId] = index;
-        } else {
-          textItems.push({ index, value: item });
+          return userMap[stringId] || item; // Use cached user data or fallback to original
         }
+        return item; // Keep text items as is
       });
-
-      // If no ObjectIds to populate, return original array
-      if (objectIds.length === 0) {
-        return staffArray;
-      }
-
-      // Fetch user data for all ObjectIds in one query
-      const users = await User.find(
-        { _id: { $in: objectIds } },
-        { displayName: 1, username: 1 }
-      ).lean();
-
-      // Create a map of ObjectId to display name
-      const userMap = {};
-      users.forEach(user => {
-        userMap[user._id.toString()] = user.displayName || user.username;
-      });
-
-      // Rebuild the array with populated names
-      const result = [...staffArray];
-      objectIds.forEach(objectId => {
-        const index = indexMap[objectId];
-        const displayName = userMap[objectId];
-        if (displayName) {
-          result[index] = displayName;
-        }
-        // If user not found, keep the ObjectId as fallback
-      });
-
-      return result;
     };
 
     // Create a copy of the object to avoid mutating the original
@@ -116,31 +129,30 @@ export const populateStaffNames = async (obj) => {
         populatedObj.active = {};
         for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
           if (obj.active[role]) {
-            populatedObj.active[role] = await processStaffArray(obj.active[role], `active.${role}`);
+            populatedObj.active[role] = processStaffArray(obj.active[role]);
           }
         }
       }
 
-      // Process inactive staff (usually just text, but check anyway)
+      // Process inactive staff
       if (obj.inactive) {
         populatedObj.inactive = {};
         for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
           if (obj.inactive[role]) {
-            populatedObj.inactive[role] = await processStaffArray(obj.inactive[role], `inactive.${role}`);
+            populatedObj.inactive[role] = processStaffArray(obj.inactive[role]);
           }
         }
       }
     }
 
     // Check if this is a chapter object (has individual staff fields)
-    const chapterStaffFields = ['translator', 'editor', 'proofreader'];
     const hasChapterStaffFields = chapterStaffFields.some(field => obj.hasOwnProperty(field));
     
     if (hasChapterStaffFields) {
       // Process individual staff fields for chapters
       for (const field of chapterStaffFields) {
         if (obj.hasOwnProperty(field)) {
-          populatedObj[field] = await processStaffField(obj[field]);
+          populatedObj[field] = processStaffField(obj[field]);
         }
       }
     }

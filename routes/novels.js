@@ -1293,6 +1293,9 @@ router.delete("/:id", auth, async (req, res) => {
     // Delete all user interactions with this novel (ratings, reviews, likes, bookmarks)
     await UserNovelInteraction.deleteMany({ novelId: novelId }).session(session);
 
+    // Delete all user chapter interactions for this novel (chapter likes, ratings, bookmarks, reading history)
+    await UserChapterInteraction.deleteMany({ novelId: novelId }).session(session);
+
     // Delete all contribution history for this novel
     await ContributionHistory.deleteMany({ novelId: novelId }).session(session);
 
@@ -2071,17 +2074,39 @@ router.get("/:id/contribution-history", async (req, res) => {
       return res.status(404).json({ message: "Novel not found" });
     }
 
-    // Find contribution history for this novel
+    // Find contribution history for this novel (without populate to avoid individual queries)
     const contributions = await ContributionHistory.find({ novelId })
-      .populate('userId', 'username avatar')
       .sort({ createdAt: -1 })
       .limit(50) // Limit to last 50 contributions
       .lean();
 
-    // Format the response
+    // Extract unique user IDs
+    const userIds = [...new Set(contributions
+      .map(contribution => contribution.userId)
+      .filter(userId => userId) // Filter out null/undefined userIds (system contributions)
+    )];
+
+    // Batch fetch users to avoid individual queries
+    const User = mongoose.model('User');
+    const users = await User.find({ _id: { $in: userIds } })
+      .select('_id username avatar displayName')
+      .lean();
+
+    // Create user lookup map
+    const userMap = users.reduce((map, user) => {
+      map[user._id.toString()] = {
+        _id: user._id,
+        username: user.username,
+        avatar: user.avatar,
+        displayName: user.displayName
+      };
+      return map;
+    }, {});
+
+    // Format the response with batched user data
     const formattedContributions = contributions.map(contribution => ({
       _id: contribution._id,
-      user: contribution.userId,
+      user: contribution.userId ? userMap[contribution.userId.toString()] : null,
       amount: contribution.amount,
       note: contribution.note,
       budgetAfter: contribution.budgetAfter,
