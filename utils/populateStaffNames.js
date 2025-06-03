@@ -4,13 +4,14 @@ import User from '../models/User.js';
 /**
  * Populates staff ObjectIds with user display names
  * Handles mixed data (ObjectIds and plain text strings)
- * @param {Object} novel - Novel object with active/inactive staff
- * @returns {Object} Novel object with populated staff names
+ * Works with both novel objects (active/inactive staff) and chapter objects (individual staff fields)
+ * @param {Object} obj - Novel or Chapter object with staff data
+ * @returns {Object} Object with populated staff names
  */
-export const populateStaffNames = async (novel) => {
+export const populateStaffNames = async (obj) => {
   try {
-    if (!novel || (!novel.active && !novel.inactive)) {
-      return novel;
+    if (!obj) {
+      return obj;
     }
 
     // Helper function to check if a value is a valid MongoDB ObjectId
@@ -31,7 +32,29 @@ export const populateStaffNames = async (novel) => {
       return id;
     };
 
-    // Helper function to process a staff array
+    // Helper function to process a single staff field (for chapters)
+    const processStaffField = async (staffValue) => {
+      if (!staffValue) {
+        return staffValue;
+      }
+
+      if (isValidObjectId(staffValue)) {
+        const stringId = objectIdToString(staffValue);
+        try {
+          const user = await User.findById(stringId, { displayName: 1, username: 1 }).lean();
+          const result = user ? (user.displayName || user.username) : staffValue;
+          return result;
+        } catch (error) {
+          console.warn(`Failed to fetch user ${stringId}:`, error);
+          return staffValue;
+        }
+      }
+
+      // If not an ObjectId, return as is (already a display name or text)
+      return staffValue;
+    };
+
+    // Helper function to process a staff array (for novels)
     const processStaffArray = async (staffArray, arrayName) => {
       if (!Array.isArray(staffArray) || staffArray.length === 0) {
         return staffArray;
@@ -83,33 +106,49 @@ export const populateStaffNames = async (novel) => {
       return result;
     };
 
-    // Create a copy of the novel to avoid mutating the original
-    const populatedNovel = { ...novel };
+    // Create a copy of the object to avoid mutating the original
+    const populatedObj = { ...obj };
 
-    // Process active staff
-    if (novel.active) {
-      populatedNovel.active = {};
-      for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
-        if (novel.active[role]) {
-          populatedNovel.active[role] = await processStaffArray(novel.active[role], `active.${role}`);
+    // Check if this is a novel object (has active/inactive staff arrays)
+    if (obj.active || obj.inactive) {
+      // Process active staff
+      if (obj.active) {
+        populatedObj.active = {};
+        for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
+          if (obj.active[role]) {
+            populatedObj.active[role] = await processStaffArray(obj.active[role], `active.${role}`);
+          }
+        }
+      }
+
+      // Process inactive staff (usually just text, but check anyway)
+      if (obj.inactive) {
+        populatedObj.inactive = {};
+        for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
+          if (obj.inactive[role]) {
+            populatedObj.inactive[role] = await processStaffArray(obj.inactive[role], `inactive.${role}`);
+          }
         }
       }
     }
 
-    // Process inactive staff (usually just text, but check anyway)
-    if (novel.inactive) {
-      populatedNovel.inactive = {};
-      for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
-        if (novel.inactive[role]) {
-          populatedNovel.inactive[role] = await processStaffArray(novel.inactive[role], `inactive.${role}`);
+    // Check if this is a chapter object (has individual staff fields)
+    const chapterStaffFields = ['translator', 'editor', 'proofreader'];
+    const hasChapterStaffFields = chapterStaffFields.some(field => obj.hasOwnProperty(field));
+    
+    if (hasChapterStaffFields) {
+      // Process individual staff fields for chapters
+      for (const field of chapterStaffFields) {
+        if (obj.hasOwnProperty(field)) {
+          populatedObj[field] = await processStaffField(obj[field]);
         }
       }
     }
 
-    return populatedNovel;
+    return populatedObj;
   } catch (error) {
     console.error('❌ Error in populateStaffNames:', error);
-    // Return original novel on error to prevent breaking the API
-    return novel;
+    // Return original object on error to prevent breaking the API
+    return obj;
   }
 }; 

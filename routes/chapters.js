@@ -10,6 +10,7 @@ import UserChapterInteraction from '../models/UserChapterInteraction.js';
 // Import the novel cache clearing function
 import { clearNovelCaches, notifyAllClients } from '../utils/cacheUtils.js';
 import { createNewChapterNotifications } from '../services/notificationService.js';
+import { populateStaffNames } from '../utils/populateStaffNames.js';
 
 const router = express.Router();
 
@@ -341,12 +342,15 @@ router.get('/:id', async (req, res) => {
     console.log(`Found chapter: ${chapterData.title}`);
     console.log(`Navigation: prev=${chapterData.prevChapter?._id}, next=${chapterData.nextChapter?._id}`);
 
+    // Populate staff ObjectIds with user display names
+    const populatedChapter = await populateStaffNames(chapterData);
+
     // We don't need to increment views here anymore.
     // The view increment is now handled by the dedicated endpoint
     // in userChapterInteractions.js that respects the 8-hour window.
     // This prevents double-counting of views.
 
-    res.json({ chapter: chapterData });
+    res.json({ chapter: populatedChapter });
   } catch (err) {
     console.error('Error fetching chapter:', err);
     res.status(500).json({ message: err.message });
@@ -902,6 +906,9 @@ router.get('/:id/full', async (req, res) => {
     const chapter = chapterResult[0];
     const stats = interactionStats[0];
 
+    // Populate staff ObjectIds with user display names
+    const populatedChapter = await populateStaffNames(chapter);
+
     // Build interaction response
     const interactions = {
       totalLikes: stats?.totalLikes || 0,
@@ -918,7 +925,7 @@ router.get('/:id/full', async (req, res) => {
 
     // Combine everything into a single response
     res.json({
-      chapter,
+      chapter: populatedChapter,
       interactions
     });
   } catch (err) {
