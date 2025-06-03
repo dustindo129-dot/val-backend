@@ -64,8 +64,8 @@ router.post('/', auth, async (req, res) => {
     }, session);
     
     // Populate user and admin information
-    await transaction.populate('user', 'username');
-    await transaction.populate('admin', 'username');
+    await transaction.populate('user', 'username displayName');
+    await transaction.populate('admin', 'username displayName');
     
     await session.commitTransaction();
     
@@ -91,8 +91,8 @@ router.get('/transactions', auth, async (req, res) => {
     }
     
     const transactions = await TopUpAdmin.find()
-      .populate('user', 'username')
-      .populate('admin', 'username')
+      .populate('user', 'username displayName')
+      .populate('admin', 'username displayName')
       .sort({ createdAt: -1 });
     
     res.json(transactions);
@@ -114,7 +114,7 @@ router.get('/pending-requests', auth, async (req, res) => {
     }
     
     const pendingRequests = await TopUpRequest.find({ status: 'Pending' })
-      .populate('user', 'username')
+      .populate('user', 'username displayName')
       .sort({ createdAt: -1 });
     
     res.json(pendingRequests);
@@ -254,8 +254,8 @@ router.get('/completed-requests', auth, async (req, res) => {
     const completedRequests = await TopUpRequest.find({ 
       status: { $in: ['Completed', 'Failed'] } 
     })
-      .populate('user', 'username')
-      .populate('adminId', 'username')
+      .populate('user', 'username displayName')
+      .populate('adminId', 'username displayName')
       .sort({ completedAt: -1 });
     
     res.json(completedRequests);
@@ -299,13 +299,14 @@ router.get('/search-users', auth, async (req, res) => {
       return res.status(400).json({ message: 'Tìm kiếm phải có ít nhất 2 ký tự' });
     }
     
-    // Search for users by username or email
+    // Search for users by username, displayName, or email
     const users = await User.find({
       $or: [
         { username: { $regex: query, $options: 'i' } },
+        { displayName: { $regex: query, $options: 'i' } },
         { email: { $regex: query, $options: 'i' } }
       ]
-    }).select('username avatar balance');
+    }).select('username displayName avatar balance');
     
     res.json(users);
   } catch (error) {

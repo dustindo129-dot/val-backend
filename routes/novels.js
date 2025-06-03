@@ -1238,7 +1238,12 @@ router.put("/:id", [auth, admin], async (req, res) => {
     novel.note = note;
     novel.illustration = illustration;
     novel.status = status;
-    novel.updatedAt = new Date();
+    
+    // Only update timestamp if explicitly requested or preserveTimestamp is not set
+    // Staff changes and other non-content updates should preserve the original timestamp
+    if (!req.body.preserveTimestamp) {
+      novel.updatedAt = new Date();
+    }
 
     // Save the updated novel
     const updatedNovel = await novel.save();
