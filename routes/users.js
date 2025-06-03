@@ -635,14 +635,14 @@ router.get('/search', auth, async (req, res) => {
 });
 
 /**
- * Get user by ObjectId (Admin/Moderator only)
+ * Get user by ObjectId (Admin/Moderator/Project User only)
  * @route GET /api/users/id/:userId
  */
 router.get('/id/:userId', auth, async (req, res) => {
   try {
-    // Check if user has admin or moderator privileges
-    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-      return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
+    // Check if user has admin, moderator, or pj_user privileges
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator' && req.user.role !== 'pj_user') {
+      return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
     }
 
     const { userId } = req.params;

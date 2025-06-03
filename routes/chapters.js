@@ -492,8 +492,8 @@ router.post('/', [auth, admin], async (req, res) => {
   }
 });
 
-// Update a chapter (admin only)
-router.put('/:id', [auth, admin], async (req, res) => {
+// Update a chapter
+router.put('/:id', auth, async (req, res) => {
   try {
     const { 
       title, 
@@ -507,10 +507,28 @@ router.put('/:id', [auth, admin], async (req, res) => {
     } = req.body;
     const chapterId = req.params.id;
 
-    // Get the original chapter data to check for mode changes
-    const originalChapter = await Chapter.findById(chapterId, 'mode novelId moduleId');
+    // Get the original chapter data to check for mode changes and permissions
+    const originalChapter = await Chapter.findById(chapterId, 'mode novelId moduleId').populate('novelId', 'active');
     if (!originalChapter) {
       return res.status(404).json({ message: 'Chapter not found' });
+    }
+
+    // Check if user has permission (admin, moderator, or pj_user managing this novel)
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      // For pj_user, check if they manage this novel
+      if (req.user.role === 'pj_user') {
+        const novel = originalChapter.novelId;
+        
+        // Check if user is in the novel's active pj_user array (handle both ObjectIds and usernames)
+        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                            novel.active?.pj_user?.includes(req.user.username);
+        
+        if (!isAuthorized) {
+          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
+        }
+      } else {
+        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
+      }
     }
 
     // If trying to set mode to paid, check if the module is paid
@@ -797,7 +815,7 @@ router.get('/:id/full', async (req, res) => {
             from: 'novels', 
             localField: 'novelId', 
             foreignField: '_id', 
-            pipeline: [ { '$project': { title: 1, illustration: 1 } } ], 
+            pipeline: [ { '$project': { title: 1, illustration: 1, active: 1 } } ], 
             as: 'novel' 
         }},
         { '$lookup': { 

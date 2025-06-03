@@ -112,4 +112,60 @@ export const checkRole = (roles) => {
     
     next();
   };
+};
+
+/**
+ * Optional authentication middleware that sets req.user if authenticated,
+ * but doesn't require authentication (doesn't fail if no token provided)
+ */
+export const optionalAuth = async (req, res, next) => {
+  try {
+    // Get token from cookies or Authorization header
+    const token = req.cookies.token || req.header('Authorization')?.replace('Bearer ', '');
+    
+    if (!token) {
+      // No token provided, continue without user
+      req.user = null;
+      return next();
+    }
+
+    // Verify token and decode user ID
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (tokenError) {
+      // Invalid/expired token, continue without user
+      req.user = null;
+      return next();
+    }
+
+    // Use global cached user lookup
+    try {
+      const user = await getCachedUserById(decoded.userId);
+      
+      if (!user) {
+        console.warn(`User ${decoded.userId} not found in database (token valid but user deleted)`);
+        req.user = null;
+        return next();
+      }
+
+      // Check if user is banned
+      if (user.isBanned) {
+        req.user = null;
+        return next();
+      }
+
+      // Set user object on request
+      req.user = user;
+      next();
+    } catch (userLookupError) {
+      console.error('Error looking up user during optional auth:', userLookupError);
+      req.user = null;
+      next();
+    }
+  } catch (error) {
+    console.error('Unexpected error in optional auth middleware:', error);
+    req.user = null;
+    next();
+  }
 }; 

@@ -1,6 +1,7 @@
 import express from "express";
 import Novel from "../models/Novel.js";
-import { auth } from "../middleware/auth.js";
+import { auth, optionalAuth } from "../middleware/auth.js";
+import admin from "../middleware/admin.js";
 import Chapter from "../models/Chapter.js";
 import Module from "../models/Module.js";
 import { cache, clearNovelCaches, notifyAllClients, shouldBypassCache } from '../utils/cacheUtils.js';
@@ -534,7 +535,7 @@ router.get("/hot", async (req, res) => {
  * Get all novels with pagination
  * @route GET /api/novels
  */
-router.get("/", async (req, res) => {
+router.get("/", optionalAuth, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
@@ -544,8 +545,192 @@ router.get("/", async (req, res) => {
     const bypass = shouldBypassCache(req.path, req.query);
     console.log(`Novel list request: ${bypass ? 'Bypassing cache' : 'Using cache if available'}`);
 
-    // Generate cache key based on pagination
-    const cacheKey = `novels_page_${page}_limit_${limit}`;
+    // Check if this is an admin dashboard request (needs full data)
+    // Admin dashboard typically requests with limit=1000 and skipPopulation=true
+    const isAdminDashboardRequest = req.query.limit === '1000' && req.query.skipPopulation === 'true';
+    
+    // Use lightweight query for homepage (ALL users including pj_user get same optimized data)
+    if (!isAdminDashboardRequest) {
+      // Generate cache key based on pagination (same for all users on homepage)
+      const cacheKey = `novels_page_${page}_limit_${limit}_homepage`;
+      const cachedData = bypass ? null : cache.get(cacheKey);
+      
+      if (cachedData && !bypass) {
+        console.log('Serving novel list from cache');
+        return res.json(cachedData);
+      }
+
+      console.log('Fetching fresh novel list data from database');
+
+      const [result] = await Novel.aggregate([
+        {
+          $facet: {
+            total: [{ $count: 'count' }],
+            novels: [
+              {
+                $project: {
+                  title: 1,
+                  illustration: 1,
+                  status: 1,
+                  genres: 1,
+                  description: 1,
+                  updatedAt: 1
+                  // Only fields actually used on homepage
+                  // Exclude: note, active, inactive, novelBalance, novelBudget, author, illustrator, alternativeTitles, createdAt
+                }
+              },
+              // Latest chapters for display (homepage shows up to 3)
+              {
+                $lookup: {
+                  from: 'chapters',
+                  let: { novelId: '$_id' },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: { $eq: ['$novelId', '$$novelId'] }
+                      }
+                    },
+                    { $sort: { createdAt: -1 } },
+                    { $limit: 3 }, // Homepage shows latest 3 chapters
+                    {
+                      $project: {
+                        _id: 1,
+                        title: 1,
+                        createdAt: 1
+                      }
+                    }
+                  ],
+                  as: 'chapters'
+                }
+              },
+              // First chapter for "first chapter" link
+              {
+                $lookup: {
+                  from: 'chapters',
+                  let: { novelId: '$_id' },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: { $eq: ['$novelId', '$$novelId'] }
+                      }
+                    },
+                    { $sort: { order: 1 } },
+                    { $limit: 1 },
+                    {
+                      $project: {
+                        _id: 1,
+                        title: 1,
+                        order: 1
+                      }
+                    }
+                  ],
+                  as: 'firstChapter'
+                }
+              },
+              // Set firstChapter as single object (not array)
+              {
+                $addFields: {
+                  firstChapter: { $arrayElemAt: ['$firstChapter', 0] }
+                }
+              },
+              // Sort by latest activity
+              { $sort: { updatedAt: -1 } },
+              // Apply pagination
+              { $skip: skip },
+              { $limit: limit }
+            ]
+          }
+        }
+      ]);
+
+      const homepageTotal = result.total[0]?.count || 0;
+      const homepageNovels = result.novels;
+
+      const response = {
+        novels: homepageNovels,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(homepageTotal / limit),
+          totalItems: homepageTotal
+        }
+      };
+
+      // Cache the response
+      if (!bypass) {
+        cache.set(cacheKey, response);
+        console.log('Cached lightweight novel list data');
+      }
+
+      return res.json(response);
+    }
+
+    // ADMIN DASHBOARD REQUESTS ONLY - Apply role-based filtering here
+    console.log('Processing admin dashboard request');
+
+    // Check if user is authenticated and is pj_user (only for admin dashboard)
+    const isPjUser = req.user && req.user.role === 'pj_user';
+
+    // For pj_user, use optimized query with server-side filtering
+    if (isPjUser) {
+      // Build the query conditions, only including defined values
+      const queryConditions = [];
+      
+      // Always include the ObjectId as string
+      if (req.user._id) {
+        queryConditions.push({ 'active.pj_user': req.user._id.toString() });
+      }
+      
+      // Only include user.id if it's defined
+      if (req.user.id) {
+        queryConditions.push({ 'active.pj_user': req.user.id });
+      }
+      
+      // Only include username if it's defined
+      if (req.user.username) {
+        queryConditions.push({ 'active.pj_user': req.user.username });
+      }
+      
+      // If no valid conditions, return empty result
+      if (queryConditions.length === 0) {
+        return res.json({
+          novels: [],
+          pagination: {
+            currentPage: 1,
+            totalPages: 1,
+            totalItems: 0
+          }
+        });
+      }
+      
+      // Find novels where the user is in active.pj_user array
+      const userManagedNovels = await Novel.find({
+        $or: queryConditions
+      })
+      .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget')
+      .sort({ updatedAt: -1 })
+      .lean();
+
+      // Skip expensive chapter lookups for pj_user - they don't need them for dashboard
+      const skipPopulation = req.query.skipPopulation === 'true';
+      const finalNovels = skipPopulation ? userManagedNovels : await Promise.all(
+        userManagedNovels.map(novel => populateStaffNames(novel))
+      );
+
+      const response = {
+        novels: finalNovels,
+        pagination: {
+          currentPage: 1,
+          totalPages: 1,
+          totalItems: finalNovels.length
+        }
+      };
+
+      return res.json(response);
+    }
+
+    // For admin/moderator/regular users, use the full aggregation
+    // Generate cache key based on pagination and user role
+    const cacheKey = `novels_page_${page}_limit_${limit}_${req.user?.role || 'guest'}`;
     const cachedData = bypass ? null : cache.get(cacheKey);
     
     if (cachedData && !bypass) {
@@ -554,6 +739,8 @@ router.get("/", async (req, res) => {
     }
 
     console.log('Fetching fresh novel list data from database');
+
+    // Full aggregation for admin dashboard requests ONLY
 
     // Get novels and total count in a single aggregation
     const [result] = await Novel.aggregate([
@@ -580,68 +767,9 @@ router.get("/", async (req, res) => {
                 novelBudget: 1
               }
             },
-            // Lookup latest chapters for display
-            {
-              $lookup: {
-                from: 'chapters',
-                let: { novelId: '$_id' },
-                pipeline: [
-                  {
-                    $match: {
-                      $expr: { $eq: ['$novelId', '$$novelId'] }
-                    }
-                  },
-                  { $sort: { createdAt: -1 } },
-                  { $limit: 3 },
-                  {
-                    $project: {
-                      _id: 1,
-                      title: 1,
-                      createdAt: 1
-                    }
-                  }
-                ],
-                as: 'chapters'
-              }
-            },
-            // Lookup first chapter (by order)
-            {
-              $lookup: {
-                from: 'chapters',
-                let: { novelId: '$_id' },
-                pipeline: [
-                  {
-                    $match: {
-                      $expr: { $eq: ['$novelId', '$$novelId'] }
-                    }
-                  },
-                  { $sort: { order: 1 } },
-                  { $limit: 1 },
-                  {
-                    $project: {
-                      _id: 1,
-                      title: 1,
-                      order: 1
-                    }
-                  }
-                ],
-                as: 'firstChapter'
-              }
-            },
-            // Calculate latest activity and set first chapter
-            {
-              $addFields: {
-                latestActivity: {
-                  $max: [
-                    '$updatedAt',
-                    { $max: '$chapters.createdAt' }
-                  ]
-                },
-                firstChapter: { $arrayElemAt: ['$firstChapter', 0] }
-              }
-            },
-            // Sort by latest activity
-            { $sort: { latestActivity: -1 } },
+            // Admin dashboard doesn't need chapter data - skip expensive chapter lookups
+            // Sort by updatedAt directly (no need for complex latestActivity calculation)
+            { $sort: { updatedAt: -1 } },
             // Apply pagination
             { $skip: skip },
             { $limit: limit }
@@ -697,7 +825,7 @@ router.get("/", async (req, res) => {
  * Create a new novel
  * @route POST /api/novels
  */
-router.post("/", auth, async (req, res) => {
+router.post("/", [auth, admin], async (req, res) => {
   try {
     const {
       title,
@@ -906,7 +1034,7 @@ router.get("/:id", async (req, res) => {
  * Update a novel
  * @route PUT /api/novels/:id
  */
-router.put("/:id", auth, async (req, res) => {
+router.put("/:id", [auth, admin], async (req, res) => {
   try {
     const {
       title,
@@ -969,6 +1097,11 @@ router.put("/:id", auth, async (req, res) => {
  * @route DELETE /api/novels/:id
  */
 router.delete("/:id", auth, async (req, res) => {
+  // Only admins can delete novels
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Only admins can delete novels' });
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction();
   
@@ -2124,7 +2257,7 @@ router.get("/homepage", async (req, res) => {
                         }
                       },
                       { $sort: { createdAt: -1 } },
-                      { $limit: 1 }, // Reduced from 3 to 1 for performance
+                      { $limit: 3 }, // Homepage shows latest 3 chapters
                       {
                         $project: {
                           _id: 1,
@@ -2133,7 +2266,37 @@ router.get("/homepage", async (req, res) => {
                         }
                       }
                     ],
-                    as: 'latestChapter'
+                    as: 'chapters'
+                  }
+                },
+                // First chapter for "first chapter" link
+                {
+                  $lookup: {
+                    from: 'chapters',
+                    let: { novelId: '$_id' },
+                    pipeline: [
+                      {
+                        $match: {
+                          $expr: { $eq: ['$novelId', '$$novelId'] }
+                        }
+                      },
+                      { $sort: { order: 1 } },
+                      { $limit: 1 },
+                      {
+                        $project: {
+                          _id: 1,
+                          title: 1,
+                          order: 1
+                        }
+                      }
+                    ],
+                    as: 'firstChapter'
+                  }
+                },
+                // Set firstChapter as single object (not array)
+                {
+                  $addFields: {
+                    firstChapter: { $arrayElemAt: ['$firstChapter', 0] }
                   }
                 },
                 // Calculate latest activity
@@ -2142,10 +2305,10 @@ router.get("/homepage", async (req, res) => {
                     latestActivity: {
                       $max: [
                         '$updatedAt',
-                        { $max: '$latestChapter.createdAt' }
+                        { $max: '$chapters.createdAt' }
                       ]
                     },
-                    latestChapter: { $arrayElemAt: ['$latestChapter', 0] }
+                    latestChapter: { $arrayElemAt: ['$chapters', 0] }
                   }
                 },
                 { $sort: { latestActivity: -1 } },

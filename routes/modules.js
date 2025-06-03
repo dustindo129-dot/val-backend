@@ -207,15 +207,31 @@ router.get('/:novelId/modules/:moduleId', async (req, res) => {
 
 // Reorder modules - MOVED UP before other module-specific routes
 router.put('/:novelId/modules/reorder', auth, async (req, res) => {
-  // Check if user is admin or moderator
-  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
-  }
-
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
+    // Check if user has permission (admin, moderator, or pj_user managing this novel)
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      // For pj_user, check if they manage this novel
+      if (req.user.role === 'pj_user') {
+        const novel = await Novel.findById(req.params.novelId).lean();
+        if (!novel) {
+          return res.status(404).json({ message: 'Novel not found' });
+        }
+        
+        // Check if user is in the novel's active pj_user array (handle both ObjectIds and usernames)
+        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                            novel.active?.pj_user?.includes(req.user.username);
+        
+        if (!isAuthorized) {
+          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
+        }
+      } else {
+        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
+      }
+    }
+
     const { moduleId, direction } = req.body;
     const novelId = req.params.novelId;
 
@@ -297,12 +313,28 @@ router.put('/:novelId/modules/reorder', auth, async (req, res) => {
 
 // Create a new module
 router.post('/:novelId/modules', auth, async (req, res) => {
-  // Check if user is admin or moderator
-  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
-  }
-
   try {
+    // Check if user has permission (admin, moderator, or pj_user managing this novel)
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      // For pj_user, check if they manage this novel
+      if (req.user.role === 'pj_user') {
+        const novel = await Novel.findById(req.params.novelId).lean();
+        if (!novel) {
+          return res.status(404).json({ message: 'Novel not found' });
+        }
+        
+        // Check if user is in the novel's active pj_user array (handle both ObjectIds and usernames)
+        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                            novel.active?.pj_user?.includes(req.user.username);
+        
+        if (!isAuthorized) {
+          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
+        }
+      } else {
+        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
+      }
+    }
+
     // Validate paid module balance
     if (req.body.mode === 'paid') {
       const moduleBalance = parseInt(req.body.moduleBalance) || 0;
@@ -371,12 +403,28 @@ router.post('/:novelId/modules', auth, async (req, res) => {
 
 // Update a module
 router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
-  // Check if user is admin or moderator
-  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
-  }
-
   try {
+    // Check if user has permission (admin, moderator, or pj_user managing this novel)
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      // For pj_user, check if they manage this novel
+      if (req.user.role === 'pj_user') {
+        const novel = await Novel.findById(req.params.novelId).lean();
+        if (!novel) {
+          return res.status(404).json({ message: 'Novel not found' });
+        }
+        
+        // Check if user is in the novel's active pj_user array (handle both ObjectIds and usernames)
+        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                            novel.active?.pj_user?.includes(req.user.username);
+        
+        if (!isAuthorized) {
+          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
+        }
+      } else {
+        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
+      }
+    }
+
     // Get the current module to check if mode is changing to paid
     const currentModule = await Module.findById(req.params.moduleId);
     if (!currentModule) {
@@ -588,15 +636,31 @@ router.delete('/:novelId/modules/:moduleId/chapters/:chapterId', auth, async (re
 
 // Reorder chapters within a module
 router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, async (req, res) => {
-  // Check if user is admin or moderator
-  if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-    return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
-  }
-
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
+    // Check if user has permission (admin, moderator, or pj_user managing this novel)
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      // For pj_user, check if they manage this novel
+      if (req.user.role === 'pj_user') {
+        const novel = await Novel.findById(req.params.novelId).lean();
+        if (!novel) {
+          return res.status(404).json({ message: 'Novel not found' });
+        }
+        
+        // Check if user is in the novel's active pj_user array (handle both ObjectIds and usernames)
+        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                            novel.active?.pj_user?.includes(req.user.username);
+        
+        if (!isAuthorized) {
+          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
+        }
+      } else {
+        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
+      }
+    }
+
     const { direction } = req.body;
     const { novelId, moduleId, chapterId } = req.params;
     const skipUpdateTimestamp = req.query.skipUpdateTimestamp === 'true';
