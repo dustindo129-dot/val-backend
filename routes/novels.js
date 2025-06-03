@@ -23,6 +23,17 @@ const router = express.Router();
 // Query deduplication cache to prevent multiple identical requests
 const pendingQueries = new Map();
 
+/**
+ * Utility function to validate ObjectId and send error response if invalid
+ */
+const validateObjectId = (id, res, fieldName = 'ID') => {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(400).json({ message: `Invalid ${fieldName} format` });
+    return false;
+  }
+  return true;
+};
+
 // Query deduplication helper
 const dedupQuery = async (key, queryFn) => {
   // If query is already pending, wait for it
@@ -934,6 +945,11 @@ router.get("/:id", async (req, res) => {
   try {
     const novelId = req.params.id;
     
+    // Validate ObjectId format before proceeding
+    if (!mongoose.Types.ObjectId.isValid(novelId)) {
+      return res.status(400).json({ message: "Invalid novel ID format" });
+    }
+    
     // Use query deduplication to prevent multiple identical requests
     const result = await dedupQuery(`novel:${novelId}`, async () => {
       // Use a single aggregation pipeline to get all required data in one query
@@ -1078,6 +1094,13 @@ router.get("/:id", async (req, res) => {
  */
 router.put("/:id", [auth, admin], async (req, res) => {
   try {
+    const novelId = req.params.id;
+    
+    // Validate ObjectId format before proceeding
+    if (!mongoose.Types.ObjectId.isValid(novelId)) {
+      return res.status(400).json({ message: "Invalid novel ID format" });
+    }
+    
     const {
       title,
       alternativeTitles,
@@ -1093,7 +1116,7 @@ router.put("/:id", [auth, admin], async (req, res) => {
     } = req.body;
 
     // Find novel and update it
-    const novel = await Novel.findById(req.params.id);
+    const novel = await Novel.findById(novelId);
     if (!novel) {
       return res.status(404).json({ message: "Novel not found" });
     }
@@ -1249,18 +1272,23 @@ router.delete("/:id", auth, async (req, res) => {
     return res.status(403).json({ message: 'Only admins can delete novels' });
   }
 
+  const novelId = req.params.id;
+  
+  // Validate ObjectId format before proceeding
+  if (!mongoose.Types.ObjectId.isValid(novelId)) {
+    return res.status(400).json({ message: "Invalid novel ID format" });
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction();
   
   try {
-    console.log(`Deleting novel with ID: ${req.params.id}`);
-    const novel = await Novel.findById(req.params.id).session(session);
+    console.log(`Deleting novel with ID: ${novelId}`);
+    const novel = await Novel.findById(novelId).session(session);
     if (!novel) {
       await session.abortTransaction();
       return res.status(404).json({ message: "Novel not found" });
     }
-
-    const novelId = req.params.id;
 
     // First get all chapter IDs for this novel (before deleting them)
     const chapterIds = await Chapter.find({ novelId: novelId })
@@ -1522,6 +1550,13 @@ router.delete("/:id/chapters/:chapterId", auth, async (req, res) => {
  * @route PATCH /api/novels/:id/balance
  */
 router.patch("/:id/balance", auth, async (req, res) => {
+  const novelId = req.params.id;
+  
+  // Validate ObjectId format before proceeding
+  if (!mongoose.Types.ObjectId.isValid(novelId)) {
+    return res.status(400).json({ message: "Invalid novel ID format" });
+  }
+  
   const session = await mongoose.startSession();
   session.startTransaction();
   
@@ -1532,7 +1567,6 @@ router.patch("/:id/balance", auth, async (req, res) => {
     }
     
     const { novelBalance } = req.body;
-    const novelId = req.params.id;
     
     if (isNaN(novelBalance)) {
       return res.status(400).json({ message: 'Invalid balance value' });
@@ -1969,6 +2003,12 @@ router.get('/:novelId/contributions', async (req, res) => {
 router.post("/:id/contribute", auth, async (req, res) => {
   try {
     const novelId = req.params.id;
+    
+    // Validate ObjectId format before proceeding
+    if (!mongoose.Types.ObjectId.isValid(novelId)) {
+      return res.status(400).json({ message: "Invalid novel ID format" });
+    }
+    
     const userId = req.user._id;
     const { amount, note } = req.body;
 
@@ -2235,6 +2275,12 @@ export async function checkAndUnlockContent(novelId) {
 router.get("/:id/complete", async (req, res) => {
   try {
     const novelId = req.params.id;
+    
+    // Validate ObjectId format before proceeding
+    if (!mongoose.Types.ObjectId.isValid(novelId)) {
+      return res.status(400).json({ message: "Invalid novel ID format" });
+    }
+    
     const userId = req.user ? req.user._id : null;
     
     // Use query deduplication to prevent multiple identical requests
@@ -2846,6 +2892,12 @@ router.get("/homepage", async (req, res) => {
 router.get("/:id/dashboard", async (req, res) => {
   try {
     const novelId = req.params.id;
+    
+    // Validate ObjectId format before proceeding
+    if (!mongoose.Types.ObjectId.isValid(novelId)) {
+      return res.status(400).json({ message: "Invalid novel ID format" });
+    }
+    
     const moduleId = req.query.moduleId;
     
     // Check if we should bypass cache
