@@ -665,8 +665,7 @@ router.get("/", optionalAuth, async (req, res) => {
     }
 
     // ADMIN DASHBOARD REQUESTS ONLY - Apply role-based filtering here
-    console.log('Processing admin dashboard request');
-
+    
     // Check if user is authenticated and is pj_user (only for admin dashboard)
     const isPjUser = req.user && req.user.role === 'pj_user';
 
@@ -841,17 +840,60 @@ router.post("/", [auth, admin], async (req, res) => {
       status
     } = req.body;
 
+    // Auto-promote users to pj_user role when assigned as project managers
+    // Note: Admins/moderators assigned as pj_user maintain their higher roles (no downgrade)
+    if (active?.pj_user && Array.isArray(active.pj_user)) {
+      const User = mongoose.model('User');
+      
+      // Find users who are being assigned as pj_user
+      const newPjUsers = [];
+      
+      for (const pjUserItem of active.pj_user) {
+        // Check if this is a MongoDB ObjectId (not a text string)
+        if (mongoose.Types.ObjectId.isValid(pjUserItem)) {
+          try {
+            const user = await User.findById(pjUserItem);
+            if (user && user.role === 'user') {
+              // Only promote regular users to pj_user 
+              // Admins/moderators maintain their higher roles (no downgrade)
+              newPjUsers.push(user);
+            }
+          } catch (userError) {
+            console.warn(`Error checking user ${pjUserItem}:`, userError);
+          }
+        }
+      }
+      
+      // Promote users to pj_user role
+      if (newPjUsers.length > 0) {
+        try {
+          await User.updateMany(
+            { _id: { $in: newPjUsers.map(u => u._id) } },
+            { $set: { role: 'pj_user' } }
+          );
+          
+          console.log(`Promoted ${newPjUsers.length} users to pj_user role:`, 
+            newPjUsers.map(u => u.username || u._id));
+        } catch (updateError) {
+          console.error('Error promoting users to pj_user role:', updateError);
+          // Don't fail the novel creation if role promotion fails
+        }
+      }
+    }
+
     const novel = new Novel({
       title,
       alternativeTitles: alternativeTitles || [],
       author,
       illustrator,
       active: {
+        pj_user: active?.pj_user || [],
         translator: active?.translator || [],
         editor: active?.editor || [],
         proofreader: active?.proofreader || []
       },
       inactive: {
+        pj_user: inactive?.pj_user || [],
         translator: inactive?.translator || [],
         editor: inactive?.editor || [],
         proofreader: inactive?.proofreader || []
@@ -1056,6 +1098,111 @@ router.put("/:id", [auth, admin], async (req, res) => {
       return res.status(404).json({ message: "Novel not found" });
     }
 
+    // Auto-promote users to pj_user role when assigned as project managers
+    if (active?.pj_user && Array.isArray(active.pj_user)) {
+      const User = mongoose.model('User');
+      
+      // Find users who are being assigned as pj_user
+      const newPjUsers = [];
+      
+      for (const pjUserItem of active.pj_user) {
+        // Check if this is a MongoDB ObjectId (not a text string)
+        if (mongoose.Types.ObjectId.isValid(pjUserItem)) {
+          try {
+            const user = await User.findById(pjUserItem);
+            if (user && user.role === 'user') {
+              // Only promote regular users to pj_user (don't downgrade admins/moderators)
+              newPjUsers.push(user);
+            }
+          } catch (userError) {
+            console.warn(`Error checking user ${pjUserItem}:`, userError);
+          }
+        }
+      }
+      
+      // Promote users to pj_user role
+      if (newPjUsers.length > 0) {
+        try {
+          await User.updateMany(
+            { _id: { $in: newPjUsers.map(u => u._id) } },
+            { $set: { role: 'pj_user' } }
+          );
+          
+          console.log(`Promoted ${newPjUsers.length} users to pj_user role:`, 
+            newPjUsers.map(u => u.username || u._id));
+        } catch (updateError) {
+          console.error('Error promoting users to pj_user role:', updateError);
+          // Don't fail the novel update if role promotion fails
+        }
+      }
+    }
+
+    // Check if any pj_users should be demoted to regular users
+    // This happens when they're removed from ACTIVE novel management positions
+    // (including when moved from active to inactive staff)
+    if (novel.active?.pj_user && Array.isArray(novel.active.pj_user)) {
+      const User = mongoose.model('User');
+      const previousActivePjUsers = novel.active.pj_user.filter(item => 
+        mongoose.Types.ObjectId.isValid(item)
+      );
+      const newActivePjUsers = (active?.pj_user || []).filter(item => 
+        mongoose.Types.ObjectId.isValid(item)
+      );
+      
+      // Find users who were removed from ACTIVE pj_user position
+      // This includes users moved to inactive staff or completely removed
+      const removedFromActivePjUsers = previousActivePjUsers.filter(userId => 
+        !newActivePjUsers.includes(userId)
+      );
+      
+      if (removedFromActivePjUsers.length > 0) {
+        try {
+          // Check if these users are managing any other novels ACTIVELY
+          const stillManagingNovels = await Novel.find({
+            _id: { $ne: req.params.id }, // Exclude current novel
+            'active.pj_user': { $in: removedFromActivePjUsers }
+          }).lean();
+          
+          const stillManagingUserIds = new Set();
+          stillManagingNovels.forEach(otherNovel => {
+            if (otherNovel.active?.pj_user) {
+              otherNovel.active.pj_user.forEach(userId => {
+                if (removedFromActivePjUsers.includes(userId)) {
+                  stillManagingUserIds.add(userId);
+                }
+              });
+            }
+          });
+          
+          // Users who are not ACTIVELY managing any other novels should be demoted
+          const usersToDemote = removedFromActivePjUsers.filter(userId => 
+            !stillManagingUserIds.has(userId)
+          );
+          
+          if (usersToDemote.length > 0) {
+            // Only demote users who are currently pj_user (don't downgrade admins/moderators)
+            const usersToActuallyDemote = await User.find({
+              _id: { $in: usersToDemote },
+              role: 'pj_user'
+            }).select('_id username').lean();
+            
+            if (usersToActuallyDemote.length > 0) {
+              await User.updateMany(
+                { _id: { $in: usersToActuallyDemote.map(u => u._id) } },
+                { $set: { role: 'user' } }
+              );
+              
+              console.log(`Demoted ${usersToActuallyDemote.length} users from pj_user to user role:`, 
+                usersToActuallyDemote.map(u => u.username || u._id));
+            }
+          }
+        } catch (demoteError) {
+          console.error('Error demoting users from pj_user role:', demoteError);
+          // Don't fail the novel update if role demotion fails
+        }
+      }
+    }
+
     // Update fields
     novel.title = title;
     novel.alternativeTitles = alternativeTitles;
@@ -1176,6 +1323,60 @@ router.delete("/:id", auth, async (req, res) => {
       { favorites: novelId },
       { $pull: { favorites: novelId } }
     ).session(session);
+
+    // Check if any pj_users should be demoted after novel deletion
+    if (novel.active?.pj_user && Array.isArray(novel.active.pj_user)) {
+      try {
+        const pjUsersInDeletedNovel = novel.active.pj_user.filter(item => 
+          mongoose.Types.ObjectId.isValid(item)
+        );
+        
+        if (pjUsersInDeletedNovel.length > 0) {
+          // Check if these users are managing any other novels
+          const stillManagingNovels = await Novel.find({
+            _id: { $ne: novelId }, // Exclude the novel being deleted
+            'active.pj_user': { $in: pjUsersInDeletedNovel }
+          }).session(session).lean();
+          
+          const stillManagingUserIds = new Set();
+          stillManagingNovels.forEach(otherNovel => {
+            if (otherNovel.active?.pj_user) {
+              otherNovel.active.pj_user.forEach(userId => {
+                if (pjUsersInDeletedNovel.includes(userId)) {
+                  stillManagingUserIds.add(userId);
+                }
+              });
+            }
+          });
+          
+          // Users who are not managing any other novels should be demoted
+          const usersToDemote = pjUsersInDeletedNovel.filter(userId => 
+            !stillManagingUserIds.has(userId)
+          );
+          
+          if (usersToDemote.length > 0) {
+            // Only demote users who are currently pj_user (don't downgrade admins/moderators)
+            const usersToActuallyDemote = await User.find({
+              _id: { $in: usersToDemote },
+              role: 'pj_user'
+            }).select('_id username').session(session).lean();
+            
+            if (usersToActuallyDemote.length > 0) {
+              await User.updateMany(
+                { _id: { $in: usersToActuallyDemote.map(u => u._id) } },
+                { $set: { role: 'user' } }
+              ).session(session);
+              
+              console.log(`Demoted ${usersToActuallyDemote.length} users from pj_user to user role after novel deletion:`, 
+                usersToActuallyDemote.map(u => u.username || u._id));
+            }
+          }
+        }
+      } catch (demoteError) {
+        console.error('Error demoting users from pj_user role after novel deletion:', demoteError);
+        // Don't fail the novel deletion if role demotion fails
+      }
+    }
 
     // Finally, delete the novel itself
     await Novel.findByIdAndDelete(novelId).session(session);
