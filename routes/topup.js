@@ -15,6 +15,49 @@ const router = express.Router();
 const PENDING_REQUEST_EXPIRY_TIME = 30 * 60 * 1000; // 30 minutes in milliseconds
 
 /**
+ * Calculate balance to add based on amount paid
+ * Uses the pricing tiers defined in the system
+ */
+function calculateBalanceFromAmount(amountPaid) {
+  // Pricing tiers from the system
+  const pricingTiers = [
+    { price: 12000, balance: 100 },
+    { price: 20000, balance: 200 },
+    { price: 50000, balance: 520 },
+    { price: 100000, balance: 1100 },
+    { price: 200000, balance: 2250 },
+    { price: 350000, balance: 4000 }
+  ];
+  
+  // Find exact match first
+  const exactMatch = pricingTiers.find(tier => tier.price === amountPaid);
+  if (exactMatch) {
+    return exactMatch.balance;
+  }
+  
+  // Find the closest tier (for approximate amounts)
+  let closestTier = pricingTiers[0];
+  let smallestDifference = Math.abs(amountPaid - closestTier.price);
+  
+  for (const tier of pricingTiers) {
+    const difference = Math.abs(amountPaid - tier.price);
+    if (difference < smallestDifference) {
+      smallestDifference = difference;
+      closestTier = tier;
+    }
+  }
+  
+  // If the difference is reasonable (within 10%), use the tier's balance
+  const percentageDifference = smallestDifference / closestTier.price;
+  if (percentageDifference <= 0.1) { // Within 10%
+    return closestTier.balance;
+  }
+  
+  // Fallback: calculate proportionally based on the base rate (100 VND = ~1 rice)
+  return Math.floor(amountPaid / 100);
+}
+
+/**
  * User-initiated top-up request
  * @route POST /api/topup/request
  * @description Users can request to top up their account balance
@@ -598,32 +641,115 @@ router.post('/process-bank-transfer', async (req, res) => {
           }
         }
         
-        // Try to find any request with this transfer content, even if status isn't Pending
-        const anyRequest = await TopUpRequest.findOne({
-          'details.transferContent': actualTransferContent,
-          'paymentMethod': 'bank'
-        });
+        // Create a TopUpRequest record for this standalone bank transaction
+        // so it appears in the admin's "Giao dịch gần đây" section
+        const session = await mongoose.startSession();
+        session.startTransaction();
         
-        if (anyRequest) {
-          // Store the transaction with the request even if it's not in Pending status
-          anyRequest.bankTransactions.push(transactionData);
-          anyRequest.receivedAmount += creditAmount;
-          await anyRequest.save();
+        try {
+          // Try to find a user based on the transfer content or use a default system user
+          let targetUser = null;
+          
+          // Try to extract username from transfer content (if it follows pattern like "Topup-username")
+          if (actualTransferContent && actualTransferContent.includes('Topup-')) {
+            const extractedUsername = actualTransferContent.replace('Topup-', '');
+            targetUser = await User.findOne({ username: extractedUsername }).session(session);
+          }
+          
+          // If no user found from transfer content, try to find any user that might have this transfer content in recent requests
+          if (!targetUser) {
+            const recentRequest = await TopUpRequest.findOne({
+              'details.transferContent': actualTransferContent,
+              'paymentMethod': 'bank'
+            }).populate('user').session(session);
+            
+            if (recentRequest) {
+              targetUser = recentRequest.user;
+            }
+          }
+          
+          // If still no user found, skip creating TopUpRequest but log it
+          if (!targetUser) {
+            await session.abortTransaction();
+            results.push({
+              transId,
+              status: 'pending_review',
+              message: 'No matching user found, stored for manual review'
+            });
+            continue;
+          }
+          
+          // Calculate balance to add (using standard conversion rate)
+          const balanceToAdd = calculateBalanceFromAmount(creditAmount);
+          
+          // Create a standalone TopUpRequest for this bank transaction
+          const standaloneRequest = new TopUpRequest({
+            user: targetUser._id,
+            amount: creditAmount,
+            receivedAmount: creditAmount,
+            balance: balanceToAdd,
+            bonus: 0,
+            paymentMethod: 'bank',
+            status: 'Completed',
+            completedAt: new Date(),
+            details: {
+              bankName: transaction.bankName || 'Unknown',
+              accountName: targetUser.username,
+              accountNumber: bank_sub_acc_id || 'Unknown',
+              transferContent: actualTransferContent,
+              bankReference: transId,
+              autoProcessed: true,
+              cassoProcessed: true,
+              standaloneTransaction: true // Flag to indicate this wasn't user-initiated
+            },
+            notes: 'Tự động tạo từ giao dịch ngân hàng'
+          });
+          
+          // Add the bank transaction data
+          standaloneRequest.bankTransactions.push(transactionData);
+          
+          await standaloneRequest.save({ session });
+          
+          // Update user balance
+          const prevBalance = targetUser.balance || 0;
+          targetUser.balance = prevBalance + balanceToAdd;
+          await targetUser.save({ session });
+          
+          // Create UserTransaction record
+          await createTransaction({
+            userId: targetUser._id,
+            amount: balanceToAdd,
+            type: 'topup',
+            description: `Nạp tiền qua chuyển khoản ngân hàng (tự động)`,
+            sourceId: standaloneRequest._id,
+            sourceModel: 'TopUpRequest',
+            performedById: null, // Automatic process
+            balanceAfter: targetUser.balance
+          }, session);
+          
+          await session.commitTransaction();
           
           results.push({
             transId,
-            status: 'stored',
-            message: `Transaction stored with non-pending request: ${anyRequest._id}`,
-            requestId: anyRequest._id,
-            requestStatus: anyRequest.status
+            status: 'success',
+            message: 'Standalone bank transfer processed successfully',
+            requestId: standaloneRequest._id,
+            username: targetUser.username,
+            balanceAdded: balanceToAdd
           });
-        } else {
+          
+        } catch (error) {
+          await session.abortTransaction();
+          console.error('Error creating standalone TopUpRequest:', error);
           results.push({
             transId,
-            status: 'pending_review',
-            message: 'No matching topup request found, stored for future matching'
+            status: 'failed',
+            message: 'Failed to create standalone request'
           });
+        } finally {
+          session.endSession();
         }
+        
         continue;
       }
 
