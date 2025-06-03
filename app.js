@@ -14,6 +14,7 @@ import donationRoutes from './routes/donation.js';
 import reportRoutes from './routes/reports.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import requestRoutes from './routes/requests.js';
+import contributionRoutes from './routes/contributions.js';
 import topupRoutes from './routes/topup.js';
 import topupAdminRoutes from './routes/topupAdmin.js';
 import chapterRoutes from './routes/chapters.js';
@@ -87,6 +88,7 @@ app.use('/api/donation', donationRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/upload', uploadRoutes); // File upload routes for bunny.net
 app.use('/api/requests', requestRoutes); // Request system routes
+app.use('/api/contributions', contributionRoutes); // Contribution routes
 app.use('/api/topup', topupRoutes); // Top-up transaction routes
 app.use('/api/topup-admin', topupAdminRoutes); // Top-up admin routes
 app.use('/api/chapters', chapterRoutes); // Chapter routes

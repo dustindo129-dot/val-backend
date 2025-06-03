@@ -10,6 +10,7 @@ import { addClient, removeClient } from '../services/sseService.js';
 import Request from '../models/Request.js';
 import Contribution from '../models/Contribution.js';
 import { createNovelTransaction } from '../routes/novelTransactions.js';
+import { createTransaction } from '../routes/userTransaction.js';
 import ContributionHistory from '../models/ContributionHistory.js';
 import Comment from '../models/Comment.js';
 import mongoose from 'mongoose';
@@ -2045,6 +2046,9 @@ router.post("/:id/contribute", auth, async (req, res) => {
         $inc: { balance: -amount }
       }, { session });
 
+      // Get updated user balance for transaction recording
+      const updatedUser = await User.findById(userId).session(session);
+
       // Add to novel budget and balance
       const updatedNovel = await Novel.findByIdAndUpdate(novelId, {
         $inc: { 
@@ -2071,6 +2075,18 @@ router.post("/:id/contribute", auth, async (req, res) => {
         description: note || 'Đóng góp cho truyện',
         balanceAfter: updatedNovel.novelBalance,
         performedBy: userId
+      }, session);
+
+      // Record transaction in UserTransaction ledger
+      await createTransaction({
+        userId: userId,
+        amount: -amount, // Negative amount since balance is deducted
+        type: 'contribution',
+        description: `Đóng góp cho truyện: ${novel.title}${note ? ` - ${note}` : ''}`,
+        sourceId: novelId,
+        sourceModel: 'Novel',
+        performedById: userId,
+        balanceAfter: updatedUser.balance
       }, session);
 
       await session.commitTransaction();

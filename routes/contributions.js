@@ -5,6 +5,7 @@ import Request from '../models/Request.js';
 import User from '../models/User.js';
 import mongoose from 'mongoose';
 import { createNovelTransaction } from './novelTransactions.js';
+import { createTransaction } from './userTransaction.js';
 
 const router = express.Router();
 
@@ -99,6 +100,18 @@ router.post('/', auth, async (req, res) => {
         // Deduct contribution amount from user balance
         user.balance -= amount;
         await user.save({ session });
+        
+        // Record transaction in UserTransaction ledger
+        await createTransaction({
+          userId: req.user._id,
+          amount: -amount, // Negative amount since balance is deducted
+          type: 'contribution',
+          description: `Đóng góp cho yêu cầu: ${request.title || 'Yêu cầu không có tiêu đề'}${note ? ` - ${note}` : ''}`,
+          sourceId: newContribution._id,
+          sourceModel: 'Contribution',
+          performedById: req.user._id,
+          balanceAfter: user.balance
+        }, session);
         
         // Populate user data before sending response
         await newContribution.populate('user', 'username avatar role');
@@ -336,6 +349,12 @@ router.post('/request/:requestId/decline-all', auth, async (req, res) => {
         
         const { requestId } = req.params;
         
+        // Find the request
+        const request = await Request.findById(requestId).session(session);
+        if (!request) {
+          throw new Error('Request not found');
+        }
+        
         // Find all pending contributions for this request
         const contributions = await Contribution.find({ 
           request: requestId,
@@ -353,12 +372,24 @@ router.post('/request/:requestId/decline-all', auth, async (req, res) => {
           { session }
         );
         
-        // Refund each user
+        // Refund each user and record transactions
         for (const contribution of contributions) {
           const user = await User.findById(contribution.user).session(session);
           if (user) {
             user.balance += contribution.amount;
             await user.save({ session });
+            
+            // Record refund transaction
+            await createTransaction({
+              userId: user._id,
+              amount: contribution.amount, // Positive amount since balance is increased
+              type: 'refund',
+              description: `Hoàn tiền đóng góp cho yêu cầu: ${request.title || 'Yêu cầu không có tiêu đề'} (bị từ chối)`,
+              sourceId: contribution._id,
+              sourceModel: 'Contribution',
+              performedById: req.user._id,
+              balanceAfter: user.balance
+            }, session);
           }
         }
         
@@ -382,6 +413,9 @@ router.post('/request/:requestId/decline-all', auth, async (req, res) => {
     // Handle specific error types
     if (error.message === 'Only admins can process contributions') {
       return res.status(403).json({ message: error.message });
+    }
+    if (error.message === 'Request not found') {
+      return res.status(404).json({ message: error.message });
     }
     if (error.message === 'No pending contributions found') {
       return res.status(404).json({ message: error.message });
