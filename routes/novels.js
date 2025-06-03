@@ -2969,6 +2969,28 @@ router.get("/:id/dashboard", async (req, res) => {
         return { error: "Novel not found", status: 404 };
       }
 
+      // Populate staff ObjectIds with user display names
+      const populatedNovel = await populateStaffNames({
+        _id: dashboardData._id,
+        title: dashboardData.title,
+        description: dashboardData.description,
+        alternativeTitles: dashboardData.alternativeTitles,
+        author: dashboardData.author,
+        illustrator: dashboardData.illustrator,
+        illustration: dashboardData.illustration,
+        status: dashboardData.status,
+        active: dashboardData.active,
+        inactive: dashboardData.inactive,
+        genres: dashboardData.genres,
+        note: dashboardData.note,
+        updatedAt: dashboardData.updatedAt,
+        createdAt: dashboardData.createdAt,
+        views: dashboardData.views,
+        ratings: dashboardData.ratings,
+        novelBalance: dashboardData.novelBalance,
+        novelBudget: dashboardData.novelBudget
+      });
+
       let modulesWithChapters;
       
       if (moduleId && dashboardData.moduleChapters) {
@@ -3007,26 +3029,7 @@ router.get("/:id/dashboard", async (req, res) => {
       }
 
       return {
-        novel: {
-          _id: dashboardData._id,
-          title: dashboardData.title,
-          description: dashboardData.description,
-          alternativeTitles: dashboardData.alternativeTitles,
-          author: dashboardData.author,
-          illustrator: dashboardData.illustrator,
-          illustration: dashboardData.illustration,
-          status: dashboardData.status,
-          active: dashboardData.active,
-          inactive: dashboardData.inactive,
-          genres: dashboardData.genres,
-          note: dashboardData.note,
-          updatedAt: dashboardData.updatedAt,
-          createdAt: dashboardData.createdAt,
-          views: dashboardData.views,
-          ratings: dashboardData.ratings,
-          novelBalance: dashboardData.novelBalance,
-          novelBudget: dashboardData.novelBudget
-        },
+        novel: populatedNovel,
         modules: modulesWithChapters,
         // Only include chapters array if specific module requested
         chapters: moduleId ? (dashboardData.moduleChapters || []) : [],
