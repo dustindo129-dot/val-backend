@@ -838,6 +838,13 @@ router.get("/", optionalAuth, async (req, res) => {
  */
 router.post("/", [auth, admin], async (req, res) => {
   try {
+    // Only admins and moderators can create novels (since this involves staff assignment)
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      return res.status(403).json({ 
+        message: 'Only admins and moderators can create novels' 
+      });
+    }
+
     const {
       title,
       alternativeTitles,
@@ -1122,8 +1129,26 @@ router.put("/:id", [auth, admin], async (req, res) => {
       return res.status(404).json({ message: "Novel not found" });
     }
 
+    // Check permissions for staff modification
+    const canModifyStaff = req.user.role === 'admin' || req.user.role === 'moderator';
+    
+    // If pj_user is trying to modify staff, reject the request
+    if (!canModifyStaff && (active || inactive)) {
+      // Check if staff arrays are actually being changed
+      const staffChanged = 
+        JSON.stringify(active) !== JSON.stringify(novel.active) ||
+        JSON.stringify(inactive) !== JSON.stringify(novel.inactive);
+      
+      if (staffChanged) {
+        return res.status(403).json({ 
+          message: 'Only admins and moderators can modify novel staff assignments' 
+        });
+      }
+    }
+
     // Auto-promote users to pj_user role when assigned as project managers
-    if (active?.pj_user && Array.isArray(active.pj_user)) {
+    // (Only if user has permission to modify staff)
+    if (canModifyStaff && active?.pj_user && Array.isArray(active.pj_user)) {
       const User = mongoose.model('User');
       
       // Find users who are being assigned as pj_user
@@ -1163,8 +1188,8 @@ router.put("/:id", [auth, admin], async (req, res) => {
 
     // Check if any pj_users should be demoted to regular users
     // This happens when they're removed from ACTIVE novel management positions
-    // (including when moved from active to inactive staff)
-    if (novel.active?.pj_user && Array.isArray(novel.active.pj_user)) {
+    // (Only if user has permission to modify staff)
+    if (canModifyStaff && novel.active?.pj_user && Array.isArray(novel.active.pj_user)) {
       const User = mongoose.model('User');
       const previousActivePjUsers = novel.active.pj_user.filter(item => 
         mongoose.Types.ObjectId.isValid(item)
@@ -1245,8 +1270,13 @@ router.put("/:id", [auth, admin], async (req, res) => {
     novel.alternativeTitles = alternativeTitles;
     novel.author = author;
     novel.illustrator = illustrator;
-    novel.active = active;
-    novel.inactive = inactive;
+    
+    // Only update staff if user has permission
+    if (canModifyStaff) {
+      novel.active = active;
+      novel.inactive = inactive;
+    }
+    
     novel.genres = genres;
     novel.description = description;
     novel.note = note;
