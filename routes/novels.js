@@ -1181,18 +1181,26 @@ router.put("/:id", [auth, admin], async (req, res) => {
       
       if (removedFromActivePjUsers.length > 0) {
         try {
+          // Convert string IDs to ObjectIds for proper MongoDB querying
+          const removedObjectIds = removedFromActivePjUsers.map(id => 
+            mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
+          );
+          
           // Check if these users are managing any other novels ACTIVELY
           const stillManagingNovels = await Novel.find({
             _id: { $ne: req.params.id }, // Exclude current novel
-            'active.pj_user': { $in: removedFromActivePjUsers }
+            'active.pj_user': { $in: removedObjectIds }
           }).lean();
           
           const stillManagingUserIds = new Set();
           stillManagingNovels.forEach(otherNovel => {
             if (otherNovel.active?.pj_user) {
               otherNovel.active.pj_user.forEach(userId => {
-                if (removedFromActivePjUsers.includes(userId)) {
-                  stillManagingUserIds.add(userId);
+                // Convert both to strings for comparison
+                const userIdStr = userId.toString();
+                const isRemoved = removedFromActivePjUsers.some(removedId => removedId.toString() === userIdStr);
+                if (isRemoved) {
+                  stillManagingUserIds.add(userIdStr);
                 }
               });
             }
@@ -1200,13 +1208,18 @@ router.put("/:id", [auth, admin], async (req, res) => {
           
           // Users who are not ACTIVELY managing any other novels should be demoted
           const usersToDemote = removedFromActivePjUsers.filter(userId => 
-            !stillManagingUserIds.has(userId)
+            !stillManagingUserIds.has(userId.toString())
           );
           
           if (usersToDemote.length > 0) {
+            // Convert to ObjectIds for database query
+            const demoteObjectIds = usersToDemote.map(id => 
+              mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
+            );
+            
             // Only demote users who are currently pj_user (don't downgrade admins/moderators)
             const usersToActuallyDemote = await User.find({
-              _id: { $in: usersToDemote },
+              _id: { $in: demoteObjectIds },
               role: 'pj_user'
             }).select('_id username').lean();
             
