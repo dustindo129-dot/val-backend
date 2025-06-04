@@ -39,6 +39,11 @@ const novelSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  wordCount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   views: {
     total: { type: Number, default: 0 },
     daily: [{

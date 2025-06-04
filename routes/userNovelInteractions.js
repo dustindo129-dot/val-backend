@@ -369,7 +369,7 @@ router.get('/bookmarks', auth, async (req, res) => {
             { $match: { $expr: { $eq: ['$novelId', '$$novelId'] } } },
             { $sort: { createdAt: -1 } },
             { $limit: 1 },
-            { $project: { title: 1, order: 1, createdAt: 1 } }
+            { $project: { _id: 1, title: 1, order: 1, createdAt: 1 } }
           ],
           as: 'latestChapter'
         }
@@ -398,7 +398,7 @@ router.get('/bookmarks', auth, async (req, res) => {
                 foreignField: '_id',
                 as: 'chapter',
                 pipeline: [
-                  { $project: { title: 1, order: 1 } }
+                  { $project: { _id: 1, title: 1, order: 1 } }
                 ]
               }
             },
@@ -422,6 +422,7 @@ router.get('/bookmarks', auth, async (req, res) => {
             $cond: {
               if: { $gt: [{ $size: '$latestChapter' }, 0] },
               then: {
+                _id: { $arrayElemAt: ['$latestChapter._id', 0] },
                 title: { $arrayElemAt: ['$latestChapter.title', 0] },
                 number: { $arrayElemAt: ['$latestChapter.order', 0] },
                 createdAt: { $arrayElemAt: ['$latestChapter.createdAt', 0] }
@@ -433,6 +434,7 @@ router.get('/bookmarks', auth, async (req, res) => {
             $cond: {
               if: { $gt: [{ $size: '$bookmarkedChapter' }, 0] },
               then: {
+                _id: { $arrayElemAt: ['$bookmarkedChapter.chapter._id', 0] },
                 title: { $arrayElemAt: ['$bookmarkedChapter.chapter.title', 0] },
                 number: { $arrayElemAt: ['$bookmarkedChapter.chapter.order', 0] }
               },

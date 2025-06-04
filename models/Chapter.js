@@ -40,6 +40,11 @@ const chapterSchema = new mongoose.Schema({
     enum: ['published', 'draft', 'protected', 'paid'],
     default: 'published'
   },
+  wordCount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   chapterBalance: {
     type: Number,
     default: 0,
