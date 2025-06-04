@@ -170,6 +170,9 @@ router.post('/process-request/:requestId', auth, async (req, res) => {
       request.completedAt = new Date();
       request.adminId = req.user._id;
       
+      // Remove expiration to prevent TTL deletion of completed requests
+      request.expiresAt = undefined;
+      
       // If balance was adjusted, update it
       const finalBalance = adjustedBalance || request.balance;
       

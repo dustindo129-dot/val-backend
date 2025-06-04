@@ -137,6 +137,9 @@ router.post('/request', auth, async (req, res) => {
         topUpRequest.details.bankReference = unmatched.transactionId;
         topUpRequest.details.autoProcessed = true;
         
+        // Remove expiration to prevent TTL deletion of completed requests
+        topUpRequest.expiresAt = undefined;
+        
         await topUpRequest.save({ session });
         
         // Update user balance
@@ -235,6 +238,10 @@ router.post('/request', auth, async (req, res) => {
       // Card is valid, update request and user balance
       topUpRequest.status = 'Completed';
       topUpRequest.completedAt = new Date();
+      
+      // Remove expiration to prevent TTL deletion of completed requests
+      topUpRequest.expiresAt = undefined;
+      
       await topUpRequest.save({ session });
       
       // Update user balance (no bonus)
@@ -692,6 +699,7 @@ router.post('/process-bank-transfer', async (req, res) => {
             paymentMethod: 'bank',
             status: 'Completed',
             completedAt: new Date(),
+            expiresAt: undefined, // Ensure completed requests don't expire
             details: {
               bankName: transaction.bankName || 'Unknown',
               accountName: targetUser.username,
@@ -784,6 +792,9 @@ router.post('/process-bank-transfer', async (req, res) => {
         pendingRequest.details.bankReference = transId;
         pendingRequest.details.autoProcessed = true;
         pendingRequest.details.cassoProcessed = true;
+        
+        // Remove expiration to prevent TTL deletion of completed requests
+        pendingRequest.expiresAt = undefined;
         
         await pendingRequest.save({ session });
 
@@ -925,6 +936,7 @@ router.post('/process-unmatched/:transactionId', auth, async (req, res) => {
       paymentMethod: 'bank',
       status: 'Completed',
       completedAt: new Date(),
+      expiresAt: undefined, // Ensure completed requests don't expire
       receivedAmount: transaction.amount,
       details: {
         bankName: transaction.bankName || 'Unknown',
