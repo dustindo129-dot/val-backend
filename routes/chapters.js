@@ -524,9 +524,18 @@ router.post('/', auth, async (req, res) => {
  */
 const recalculateNovelWordCount = async (novelId, session = null) => {
   try {
+    // Ensure novelId is a proper ObjectId (handle both string and ObjectId inputs)
+    const novelObjectId = mongoose.Types.ObjectId.isValid(novelId) 
+      ? (typeof novelId === 'string' ? mongoose.Types.ObjectId.createFromHexString(novelId) : novelId)
+      : null;
+    
+    if (!novelObjectId) {
+      throw new Error('Invalid novelId provided to recalculateNovelWordCount');
+    }
+    
     // Aggregate total word count from all chapters in this novel
     const result = await Chapter.aggregate([
-      { $match: { novelId: mongoose.Types.ObjectId.createFromHexString(novelId) } },
+      { $match: { novelId: novelObjectId } },
       { 
         $group: {
           _id: null,
@@ -539,7 +548,7 @@ const recalculateNovelWordCount = async (novelId, session = null) => {
 
     // Update the novel with the new word count
     await Novel.findByIdAndUpdate(
-      novelId,
+      novelObjectId,
       { wordCount: totalWordCount },
       { session }
     );
@@ -579,13 +588,15 @@ router.put('/:id', auth, async (req, res) => {
       footnotes = [],
       wordCount = 0
     } = req.body;
-
+    
     // Find the existing chapter
     const existingChapter = await Chapter.findById(chapterId).session(session);
     if (!existingChapter) {
       await session.abortTransaction();
       return res.status(404).json({ message: 'Chapter not found' });
     }
+    
+
 
     // Check if user has permission to edit this chapter
     const novel = await Novel.findById(existingChapter.novelId).session(session);
@@ -612,12 +623,34 @@ router.put('/:id', auth, async (req, res) => {
       });
     }
 
+    // Prevent pj_users from changing paid mode (only when actually changing, not when keeping the same)
+    if (req.user.role === 'pj_user' && mode && mode !== existingChapter.mode && (existingChapter.mode === 'paid' || mode === 'paid')) {
+      await session.abortTransaction();
+      return res.status(403).json({ 
+        message: 'Bạn không có quyền thay đổi chế độ trả phí. Chỉ admin mới có thể thay đổi.' 
+      });
+    }
+
     // Validate chapter balance for paid chapters
-    if (mode === 'paid' && chapterBalance < 1) {
+    // Only enforce minimum balance validation when:
+    // 1. User is admin (who can actually set the balance), AND
+    // 2. Mode is being changed TO paid (not already paid), AND 
+    // 3. Balance is less than 1
+    if (req.user.role === 'admin' && mode === 'paid' && existingChapter.mode !== 'paid' && chapterBalance < 1) {
       await session.abortTransaction();
       return res.status(400).json({ 
         message: 'Số lúa chương tối thiểu là 1 🌾 cho chương trả phí.' 
       });
+    }
+    
+    // Determine the final chapter balance
+    let finalChapterBalance;
+    if (req.user.role === 'admin') {
+      // Admins can set the balance
+      finalChapterBalance = mode === 'paid' ? Math.max(0, chapterBalance || 0) : 0;
+    } else {
+      // Non-admins preserve existing balance for paid chapters, 0 for others
+      finalChapterBalance = mode === 'paid' ? existingChapter.chapterBalance : 0;
     }
 
     // Check if content or word count changed (to determine if word count recalculation is needed)
@@ -635,7 +668,7 @@ router.put('/:id', auth, async (req, res) => {
         ...(editor !== undefined && { editor }),
         ...(proofreader !== undefined && { proofreader }),
         ...(mode && { mode }),
-        chapterBalance: mode === 'paid' ? chapterBalance : 0,
+        chapterBalance: finalChapterBalance,
         footnotes,
         wordCount: Math.max(0, wordCount), // Ensure word count is not negative
         updatedAt: new Date()
