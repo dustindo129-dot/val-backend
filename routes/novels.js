@@ -57,15 +57,29 @@ const dedupQuery = async (key, queryFn) => {
 
 // Server-Sent Events endpoint for real-time updates
 router.get('/sse', (req, res) => {
+  // Get the origin from the request
+  const origin = req.headers.origin;
+  
   // Set headers for SSE
-  res.writeHead(200, {
+  const headers = {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type'
-  });
+  };
+  
+  // Set CORS origin header to match the requesting domain
+  if (origin && (
+    origin === 'https://valvrareteam.net' || 
+    origin === 'https://valvrareteam.netlify.app' || 
+    origin === 'http://localhost:5173'
+  )) {
+    headers['Access-Control-Allow-Origin'] = origin;
+    headers['Access-Control-Allow-Credentials'] = 'true';
+  }
+  
+  res.writeHead(200, headers);
 
   // Store client IP, user agent and tab ID to help identify unique clients
   const clientInfo = {

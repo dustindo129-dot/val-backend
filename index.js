@@ -88,8 +88,11 @@ const corsOptions = {
     'http://127.0.0.1:4173',
     'http://localhost:4174',  // For when port 4173 is already in use
     'http://127.0.0.1:4174',
-    // Include production URL if in production
-    ...(process.env.NODE_ENV === 'production' ? [process.env.FRONTEND_URL] : [])
+    // Include production URLs
+    'https://valvrareteam.net',
+    'https://valvrareteam.netlify.app',
+    // Include environment-specific URL if set
+    ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
