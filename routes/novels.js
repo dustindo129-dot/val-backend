@@ -473,7 +473,7 @@ router.get("/hot", async (req, res) => {
         const recentNovels = await Novel.aggregate([
           {
             $match: {
-              _id: { $nin: existingNovelIds.map(id => new mongoose.Types.ObjectId(id)) }
+              _id: { $nin: existingNovelIds.map(id => mongoose.Types.ObjectId.createFromHexString(id)) }
             }
           },
           // Sort by updatedAt (most recent first)
@@ -977,7 +977,7 @@ router.get("/:id", async (req, res) => {
       const [novelWithData] = await Novel.aggregate([
         // Match the specific novel
         {
-          $match: { _id: new mongoose.Types.ObjectId(novelId) }
+          $match: { _id: mongoose.Types.ObjectId.createFromHexString(novelId) }
         },
         
         // Lookup modules for this novel
@@ -1221,7 +1221,7 @@ router.put("/:id", [auth, admin], async (req, res) => {
         try {
           // Convert string IDs to ObjectIds for proper MongoDB querying
           const removedObjectIds = removedFromActivePjUsers.map(id => 
-            mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
+            mongoose.Types.ObjectId.isValid(id) ? mongoose.Types.ObjectId.createFromHexString(id) : id
           );
           
           // Check if these users are managing any other novels ACTIVELY
@@ -1252,7 +1252,7 @@ router.put("/:id", [auth, admin], async (req, res) => {
           if (usersToDemote.length > 0) {
             // Convert to ObjectIds for database query
             const demoteObjectIds = usersToDemote.map(id => 
-              mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
+              mongoose.Types.ObjectId.isValid(id) ? mongoose.Types.ObjectId.createFromHexString(id) : id
             );
             
             // Only demote users who are currently pj_user (don't downgrade admins/moderators)
@@ -2401,7 +2401,7 @@ router.get("/:id/complete", async (req, res) => {
                     $expr: {
                       $and: [
                         { $eq: ['$giftId', '$$giftId'] },
-                        { $eq: ['$novelId', new mongoose.Types.ObjectId(novelId)] }
+                        { $eq: ['$novelId', mongoose.Types.ObjectId.createFromHexString(novelId)] }
                       ]
                     }
                   }
@@ -2435,13 +2435,13 @@ router.get("/:id/complete", async (req, res) => {
         // 5. Get user interaction if logged in
         userId ? UserNovelInteraction.findOne({ 
           userId, 
-          novelId: new mongoose.Types.ObjectId(novelId) 
+          novelId: mongoose.Types.ObjectId.createFromHexString(novelId) 
         }).lean() : null,
         
         // 6. Get novel interaction statistics
         UserNovelInteraction.aggregate([
           {
-            $match: { novelId: new mongoose.Types.ObjectId(novelId) }
+            $match: { novelId: mongoose.Types.ObjectId.createFromHexString(novelId) }
           },
           {
             $group: {
@@ -2860,7 +2860,7 @@ router.get("/homepage", async (req, res) => {
         userId ? UserChapterInteraction.aggregate([
           {
             $match: {
-              userId: new mongoose.Types.ObjectId(userId),
+              userId: mongoose.Types.ObjectId.createFromHexString(userId),
               lastReadAt: {
                 $ne: null,
                 $gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) // Last 2 weeks
@@ -2995,7 +2995,7 @@ router.get("/:id/dashboard", async (req, res) => {
       const [dashboardData] = await Novel.aggregate([
         // Match the specific novel
         {
-          $match: { _id: new mongoose.Types.ObjectId(novelId) }
+          $match: { _id: mongoose.Types.ObjectId.createFromHexString(novelId) }
         },
         
         // Lookup all modules for this novel with full details
@@ -3017,7 +3017,7 @@ router.get("/:id/dashboard", async (req, res) => {
           {
             $lookup: {
               from: 'chapters',
-              let: { moduleId: new mongoose.Types.ObjectId(moduleId) },
+              let: { moduleId: mongoose.Types.ObjectId.createFromHexString(moduleId) },
               pipeline: [
                 {
                   $match: {
@@ -3073,7 +3073,7 @@ router.get("/:id/dashboard", async (req, res) => {
                   $match: {
                     $expr: {
                       $and: [
-                        { $eq: ['$_id', new mongoose.Types.ObjectId(moduleId)] },
+                        { $eq: ['$_id', mongoose.Types.ObjectId.createFromHexString(moduleId)] },
                         { $eq: ['$novelId', '$$novelId'] }
                       ]
                     }

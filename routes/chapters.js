@@ -235,7 +235,7 @@ router.get('/:id', async (req, res) => {
       const [chapter] = await Chapter.aggregate([
         // First, match the requested chapter by ID
         {
-          $match: { _id: new mongoose.Types.ObjectId(req.params.id) }
+          $match: { _id: mongoose.Types.ObjectId.createFromHexString(req.params.id) }
         },
         
         // Next, lookup the novel info (just the title)
@@ -396,7 +396,7 @@ router.post('/', auth, async (req, res) => {
     
     // Use aggregation to get the module and determine order in a single query
     const [moduleData] = await Module.aggregate([
-      { $match: { _id: new mongoose.Types.ObjectId(moduleId) } },
+      { $match: { _id: mongoose.Types.ObjectId.createFromHexString(moduleId) } },
       {
         $lookup: {
           from: 'chapters',
@@ -526,7 +526,7 @@ const recalculateNovelWordCount = async (novelId, session = null) => {
   try {
     // Aggregate total word count from all chapters in this novel
     const result = await Chapter.aggregate([
-      { $match: { novelId: new mongoose.Types.ObjectId(novelId) } },
+      { $match: { novelId: mongoose.Types.ObjectId.createFromHexString(novelId) } },
       { 
         $group: {
           _id: null,
@@ -733,7 +733,7 @@ router.delete('/:id', auth, async (req, res) => {
 
     // Delete all user interactions for this chapter
     await UserChapterInteraction.deleteMany(
-      { chapterId: new mongoose.Types.ObjectId(chapterId) },
+      { chapterId: mongoose.Types.ObjectId.createFromHexString(chapterId) },
       { session }
     );
 
@@ -791,7 +791,7 @@ router.get('/:id/full', async (req, res) => {
     const [chapterResult, interactionStats, userInteraction] = await Promise.all([
       // Fetch chapter with novel info and navigation data (existing aggregation)
       Chapter.aggregate([
-        { '$match': { _id: new mongoose.Types.ObjectId(chapterId) } },
+        { '$match': { _id: mongoose.Types.ObjectId.createFromHexString(chapterId) } },
         { '$lookup': { 
             from: 'novels', 
             localField: 'novelId', 
@@ -851,7 +851,7 @@ router.get('/:id/full', async (req, res) => {
       // Get interaction statistics
       UserChapterInteraction.aggregate([
         {
-          $match: { chapterId: new mongoose.Types.ObjectId(chapterId) }
+          $match: { chapterId: mongoose.Types.ObjectId.createFromHexString(chapterId) }
         },
         {
           $group: {
@@ -872,7 +872,7 @@ router.get('/:id/full', async (req, res) => {
       // Get user-specific interaction data if user is logged in
       userId ? UserChapterInteraction.findOne({ 
         userId, 
-        chapterId: new mongoose.Types.ObjectId(chapterId) 
+        chapterId: mongoose.Types.ObjectId.createFromHexString(chapterId) 
       }).lean() : null
     ]);
 
