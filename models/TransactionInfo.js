@@ -32,6 +32,18 @@ const transactionInfoSchema = new mongoose.Schema({
   processed: {
     type: Boolean,
     default: false
+  },
+  status: {
+    type: String,
+    enum: ['pending', 'matched', 'dismissed'],
+    default: 'pending'
+  },
+  dismissedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  dismissedAt: {
+    type: Date
   }
 }, {
   timestamps: true
@@ -40,6 +52,7 @@ const transactionInfoSchema = new mongoose.Schema({
 // Create indexes for efficient querying
 transactionInfoSchema.index({ extractedContent: 1 });
 transactionInfoSchema.index({ processed: 1 });
+transactionInfoSchema.index({ status: 1 });
 
 const TransactionInfo = mongoose.model('TransactionInfo', transactionInfoSchema);
 

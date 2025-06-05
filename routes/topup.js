@@ -125,8 +125,9 @@ router.post('/request', auth, async (req, res) => {
           matched: true
         };
         
-        // Mark transaction as processed
+        // Mark transaction as processed and matched
         unmatched.processed = true;
+        unmatched.status = 'matched';
         await unmatched.save({ session });
         
         // Update the request with transaction info
@@ -877,13 +878,83 @@ router.get('/unmatched-transactions', auth, async (req, res) => {
   }
   
   try {
-    const unmatched = await TransactionInfo.find({ processed: false })
-      .sort({ date: -1 });
+    const unmatched = await TransactionInfo.find({ 
+      status: 'pending',
+      processed: false 
+    }).sort({ date: -1 });
     
     res.json(unmatched);
   } catch (error) {
     console.error('Failed to fetch unmatched transactions:', error);
     res.status(500).json({ message: 'Failed to fetch unmatched transactions' });
+  }
+});
+
+/**
+ * Dismiss an unmatched transaction
+ * @route POST /api/topup/dismiss-unmatched/:transactionId
+ * @description Admin endpoint to dismiss an unmatched transaction
+ */
+router.post('/dismiss-unmatched/:transactionId', auth, async (req, res) => {
+  // Ensure user is an admin
+  if (!req.user.role || req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Unauthorized' });
+  }
+  
+  const { transactionId } = req.params;
+  
+  try {
+    // Find the unmatched transaction
+    const transaction = await TransactionInfo.findOne({ 
+      transactionId,
+      status: 'pending',
+      processed: false 
+    });
+    
+    if (!transaction) {
+      return res.status(404).json({ message: 'Transaction not found or already processed' });
+    }
+    
+    // Update transaction status to dismissed
+    transaction.status = 'dismissed';
+    transaction.dismissedBy = req.user._id;
+    transaction.dismissedAt = new Date();
+    
+    await transaction.save();
+    
+    res.status(200).json({
+      message: 'Transaction dismissed successfully',
+      transactionId
+    });
+  } catch (error) {
+    console.error('Failed to dismiss transaction:', error);
+    res.status(500).json({ message: 'Failed to dismiss transaction' });
+  }
+});
+
+/**
+ * Get dismissed/processed transactions history
+ * @route GET /api/topup/dismissed-transactions
+ * @description Admin endpoint to get dismissed and matched transactions history
+ */
+router.get('/dismissed-transactions', auth, async (req, res) => {
+  // Ensure user is an admin
+  if (!req.user.role || req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Unauthorized' });
+  }
+  
+  try {
+    const dismissed = await TransactionInfo.find({ 
+      status: { $in: ['dismissed', 'matched'] }
+    })
+    .populate('dismissedBy', 'username displayName')
+    .sort({ dismissedAt: -1, updatedAt: -1 })
+    .limit(100); // Limit to last 100 for performance
+    
+    res.json(dismissed);
+  } catch (error) {
+    console.error('Failed to fetch dismissed transactions:', error);
+    res.status(500).json({ message: 'Failed to fetch dismissed transactions' });
   }
 });
 
@@ -966,8 +1037,9 @@ router.post('/process-unmatched/:transactionId', auth, async (req, res) => {
     user.balance = prevBalance + balance;
     await user.save({ session });
     
-    // Mark transaction as processed
+    // Mark transaction as processed and matched
     transaction.processed = true;
+    transaction.status = 'matched';
     await transaction.save({ session });
     
     // Create transaction record
