@@ -357,8 +357,8 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Create a new chapter (admin only)
-router.post('/', [auth, admin], async (req, res) => {
+// Create a new chapter (admin, moderator, or pj_user managing the novel)
+router.post('/', auth, async (req, res) => {
   try {
     const { 
       novelId, 
@@ -372,6 +372,27 @@ router.post('/', [auth, admin], async (req, res) => {
       footnotes,
       chapterBalance
     } = req.body;
+    
+    // Check if user has permission (admin, moderator, or pj_user managing this novel)
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      // For pj_user, check if they manage this novel
+      if (req.user.role === 'pj_user') {
+        const novel = await Novel.findById(novelId).lean();
+        if (!novel) {
+          return res.status(404).json({ message: 'Novel not found' });
+        }
+        
+        // Check if user is in the novel's active pj_user array (handle both ObjectIds and usernames)
+        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                            novel.active?.pj_user?.includes(req.user.username);
+        
+        if (!isAuthorized) {
+          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
+        }
+      } else {
+        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
+      }
+    }
     
     // Use aggregation to get the module and determine order in a single query
     const [moduleData] = await Module.aggregate([
@@ -890,133 +911,6 @@ router.get('/:id/full', async (req, res) => {
   }
 });
 
-/**
- * Create a new chapter
- * @route POST /api/chapters
- */
-router.post('/', auth, async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  
-  try {
-    const { 
-      title, 
-      content, 
-      novelId, 
-      moduleId, 
-      order, 
-      translator, 
-      editor, 
-      proofreader,
-      mode = 'free',
-      chapterBalance = 0,
-      footnotes = [],
-      wordCount = 0
-    } = req.body;
 
-    // Validate required fields
-    if (!title || !content || !novelId || !moduleId) {
-      await session.abortTransaction();
-      return res.status(400).json({ 
-        message: 'Title, content, novelId, and moduleId are required' 
-      });
-    }
-
-    // Verify the novel exists
-    const novel = await Novel.findById(novelId).session(session);
-    if (!novel) {
-      await session.abortTransaction();
-      return res.status(404).json({ message: 'Novel not found' });
-    }
-
-    // Verify the module exists
-    const module = await Module.findById(moduleId).session(session);
-    if (!module) {
-      await session.abortTransaction();
-      return res.status(404).json({ message: 'Module not found' });
-    }
-
-    // Determine the order if not provided
-    let chapterOrder = order;
-    if (!chapterOrder) {
-      const lastChapter = await Chapter.findOne(
-        { moduleId },
-        { order: 1 }
-      ).sort({ order: -1 }).session(session);
-      chapterOrder = lastChapter ? lastChapter.order + 1 : 1;
-    }
-
-    // Create the new chapter
-    const chapter = new Chapter({
-      title,
-      content,
-      novelId,
-      moduleId,
-      order: chapterOrder,
-      translator,
-      editor,
-      proofreader,
-      mode,
-      chapterBalance: mode === 'paid' ? chapterBalance : 0,
-      footnotes,
-      wordCount: Math.max(0, wordCount) // Ensure word count is not negative
-    });
-
-    // Save the chapter
-    await chapter.save({ session });
-
-    // Add chapter to module's chapters array
-    await Module.findByIdAndUpdate(
-      moduleId,
-      { 
-        $addToSet: { chapters: chapter._id },
-        $set: { updatedAt: new Date() }
-      },
-      { session }
-    );
-
-    // Recalculate novel word count
-    await recalculateNovelWordCount(novelId, session);
-
-    // Update novel's timestamp
-    await Novel.findByIdAndUpdate(
-      novelId,
-      { $set: { updatedAt: new Date() } },
-      { session }
-    );
-
-    await session.commitTransaction();
-
-    // Create notifications for users who bookmarked this novel
-    await createNewChapterNotifications(
-      novelId.toString(),
-      chapter._id.toString(),
-      title
-    );
-
-    // Clear novel caches
-    clearNovelCaches();
-
-    // Notify clients of the new chapter
-    notifyAllClients('update', {
-      type: 'chapter_created',
-      novelId: novelId,
-      chapterId: chapter._id,
-      chapterTitle: title,
-      timestamp: new Date().toISOString()
-    });
-
-    // Populate and return the created chapter
-    await chapter.populate('novelId', 'title');
-    res.status(201).json(chapter);
-
-  } catch (err) {
-    await session.abortTransaction();
-    console.error('Error creating chapter:', err);
-    res.status(400).json({ message: err.message });
-  } finally {
-    session.endSession();
-  }
-});
 
 export default router; 
