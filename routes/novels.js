@@ -904,8 +904,6 @@ router.post("/", [auth, admin], async (req, res) => {
             { $set: { role: 'pj_user' } }
           );
           
-          console.log(`Promoted ${newPjUsers.length} users to pj_user role:`, 
-            newPjUsers.map(u => u.username || u._id));
         } catch (updateError) {
           console.error('Error promoting users to pj_user role:', updateError);
           // Don't fail the novel creation if role promotion fails
@@ -1190,8 +1188,6 @@ router.put("/:id", [auth, admin], async (req, res) => {
             { $set: { role: 'pj_user' } }
           );
           
-          console.log(`Promoted ${newPjUsers.length} users to pj_user role:`, 
-            newPjUsers.map(u => u.username || u._id));
         } catch (updateError) {
           console.error('Error promoting users to pj_user role:', updateError);
           // Don't fail the novel update if role promotion fails
@@ -1204,24 +1200,27 @@ router.put("/:id", [auth, admin], async (req, res) => {
     // (Only if user has permission to modify staff)
     if (canModifyStaff && novel.active?.pj_user && Array.isArray(novel.active.pj_user)) {
       const User = mongoose.model('User');
-      const previousActivePjUsers = novel.active.pj_user.filter(item => 
-        mongoose.Types.ObjectId.isValid(item)
-      );
-      const newActivePjUsers = (active?.pj_user || []).filter(item => 
-        mongoose.Types.ObjectId.isValid(item)
-      );
       
-      // Find users who were removed from ACTIVE pj_user position
-      // This includes users moved to inactive staff or completely removed
+      // Normalize both arrays to strings for proper comparison
+      const previousActivePjUsers = novel.active.pj_user
+        .filter(item => mongoose.Types.ObjectId.isValid(item))
+        .map(item => item.toString());
+      
+      const newActivePjUsers = (active?.pj_user || [])
+        .filter(item => mongoose.Types.ObjectId.isValid(item))
+        .map(item => item.toString());
+      
+      // Find users who were REMOVED from ACTIVE pj_user position
       const removedFromActivePjUsers = previousActivePjUsers.filter(userId => 
         !newActivePjUsers.includes(userId)
       );
       
+      // Only proceed with demotion logic if users were actually removed
       if (removedFromActivePjUsers.length > 0) {
         try {
           // Convert string IDs to ObjectIds for proper MongoDB querying
           const removedObjectIds = removedFromActivePjUsers.map(id => 
-            mongoose.Types.ObjectId.isValid(id) ? mongoose.Types.ObjectId.createFromHexString(id) : id
+            mongoose.Types.ObjectId.createFromHexString(id)
           );
           
           // Check if these users are managing any other novels ACTIVELY
@@ -1236,7 +1235,7 @@ router.put("/:id", [auth, admin], async (req, res) => {
               otherNovel.active.pj_user.forEach(userId => {
                 // Convert both to strings for comparison
                 const userIdStr = userId.toString();
-                const isRemoved = removedFromActivePjUsers.some(removedId => removedId.toString() === userIdStr);
+                const isRemoved = removedFromActivePjUsers.some(removedId => removedId === userIdStr);
                 if (isRemoved) {
                   stillManagingUserIds.add(userIdStr);
                 }
@@ -1246,13 +1245,13 @@ router.put("/:id", [auth, admin], async (req, res) => {
           
           // Users who are not ACTIVELY managing any other novels should be demoted
           const usersToDemote = removedFromActivePjUsers.filter(userId => 
-            !stillManagingUserIds.has(userId.toString())
+            !stillManagingUserIds.has(userId)
           );
           
           if (usersToDemote.length > 0) {
             // Convert to ObjectIds for database query
             const demoteObjectIds = usersToDemote.map(id => 
-              mongoose.Types.ObjectId.isValid(id) ? mongoose.Types.ObjectId.createFromHexString(id) : id
+              mongoose.Types.ObjectId.createFromHexString(id)
             );
             
             // Only demote users who are currently pj_user (don't downgrade admins/moderators)
@@ -1266,9 +1265,6 @@ router.put("/:id", [auth, admin], async (req, res) => {
                 { _id: { $in: usersToActuallyDemote.map(u => u._id) } },
                 { $set: { role: 'user' } }
               );
-              
-              console.log(`Demoted ${usersToActuallyDemote.length} users from pj_user to user role:`, 
-                usersToActuallyDemote.map(u => u.username || u._id));
             }
           }
         } catch (demoteError) {
@@ -1420,23 +1416,29 @@ router.delete("/:id", auth, async (req, res) => {
     // Check if any pj_users should be demoted after novel deletion
     if (novel.active?.pj_user && Array.isArray(novel.active.pj_user)) {
       try {
-        const pjUsersInDeletedNovel = novel.active.pj_user.filter(item => 
-          mongoose.Types.ObjectId.isValid(item)
-        );
+        const pjUsersInDeletedNovel = novel.active.pj_user
+          .filter(item => mongoose.Types.ObjectId.isValid(item))
+          .map(item => item.toString());
         
         if (pjUsersInDeletedNovel.length > 0) {
+          // Convert to ObjectIds for MongoDB query
+          const pjUserObjectIds = pjUsersInDeletedNovel.map(id => 
+            mongoose.Types.ObjectId.createFromHexString(id)
+          );
+          
           // Check if these users are managing any other novels
           const stillManagingNovels = await Novel.find({
             _id: { $ne: novelId }, // Exclude the novel being deleted
-            'active.pj_user': { $in: pjUsersInDeletedNovel }
+            'active.pj_user': { $in: pjUserObjectIds }
           }).session(session).lean();
           
           const stillManagingUserIds = new Set();
           stillManagingNovels.forEach(otherNovel => {
             if (otherNovel.active?.pj_user) {
               otherNovel.active.pj_user.forEach(userId => {
-                if (pjUsersInDeletedNovel.includes(userId)) {
-                  stillManagingUserIds.add(userId);
+                const userIdStr = userId.toString();
+                if (pjUsersInDeletedNovel.includes(userIdStr)) {
+                  stillManagingUserIds.add(userIdStr);
                 }
               });
             }
@@ -1448,9 +1450,14 @@ router.delete("/:id", auth, async (req, res) => {
           );
           
           if (usersToDemote.length > 0) {
+            // Convert to ObjectIds for database query
+            const demoteObjectIds = usersToDemote.map(id => 
+              mongoose.Types.ObjectId.createFromHexString(id)
+            );
+            
             // Only demote users who are currently pj_user (don't downgrade admins/moderators)
             const usersToActuallyDemote = await User.find({
-              _id: { $in: usersToDemote },
+              _id: { $in: demoteObjectIds },
               role: 'pj_user'
             }).select('_id username').session(session).lean();
             
@@ -1459,9 +1466,6 @@ router.delete("/:id", auth, async (req, res) => {
                 { _id: { $in: usersToActuallyDemote.map(u => u._id) } },
                 { $set: { role: 'user' } }
               ).session(session);
-              
-              console.log(`Demoted ${usersToActuallyDemote.length} users from pj_user to user role after novel deletion:`, 
-                usersToActuallyDemote.map(u => u.username || u._id));
             }
           }
         }
