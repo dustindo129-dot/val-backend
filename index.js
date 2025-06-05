@@ -466,7 +466,7 @@ app.use((err, req, res, next) => {
 
 // Connect to MongoDB database
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => {
+  .then(async () => {
     console.log('Connected to MongoDB');
   })
   .catch((error) => {

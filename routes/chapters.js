@@ -496,219 +496,165 @@ router.post('/', [auth, admin], async (req, res) => {
   }
 });
 
-// Update a chapter
-router.put('/:id', auth, async (req, res) => {
+/**
+ * Helper function to recalculate and update novel word count
+ * @param {string} novelId - The novel ID
+ * @param {object} session - MongoDB session (optional)
+ */
+const recalculateNovelWordCount = async (novelId, session = null) => {
   try {
-    const { 
-      title, 
-      content, 
-      moduleId,
+    // Aggregate total word count from all chapters in this novel
+    const result = await Chapter.aggregate([
+      { $match: { novelId: new mongoose.Types.ObjectId(novelId) } },
+      { 
+        $group: {
+          _id: null,
+          totalWordCount: { $sum: '$wordCount' }
+        }
+      }
+    ]).session(session);
+
+    const totalWordCount = result.length > 0 ? result[0].totalWordCount : 0;
+
+    // Update the novel with the new word count
+    await Novel.findByIdAndUpdate(
+      novelId,
+      { wordCount: totalWordCount },
+      { session }
+    );
+
+    return totalWordCount;
+  } catch (error) {
+    console.error('Error recalculating novel word count:', error);
+    throw error;
+  }
+};
+
+/**
+ * Update a chapter
+ * @route PUT /api/chapters/:id
+ */
+router.put('/:id', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    const chapterId = req.params.id;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(chapterId)) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'Invalid chapter ID format' });
+    }
+
+    const {
+      title,
+      content,
       translator,
       editor,
       proofreader,
-      footnotes,
-      chapterBalance
+      mode,
+      chapterBalance = 0,
+      footnotes = [],
+      wordCount = 0
     } = req.body;
-    const chapterId = req.params.id;
 
-    // Get the original chapter data to check for mode changes and permissions
-    const originalChapter = await Chapter.findById(chapterId, 'mode novelId moduleId').populate('novelId', 'active');
-    if (!originalChapter) {
+    // Find the existing chapter
+    const existingChapter = await Chapter.findById(chapterId).session(session);
+    if (!existingChapter) {
+      await session.abortTransaction();
       return res.status(404).json({ message: 'Chapter not found' });
     }
 
-    // Check if user has permission (admin, moderator, or pj_user managing this novel)
-    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-      // For pj_user, check if they manage this novel
-      if (req.user.role === 'pj_user') {
-        const novel = originalChapter.novelId;
-        
-        // Check if user is in the novel's active pj_user array (handle both ObjectIds and usernames)
-        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
-                            novel.active?.pj_user?.includes(req.user.username);
-        
-        if (!isAuthorized) {
-          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
-        }
-      } else {
-        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
-      }
+    // Check if user has permission to edit this chapter
+    const novel = await Novel.findById(existingChapter.novelId).session(session);
+    if (!novel) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Novel not found' });
     }
 
-    // If trying to set mode to paid, check if the module is paid
-    if (req.body.mode === 'paid') {
-      const targetModuleId = moduleId || originalChapter.moduleId;
-      const module = await Module.findById(targetModuleId, 'mode');
-      
-      if (module && module.mode === 'paid') {
-        return res.status(400).json({ 
-          message: 'Không thể đặt chương thành trả phí trong tập đã trả phí. Tập trả phí đã bao gồm tất cả chương bên trong.' 
-        });
-      }
-
-      // Validate minimum chapter balance for paid chapters
-      if (parseInt(chapterBalance) < 1) {
-        return res.status(400).json({ 
-          message: 'Số lúa chương tối thiểu là 1 🌾 cho chương trả phí.' 
-        });
-      }
+    // Permission check: admin, moderator, or pj_user managing this novel
+    let hasPermission = false;
+    if (req.user.role === 'admin' || req.user.role === 'moderator') {
+      hasPermission = true;
+    } else if (req.user.role === 'pj_user') {
+      // Check if user manages this novel
+      const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                          novel.active?.pj_user?.includes(req.user.username);
+      hasPermission = isAuthorized;
     }
-    
-    // If moduleId is changing, handle module transition logic
-    if (moduleId) {
-      // Find chapter with minimal projection to get only what we need
-      const chapter = await Chapter.findById(chapterId, {
-        moduleId: 1, novelId: 1, order: 1, _id: 1
+
+    if (!hasPermission) {
+      await session.abortTransaction();
+      return res.status(403).json({ 
+        message: 'Access denied. You do not have permission to edit this chapter.' 
       });
-
-      if (!chapter) {
-        return res.status(404).json({ message: 'Chapter not found' });
-      }
-
-      // If moduleId is changing, update the old and new modules' chapters arrays
-      if (moduleId !== chapter.moduleId.toString()) {
-        // Start a session for transaction
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        
-        try {
-          // Get the highest order value for chapters in the target module in one query
-          const [lastChapterInTarget] = await Chapter.aggregate([
-            { $match: { moduleId: new mongoose.Types.ObjectId(moduleId) } },
-            { $sort: { order: -1 } },
-            { $limit: 1 },
-            { $project: { order: 1 } }
-          ]).session(session);
-          
-          // Determine new order
-          const newOrder = lastChapterInTarget ? lastChapterInTarget.order + 1 : 0;
-          
-          // Perform all module transition operations in parallel
-          await Promise.all([
-            // 1. Remove chapter from old module
-            Module.findByIdAndUpdate(
-              chapter.moduleId,
-              { $pull: { chapters: chapter._id } },
-              { session }
-            ),
-            
-            // 2. Update chapter orders in old module
-            Chapter.updateMany(
-              { 
-                novelId: chapter.novelId,
-                moduleId: chapter.moduleId,
-                order: { $gt: chapter.order }
-              },
-              { $inc: { order: -1 } },
-              { session }
-            ),
-
-            // 3. Add chapter to new module
-            Module.findByIdAndUpdate(
-              moduleId,
-              { $addToSet: { chapters: chapter._id } },
-              { session }
-            ),
-            
-            // 4. Update the chapter with all changes at once
-            Chapter.findByIdAndUpdate(
-              chapterId,
-              { 
-                $set: {
-                  title: title || chapter.title,
-                  content: content,
-                  moduleId: moduleId,
-                  order: newOrder,
-                  translator: translator,
-                  editor: editor,
-                  proofreader: proofreader,
-                  mode: req.body.mode,
-                  footnotes: footnotes || [],
-                  chapterBalance: req.body.mode === 'paid' ? (chapterBalance || 0) : 0,
-                  updatedAt: new Date()
-                }
-              },
-              { 
-                new: true,
-                session }
-            ),
-            
-          ]);
-          
-          // Commit transaction
-          await session.commitTransaction();
-          
-          // Clear novel caches to ensure fresh data
-          clearNovelCaches();
-
-          // Check for auto-unlock if chapter was changed to paid mode
-          if (req.body.mode === 'paid' && originalChapter.mode !== 'paid') {
-            // Import the checkAndUnlockContent function from novels.js
-            const { checkAndUnlockContent } = await import('./novels.js');
-            await checkAndUnlockContent(originalChapter.novelId);
-          }
-          
-          // Get updated chapter to return to client
-          const updatedChapter = await Chapter.findById(chapterId);
-          return res.json(updatedChapter);
-        } catch (err) {
-          // If anything fails, abort the transaction
-          await session.abortTransaction();
-          throw err;
-        } finally {
-          session.endSession();
-        }
-      }
     }
 
-    // If moduleId is not changing, just update the chapter
-    const updateData = {
-      $set: {
-        ...(title && { title }),
-        ...(content && { content }),
-        ...(translator && { translator }),
-        ...(editor && { editor }),
-        ...(proofreader && { proofreader }),
-        ...(req.body.mode && { mode: req.body.mode }),
-        ...(footnotes && { footnotes }),
-        ...(req.body.mode === 'paid' ? { chapterBalance: chapterBalance || 0 } : {}),
-        // Only update timestamp if content or title changes, not just mode
-        ...(title || content ? { updatedAt: new Date() } : {})
-      }
-    };
-
-    // Reset chapterBalance to 0 if mode is not paid
-    if (req.body.mode && req.body.mode !== 'paid') {
-      updateData.$set.chapterBalance = 0;
+    // Validate chapter balance for paid chapters
+    if (mode === 'paid' && chapterBalance < 1) {
+      await session.abortTransaction();
+      return res.status(400).json({ 
+        message: 'Số lúa chương tối thiểu là 1 🌾 cho chương trả phí.' 
+      });
     }
 
+    // Update the chapter
     const updatedChapter = await Chapter.findByIdAndUpdate(
       chapterId,
-      updateData,
-      { new: true }
+      {
+        ...(title && { title }),
+        ...(content && { content }),
+        ...(translator !== undefined && { translator }),
+        ...(editor !== undefined && { editor }),
+        ...(proofreader !== undefined && { proofreader }),
+        ...(mode && { mode }),
+        chapterBalance: mode === 'paid' ? chapterBalance : 0,
+        footnotes,
+        wordCount: Math.max(0, wordCount), // Ensure word count is not negative
+        updatedAt: new Date()
+      },
+      { 
+        new: true, 
+        session,
+        runValidators: true 
+      }
     );
 
-    if (!updatedChapter) {
-      return res.status(404).json({ message: 'Chapter not found' });
-    }
+    // Recalculate novel word count
+    await recalculateNovelWordCount(existingChapter.novelId, session);
 
-    // Only update novel if content or title changes, not just mode
-    if (title || content) {
-      // Clear novel caches
-      clearNovelCaches();
-    }
+    // Update novel's timestamp
+    await Novel.findByIdAndUpdate(
+      existingChapter.novelId,
+      { updatedAt: new Date() },
+      { session }
+    );
 
-    // Check for auto-unlock if chapter was changed to paid mode
-    if (req.body.mode === 'paid' && originalChapter.mode !== 'paid') {
-      // Import the checkAndUnlockContent function from novels.js
-      const { checkAndUnlockContent } = await import('./novels.js');
-      await checkAndUnlockContent(originalChapter.novelId);
-    }
-    
-    res.json(updatedChapter);
+    await session.commitTransaction();
+
+    // Clear novel caches
+    clearNovelCaches();
+
+    // Notify clients of the update
+    notifyAllClients('update', {
+      type: 'chapter_updated',
+      novelId: existingChapter.novelId,
+      chapterId: updatedChapter._id,
+      chapterTitle: updatedChapter.title,
+      timestamp: new Date().toISOString()
+    });
+
+    // Populate and return the updated chapter
+    const populatedChapter = await populateStaffNames(updatedChapter.toObject());
+    res.json(populatedChapter);
+
   } catch (err) {
+    await session.abortTransaction();
     console.error('Error updating chapter:', err);
     res.status(400).json({ message: err.message });
+  } finally {
+    session.endSession();
   }
 });
 
@@ -762,6 +708,9 @@ router.delete('/:id', auth, async (req, res) => {
       { chapterId: new mongoose.Types.ObjectId(chapterId) },
       { session }
     );
+
+    // Recalculate novel word count
+    await recalculateNovelWordCount(novelId, session);
 
     // Update novel's timestamp
     await Novel.findByIdAndUpdate(
@@ -954,7 +903,8 @@ router.post('/', auth, async (req, res) => {
       proofreader,
       mode = 'free',
       chapterBalance = 0,
-      footnotes = []
+      footnotes = [],
+      wordCount = 0
     } = req.body;
 
     // Validate required fields
@@ -1001,7 +951,8 @@ router.post('/', auth, async (req, res) => {
       proofreader,
       mode,
       chapterBalance: mode === 'paid' ? chapterBalance : 0,
-      footnotes
+      footnotes,
+      wordCount: Math.max(0, wordCount) // Ensure word count is not negative
     });
 
     // Save the chapter
@@ -1016,6 +967,9 @@ router.post('/', auth, async (req, res) => {
       },
       { session }
     );
+
+    // Recalculate novel word count
+    await recalculateNovelWordCount(novelId, session);
 
     // Update novel's timestamp
     await Novel.findByIdAndUpdate(

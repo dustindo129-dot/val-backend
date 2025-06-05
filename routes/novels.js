@@ -561,10 +561,15 @@ router.get("/", optionalAuth, async (req, res) => {
     // Admin dashboard typically requests with limit=1000 and skipPopulation=true
     const isAdminDashboardRequest = req.query.limit === '1000' && req.query.skipPopulation === 'true';
     
-    // Use lightweight query for homepage (ALL users including pj_user get same optimized data)
+    // Check if this is a novel directory request (needs word count)
+    // Novel directory typically requests with limit=1000 but no skipPopulation
+    const isNovelDirectoryRequest = req.query.limit === '1000' && !req.query.skipPopulation;
+    
+    // Use lightweight query for homepage and novel directory (ALL users including pj_user get same optimized data)
     if (!isAdminDashboardRequest) {
-      // Generate cache key based on pagination (same for all users on homepage)
-      const cacheKey = `novels_page_${page}_limit_${limit}_homepage`;
+      // Generate cache key based on pagination and request type
+      const requestType = isNovelDirectoryRequest ? 'directory' : 'homepage';
+      const cacheKey = `novels_page_${page}_limit_${limit}_${requestType}`;
       const cachedData = bypass ? null : cache.get(cacheKey);
       
       if (cachedData && !bypass) {
@@ -574,22 +579,30 @@ router.get("/", optionalAuth, async (req, res) => {
 
       console.log('Fetching fresh novel list data from database');
 
+      // Create projection based on request type
+      const projection = {
+        title: 1,
+        illustration: 1,
+        status: 1,
+        genres: 1,
+        description: 1,
+        updatedAt: 1
+        // Only fields actually used on homepage/directory
+        // Exclude: note, active, inactive, novelBalance, novelBudget, author, illustrator, alternativeTitles, createdAt
+      };
+      
+      // Add wordCount only for novel directory requests
+      if (isNovelDirectoryRequest) {
+        projection.wordCount = 1;
+      }
+
       const [result] = await Novel.aggregate([
         {
           $facet: {
             total: [{ $count: 'count' }],
             novels: [
               {
-                $project: {
-                  title: 1,
-                  illustration: 1,
-                  status: 1,
-                  genres: 1,
-                  description: 1,
-                  updatedAt: 1
-                  // Only fields actually used on homepage
-                  // Exclude: note, active, inactive, novelBalance, novelBudget, author, illustrator, alternativeTitles, createdAt
-                }
+                $project: projection
               },
               // Latest chapters for display (homepage shows up to 3)
               {
