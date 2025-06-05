@@ -599,6 +599,11 @@ router.put('/:id', auth, async (req, res) => {
       });
     }
 
+    // Check if content or word count changed (to determine if word count recalculation is needed)
+    const contentChanged = content && content !== existingChapter.content;
+    const wordCountChanged = wordCount !== existingChapter.wordCount;
+    const shouldRecalculateWordCount = contentChanged || wordCountChanged;
+
     // Update the chapter
     const updatedChapter = await Chapter.findByIdAndUpdate(
       chapterId,
@@ -621,8 +626,10 @@ router.put('/:id', auth, async (req, res) => {
       }
     );
 
-    // Recalculate novel word count
-    await recalculateNovelWordCount(existingChapter.novelId, session);
+    // Only recalculate novel word count if content or word count actually changed
+    if (shouldRecalculateWordCount) {
+      await recalculateNovelWordCount(existingChapter.novelId, session);
+    }
 
     // Update novel's timestamp
     await Novel.findByIdAndUpdate(
