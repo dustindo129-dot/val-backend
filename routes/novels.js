@@ -473,7 +473,9 @@ router.get("/hot", async (req, res) => {
         const recentNovels = await Novel.aggregate([
           {
             $match: {
-              _id: { $nin: existingNovelIds.map(id => mongoose.Types.ObjectId.createFromHexString(id)) }
+              _id: { $nin: existingNovelIds.map(id => 
+                typeof id === 'string' ? mongoose.Types.ObjectId.createFromHexString(id) : id
+              ) }
             }
           },
           // Sort by updatedAt (most recent first)

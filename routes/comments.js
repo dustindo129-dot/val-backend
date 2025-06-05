@@ -116,6 +116,7 @@ router.get('/', async (req, res) => {
           user: {
             _id: '$userInfo._id',
             username: '$userInfo.username',
+            displayName: '$userInfo.displayName',
             avatar: '$userInfo.avatar'
           }
         }
@@ -187,7 +188,7 @@ router.get('/recent', async (req, res) => {
             localField: 'user',
             foreignField: '_id',
             pipeline: [
-              { $project: { username: 1, avatar: 1 } }
+              { $project: { username: 1, displayName: 1, avatar: 1 } }
             ],
             as: 'userInfo'
           }
@@ -299,6 +300,7 @@ router.get('/recent', async (req, res) => {
             user: {
               _id: '$userInfo._id',
               username: '$userInfo.username',
+              displayName: '$userInfo.displayName',
               avatar: '$userInfo.avatar'
             }
           }
