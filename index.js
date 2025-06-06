@@ -15,7 +15,7 @@ import { createServer } from 'vite';
 import isBot from './utils/isBot.js';
 import sirv from 'sirv';
 import fs from 'fs';
-import { cleanupStaleConnections, listConnectedClients } from './services/sseService.js';
+import { cleanupStaleConnections, listConnectedClients, performHealthCheck } from './services/sseService.js';
 
 // Increase buffer limits and thread pool size
 process.env.UV_THREADPOOL_SIZE = 128; 
@@ -492,10 +492,10 @@ app.listen(port, () => {
   console.log('Frontend URL:', process.env.FRONTEND_URL);
   console.log('Environment:', process.env.NODE_ENV);
   
-  // Set up periodic cleanup of stale SSE connections
+  // Set up periodic SSE health checks and cleanup
   setInterval(() => {
-    cleanupStaleConnections();
-  }, 30000); // Check every 30 seconds
+    performHealthCheck();
+  }, 30000); // Comprehensive check every 30 seconds
   
   // Periodically list all connected clients (for debugging)
   setInterval(() => {

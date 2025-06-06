@@ -31,18 +31,27 @@ export const addClient = (client) => {
 
 // Remove a client from the set
 export const removeClient = (client) => {
+  // Check if client exists before attempting removal
+  if (!sseClients.has(client)) {
+    // Client already removed, return false to indicate no action taken
+    return false;
+  }
+  
   // Get the client ID before removing
   const clientId = clientIds.get(client) || 'unknown';
   
-  // Delete from both data structures
-  sseClients.delete(client);
-  clientIds.delete(client);
+  // Delete from both data structures atomically
+  const wasInSet = sseClients.delete(client);
+  const wasInMap = clientIds.delete(client);
   
-  const tabInfo = client.info?.tabId ? ` (Tab: ${client.info.tabId})` : '';
-  console.log(`Client ${clientId}${tabInfo} disconnected. Total clients: ${sseClients.size}`);
+  // Only log if client was actually removed
+  if (wasInSet || wasInMap) {
+    const tabInfo = client.info?.tabId ? ` (Tab: ${client.info.tabId})` : '';
+    console.log(`Client ${clientId}${tabInfo} disconnected. Total clients: ${sseClients.size}`);
+  }
   
-  // Return true if client was found and removed
-  return clientId !== 'unknown';
+  // Return true only if client was actually found and removed
+  return wasInSet || wasInMap;
 };
 
 // Find duplicate tabs by tabId
@@ -124,19 +133,31 @@ export const listConnectedClients = () => {
 // Check for stale connections (should be called periodically)
 export const cleanupStaleConnections = () => {
   let removedCount = 0;
+  const staleClients = [];
   
-  // Send a ping to each client, remove those that error out
+  // First pass: identify stale connections
   sseClients.forEach(client => {
     try {
+      // Check if the response is still writable
+      if (client.res.writableEnded || client.res.destroyed) {
+        staleClients.push(client);
+        return;
+      }
+      
       // Send a comment as a ping (will be ignored by EventSource but keeps connection alive)
       const clientId = clientIds.get(client) || 'unknown';
       const tabId = client.info?.tabId || 'unknown';
       client.res.write(`: ping ${clientId}:${tabId}\n\n`);
     } catch (error) {
-      // Connection is dead, remove it
-      if (removeClient(client)) {
-        removedCount++;
-      }
+      // Connection is dead, mark for removal
+      staleClients.push(client);
+    }
+  });
+  
+  // Second pass: remove stale connections
+  staleClients.forEach(client => {
+    if (removeClient(client)) {
+      removedCount++;
     }
   });
   
@@ -192,4 +213,38 @@ export const sendMessageToClient = (clientId, event, data) => {
       removeClient(targetClient);
     }
   }
+};
+
+// Comprehensive health check that combines cleanup and duplicate detection
+export const performHealthCheck = () => {
+  console.log('=== SSE Health Check ===');
+  
+  // Clean up stale connections first
+  const removedCount = cleanupStaleConnections();
+  
+  // Check for duplicate tabs
+  const duplicateTabs = findDuplicateTabs();
+  
+  if (duplicateTabs.length > 0) {
+    console.log(`⚠️  Found ${duplicateTabs.length} duplicate tab connections:`);
+    duplicateTabs.forEach(tabId => {
+      const tabClients = [];
+      sseClients.forEach(client => {
+        if (client.info?.tabId === tabId) {
+          const clientId = clientIds.get(client) || 'unknown';
+          tabClients.push(clientId);
+        }
+      });
+      console.log(`   - Tab ${tabId}: clients ${tabClients.join(', ')}`);
+    });
+  }
+  
+  // Summary
+  console.log(`Health check complete: ${sseClients.size} active connections, ${removedCount} stale removed, ${duplicateTabs.length} duplicate tabs`);
+  
+  return {
+    activeConnections: sseClients.size,
+    staleRemoved: removedCount,
+    duplicateTabs: duplicateTabs.length
+  };
 }; 

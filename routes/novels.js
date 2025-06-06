@@ -6,7 +6,7 @@ import Chapter from "../models/Chapter.js";
 import Module from "../models/Module.js";
 import { cache, clearNovelCaches, notifyAllClients, shouldBypassCache } from '../utils/cacheUtils.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
-import { addClient, removeClient } from '../services/sseService.js';
+import { addClient, removeClient, sseClients } from '../services/sseService.js';
 import Request from '../models/Request.js';
 import Contribution from '../models/Contribution.js';
 import { createNovelTransaction } from '../routes/novelTransactions.js';
@@ -119,6 +119,16 @@ router.get('/sse', (req, res) => {
     timestamp: Date.now()
   };
 
+  // Check for connection limits per IP (prevent abuse)
+  const clientsFromSameIP = Array.from(sseClients).filter(client => 
+    client.info?.ip === clientInfo.ip
+  ).length;
+  
+  if (clientsFromSameIP > 20) {
+    console.warn(`Too many connections from IP ${clientInfo.ip}: ${clientsFromSameIP}`);
+    return res.status(429).json({ error: 'Too many connections from this IP' });
+  }
+
   // Send initial connection message with client ID
   const client = { res, info: clientInfo };
   const clientId = addClient(client);
@@ -140,42 +150,61 @@ router.get('/sse', (req, res) => {
   // Send a ping every 15 seconds to keep the connection alive (shorter interval)
   // Also send heartbeat to detect broken connections faster
   const pingInterval = setInterval(() => {
+    // Skip ping if cleanup already happened
+    if (cleanedUp) {
+      clearInterval(pingInterval);
+      return;
+    }
+    
     try {
       // Check if connection is still writable
       if (res.writableEnded || res.destroyed) {
         clearInterval(pingInterval);
-        removeClient(client);
+        cleanup('connection ended');
         return;
       }
       
-      res.write(`: heartbeat ${Date.now()}\n\n`);
+      res.write(`: heartbeat ${clientId}:${clientInfo.tabId} ${Date.now()}\n\n`);
     } catch (error) {
       console.error('SSE ping error:', error);
       clearInterval(pingInterval);
-      removeClient(client);
+      cleanup('ping error');
     }
   }, 15000); // Reduced from 20 seconds to 15 seconds
 
+  // Track cleanup state to prevent multiple calls
+  let cleanedUp = false;
+  
   // Handle multiple types of disconnection
-  const cleanup = () => {
+  const cleanup = (reason = 'unknown') => {
+    if (cleanedUp) {
+      return; // Already cleaned up, prevent double execution
+    }
+    cleanedUp = true;
+    
     clearInterval(pingInterval);
-    removeClient(client);
+    const wasRemoved = removeClient(client);
+    
+    // Only log if this was the cleanup that actually removed the client
+    if (wasRemoved && reason !== 'unknown') {
+      console.log(`SSE cleanup triggered by: ${reason}`);
+    }
   };
 
   // Handle client disconnect
-  req.on('close', cleanup);
+  req.on('close', () => cleanup('client close'));
   req.on('error', (error) => {
     console.error('SSE request error:', error);
-    cleanup();
+    cleanup('request error');
   });
   
   // Handle response errors
   res.on('error', (error) => {
     console.error('SSE response error:', error);
-    cleanup();
+    cleanup('response error');
   });
   
-  res.on('finish', cleanup);
+  res.on('finish', () => cleanup('response finish'));
 });
 
 // Add cache control headers middleware
