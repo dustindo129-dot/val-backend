@@ -6,7 +6,7 @@ import Chapter from "../models/Chapter.js";
 import Module from "../models/Module.js";
 import { cache, clearNovelCaches, notifyAllClients, shouldBypassCache } from '../utils/cacheUtils.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
-import { addClient, removeClient, sseClients } from '../services/sseService.js';
+import { addClient, removeClient, sseClients, broadcastEvent, listConnectedClients, performHealthCheck, analyzeTabBehavior, getTabConnectionHistory } from '../services/sseService.js';
 import Request from '../models/Request.js';
 import Contribution from '../models/Contribution.js';
 import { createNovelTransaction } from '../routes/novelTransactions.js';
@@ -55,6 +55,76 @@ const dedupQuery = async (key, queryFn) => {
   }
 };
 
+// Add debug endpoint before SSE endpoint
+router.get('/debug/tab/:tabId', async (req, res) => {
+  try {
+    const { tabId } = req.params;
+    const analysis = analyzeTabBehavior(tabId);
+    
+    if (!analysis) {
+      return res.status(404).json({ error: 'Tab not found or no history available' });
+    }
+    
+    res.json({
+      tabId,
+      analysis: {
+        totalEvents: analysis.history.length,
+        stats: analysis.stats,
+        recentEvents: analysis.history.slice(-20),
+        summary: {
+          connectionsPerMinute: analysis.stats ? (analysis.stats.totalConnections / Math.max(1, (Date.now() - analysis.history[0]?.timestamp) / 60000)).toFixed(2) : 0,
+          avgReconnectInterval: analysis.stats?.connectionFrequency.length > 0 
+            ? Math.round(analysis.stats.connectionFrequency.reduce((a, b) => a + b, 0) / analysis.stats.connectionFrequency.length)
+            : 0
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error in debug endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Debug endpoint to analyze the problematic tab specifically 
+router.get('/debug/problematic-tab', async (req, res) => {
+  try {
+    const problematicTabId = 'tab_1749148822653_8oekv3a0';
+    console.log(`=== FORCE ANALYZING PROBLEMATIC TAB: ${problematicTabId} ===`);
+    const analysis = analyzeTabBehavior(problematicTabId);
+    
+    if (!analysis) {
+      console.log(`No data found for problematic tab ${problematicTabId}`);
+      return res.json({ 
+        message: `No connection history found for tab ${problematicTabId}`,
+        tabId: problematicTabId,
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    console.log(`Found ${analysis.history.length} events for problematic tab`);
+    res.json({
+      tabId: problematicTabId,
+      timestamp: new Date().toISOString(),
+      analysis: {
+        totalEvents: analysis.history.length,
+        stats: analysis.stats,
+        recentEvents: analysis.history.slice(-20),
+        allEvents: analysis.history, // Include all events for this specific tab
+        summary: {
+          connectionsPerMinute: analysis.stats ? (analysis.stats.totalConnections / Math.max(1, (Date.now() - analysis.history[0]?.timestamp) / 60000)).toFixed(2) : 0,
+          avgReconnectInterval: analysis.stats?.connectionFrequency.length > 0 
+            ? Math.round(analysis.stats.connectionFrequency.reduce((a, b) => a + b, 0) / analysis.stats.connectionFrequency.length)
+            : 0,
+          isCurrentlyProblematic: analysis.stats?.connectionFrequency.some(interval => interval < 5000) || false
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error in problematic tab debug endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Handle CORS preflight for SSE endpoint
 router.options('/sse', (req, res) => {
   const origin = req.headers.origin;
@@ -80,7 +150,7 @@ router.options('/sse', (req, res) => {
 });
 
 // Server-Sent Events endpoint for real-time updates
-router.get('/sse', (req, res) => {
+router.get('/sse', async (req, res) => {
   // Get the origin from the request
   const origin = req.headers.origin;
   
@@ -113,35 +183,61 @@ router.get('/sse', (req, res) => {
     return;
   }
 
-  // Store client IP, user agent and tab ID to help identify unique clients
-  const clientInfo = {
+  // Create client object with additional info
+  const client = {
+    res,
+    info: {
+      tabId: req.query.tabId || 'unknown',
+      ip: req.ip,
+      userAgent: req.get('User-Agent'),
+      timestamp: Date.now(),
+      url: req.originalUrl
+    }
+  };
+
+  console.log(`🔌 New SSE connection request from Tab: ${client.info.tabId}, IP: ${client.info.ip}`);
+
+  // Track connection attempt
+  if (client.info.tabId && client.info.tabId !== 'unknown') {
+    // Check if this might be a rapid reconnection
+    const history = getTabConnectionHistory(client.info.tabId);
+    if (history.stats && history.stats.lastConnectionTime) {
+      const timeSinceLastConnection = Date.now() - history.stats.lastConnectionTime;
+      if (timeSinceLastConnection < 5000) { // Less than 5 seconds
+        console.log(`⚠️  RAPID RECONNECTION detected for ${client.info.tabId}: ${timeSinceLastConnection}ms since last connection`);
+      }
+    }
+  }
+
+  // Update client info with parsed data
+  client.info = {
+    ...client.info,
     ip: req.ip || req.socket.remoteAddress,
-    userAgent: req.headers['user-agent'] || 'unknown',
+    userAgent: req.headers['user-agent'] || client.info.userAgent || 'unknown',
     tabId: req.query.tabId || `manual_${Date.now()}`,
-    timestamp: Date.now()
+    timestamp: client.info.timestamp
   };
 
   // Check for connection limits per IP (prevent abuse)
-  const clientsFromSameIP = Array.from(sseClients).filter(client => 
-    client.info?.ip === clientInfo.ip
+  const clientsFromSameIP = Array.from(sseClients).filter(existingClient => 
+    existingClient.info?.ip === client.info.ip
   ).length;
   
   if (clientsFromSameIP > 20) {
-    console.warn(`Too many connections from IP ${clientInfo.ip}: ${clientsFromSameIP}`);
+    console.warn(`Too many connections from IP ${client.info.ip}: ${clientsFromSameIP}`);
     return res.status(429).json({ error: 'Too many connections from this IP' });
   }
 
   // Check for existing connections from the same tab
-  const existingTabConnections = Array.from(sseClients).filter(client => 
-    client.info?.tabId === clientInfo.tabId
+  const existingTabConnections = Array.from(sseClients).filter(existingClient => 
+    existingClient.info?.tabId === client.info.tabId
   ).length;
   
   if (existingTabConnections > 0) {
-    console.log(`Tab ${clientInfo.tabId} already has ${existingTabConnections} connection(s), proceeding with new connection (server will clean up duplicates)`);
+    console.log(`Tab ${client.info.tabId} already has ${existingTabConnections} connection(s), proceeding with new connection (server will clean up duplicates)`);
   }
 
-  // Send initial connection message with client ID
-  const client = { res, info: clientInfo };
+  // Send initial connection message with client ID  
   const clientId = addClient(client);
   
   // Safely send initial message
@@ -149,7 +245,7 @@ router.get('/sse', (req, res) => {
     res.write(`data: ${JSON.stringify({ 
       message: 'Connected to novel updates',
       clientId: clientId,
-      tabId: clientInfo.tabId,
+      tabId: client.info.tabId,
       timestamp: Date.now() 
     })}\n\n`);
   } catch (writeError) {
@@ -175,7 +271,7 @@ router.get('/sse', (req, res) => {
         return;
       }
       
-      res.write(`: heartbeat ${clientId}:${clientInfo.tabId} ${Date.now()}\n\n`);
+      res.write(`: heartbeat ${clientId}:${client.info.tabId} ${Date.now()}\n\n`);
     } catch (error) {
       console.error('SSE ping error:', error);
       clearInterval(pingInterval);
@@ -203,10 +299,18 @@ router.get('/sse', (req, res) => {
   };
 
   // Handle client disconnect
-  req.on('close', () => cleanup('client close'));
+  req.on('close', () => {
+    if (client.cleanupState !== 'cleaning') {
+      console.log(`🔌 Client ${clientId} (Tab: ${client.info.tabId}) disconnected via 'close' event`);
+    }
+    cleanup('close_event');
+  });
+
   req.on('error', (error) => {
-    console.error('SSE request error:', error);
-    cleanup('request error');
+    if (client.cleanupState !== 'cleaning') {
+      console.log(`🔌 Client ${clientId} (Tab: ${client.info.tabId}) error:`, error.message);
+    }
+    cleanup('error_event');
   });
   
   // Handle response errors
