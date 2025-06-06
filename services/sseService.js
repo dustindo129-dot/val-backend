@@ -73,17 +73,6 @@ const trackTabConnection = (tabId, eventType, clientId = null, details = {}) => 
   } else if (eventType === 'duplicate_event_sent') {
     stats.duplicateEvents++;
   }
-  
-  // Log detailed info for problematic tab
-  if (tabId === 'tab_1749148822653_8oekv3a0') {
-    console.log(`🔍 TRACKING [${tabId}] ${eventType.toUpperCase()}: Client ${clientId || 'N/A'}`);
-    if (details.reason) console.log(`   └─ Reason: ${details.reason}`);
-    if (stats.connectionFrequency.length > 0) {
-      const avgInterval = stats.connectionFrequency.reduce((a, b) => a + b, 0) / stats.connectionFrequency.length;
-      console.log(`   └─ Avg reconnect interval: ${Math.round(avgInterval)}ms`);
-    }
-    console.log(`   └─ Stats: ${stats.totalConnections} connections, ${stats.totalDisconnections} disconnections, ${stats.duplicateEvents} duplicate events`);
-  }
 };
 
 // Get connection history for debugging
@@ -175,10 +164,7 @@ export const findDuplicateTabs = () => {
 
 // List all connected clients (for debugging)
 export const listConnectedClients = () => {
-  console.log(`=== Connected Clients (${sseClients.size}) ===`);
-  
   if (sseClients.size === 0) {
-    console.log('No clients connected');
     return [];
   }
   
@@ -202,7 +188,6 @@ export const listConnectedClients = () => {
     
     // Check if this tab has duplicates
     const isDuplicate = (tabCounts.get(tabId) || 0) > 1;
-    const duplicateMarker = isDuplicate ? ' [DUPLICATE]' : '';
     
     const clientInfo = {
       id: clientId,
@@ -213,18 +198,8 @@ export const listConnectedClients = () => {
       isDuplicate
     };
     
-    console.log(`  - Client ${clientId} (Tab: ${tabId})${duplicateMarker}`);
     clientList.push(clientInfo);
   });
-  
-  // Check for duplicates
-  const duplicateTabs = findDuplicateTabs();
-  if (duplicateTabs.length > 0) {
-    console.log(`WARNING: Found ${duplicateTabs.length} duplicate tab connections!`);
-    duplicateTabs.forEach(tabId => {
-      console.log(`  - Tab ${tabId} has multiple connections`);
-    });
-  }
   
   return clientList;
 };
@@ -259,11 +234,6 @@ export const cleanupStaleConnections = () => {
       removedCount++;
     }
   });
-  
-  if (removedCount > 0) {
-    console.log(`Cleaned up ${removedCount} stale connections. Remaining clients: ${sseClients.size}`);
-    listConnectedClients();
-  }
   
   return removedCount;
 };
@@ -323,15 +293,11 @@ const trackIgnoredDuplicate = (tabId) => {
   const record = ignoringDuplicateTabs.get(tabId);
   record.count++;
   
-  console.log(`🚫 Tab ${tabId} ignored duplicate event (count: ${record.count})`);
-  
   if (record.count >= maxIgnoredDuplicates) {
     const blockUntil = Date.now() + blockDuration;
     record.blockUntil = blockUntil;
     record.lastBlocked = Date.now();
     record.count = 0; // Reset counter
-    
-    console.log(`🚫 BLOCKING tab ${tabId} for ${blockDuration}ms due to repeated duplicate event ignoring`);
     
     // Track the blocking
     trackTabConnection(tabId, 'blocked', null, {
@@ -352,8 +318,6 @@ const isTabBlocked = (tabId) => {
   const now = Date.now();
   
   if (now < record.blockUntil) {
-    const remainingTime = record.blockUntil - now;
-    console.log(`🚫 Tab ${tabId} is BLOCKED for another ${Math.round(remainingTime/1000)}s`);
     return true;
   }
   
@@ -362,8 +326,6 @@ const isTabBlocked = (tabId) => {
 
 // Comprehensive health check that combines cleanup and duplicate detection
 export const performHealthCheck = () => {
-  console.log('=== SSE Health Check ===');
-  
   // Clean up stale connections first
   const removedCount = cleanupStaleConnections();
   
@@ -372,24 +334,9 @@ export const performHealthCheck = () => {
   let duplicatesClosed = 0;
   
   if (duplicateTabs.length > 0) {
-    console.log(`⚠️  Found ${duplicateTabs.length} duplicate tab connections:`);
-    duplicateTabs.forEach(tabId => {
-      const tabClients = [];
-      sseClients.forEach(client => {
-        if (client.info?.tabId === tabId) {
-          const clientId = clientIds.get(client) || 'unknown';
-          tabClients.push(clientId);
-        }
-      });
-      console.log(`   - Tab ${tabId}: clients ${tabClients.join(', ')}`);
-    });
-    
     // Close duplicate connections
     duplicatesClosed = closeDuplicateConnections();
   }
-  
-  // Summary
-  console.log(`Health check complete: ${sseClients.size} active connections, ${removedCount} stale removed, ${duplicateTabs.length} duplicate tabs, ${duplicatesClosed} duplicates closed`);
   
   return {
     activeConnections: sseClients.size,
@@ -431,8 +378,6 @@ export const closeDuplicateConnections = () => {
       const hasRapidReconnections = history.stats?.connectionFrequency.some(interval => interval < 5000);
       
       if (hasRapidReconnections) {
-        console.log(`⚠️  Tab ${tabId} has rapid reconnections - checking for ignored duplicates`);
-        
         // Check if this tab reconnected quickly after last duplicate event
         const recentEvents = history.history.slice(-5);
         const lastDuplicateEvent = recentEvents.findLast(e => e.eventType === 'duplicate_event_sent');
@@ -441,7 +386,6 @@ export const closeDuplicateConnections = () => {
         if (lastDuplicateEvent && lastConnection && 
             lastConnection.timestamp > lastDuplicateEvent.timestamp &&
             (lastConnection.timestamp - lastDuplicateEvent.timestamp) < 10000) {
-          console.log(`🚫 Tab ${tabId} reconnected ${lastConnection.timestamp - lastDuplicateEvent.timestamp}ms after duplicate event - IGNORING DUPLICATES!`);
           trackIgnoredDuplicate(tabId);
         }
       }
@@ -453,8 +397,6 @@ export const closeDuplicateConnections = () => {
       for (let i = 1; i < connections.length; i++) {
         const { client, clientId } = connections[i];
         try {
-          console.log(`🔄 Closing duplicate connection: Client ${clientId} (Tab: ${tabId})`);
-          
           // Track the duplicate event
           trackTabConnection(tabId, 'duplicate_event_sent', clientId, {
             reason: 'duplicate_connection_cleanup',
@@ -496,8 +438,6 @@ export const closeDuplicateConnections = () => {
           // Close the connection after a much longer delay to ensure messages are sent and processed
           setTimeout(() => {
             if (client.res && !client.res.destroyed && !client.res.writableEnded) {
-              console.log(`🔄 Forcibly closing duplicate connection: Client ${clientId} (Tab: ${tabId}) after extended delay`);
-              
               // Track the forced closure
               trackTabConnection(tabId, 'forced_closure', clientId, {
                 reason: 'duplicate_cleanup_timeout'
@@ -505,7 +445,7 @@ export const closeDuplicateConnections = () => {
               
               client.res.end();
             }
-          }, 3000); // Increased to 3 seconds to allow client processing
+          }, 3000); // 3 seconds to allow client processing
           
           closedCount++;
         } catch (error) {
@@ -515,10 +455,6 @@ export const closeDuplicateConnections = () => {
     }
   });
   
-  if (closedCount > 0) {
-    console.log(`Closed ${closedCount} duplicate connections`);
-  }
-  
   return closedCount;
 };
 
@@ -527,34 +463,7 @@ export const analyzeTabBehavior = (tabId) => {
   const data = getTabConnectionHistory(tabId);
   
   if (!data.history.length) {
-    console.log(`No connection history found for tab ${tabId}`);
     return null;
-  }
-  
-  console.log(`=== Analysis for Tab ${tabId} ===`);
-  console.log(`Total events: ${data.history.length}`);
-  console.log(`Stats:`, data.stats);
-  
-  console.log('\nRecent events:');
-  data.history.slice(-10).forEach((event, index) => {
-    const time = new Date(event.timestamp).toLocaleTimeString();
-    console.log(`  ${index + 1}. [${time}] ${event.eventType} - Client ${event.clientId || 'N/A'}`);
-    if (event.details.reason) {
-      console.log(`      └─ ${event.details.reason}`);
-    }
-  });
-  
-  if (data.stats?.connectionFrequency.length > 0) {
-    const intervals = data.stats.connectionFrequency;
-    const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-    const minInterval = Math.min(...intervals);
-    const maxInterval = Math.max(...intervals);
-    
-    console.log(`\nConnection intervals:`);
-    console.log(`  Average: ${Math.round(avgInterval)}ms`);
-    console.log(`  Min: ${minInterval}ms`);
-    console.log(`  Max: ${maxInterval}ms`);
-    console.log(`  Last 5: [${intervals.slice(-5).map(i => Math.round(i)).join(', ')}]ms`);
   }
   
   return data;

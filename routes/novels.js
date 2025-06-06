@@ -89,11 +89,9 @@ router.get('/debug/tab/:tabId', async (req, res) => {
 router.get('/debug/problematic-tab', async (req, res) => {
   try {
     const problematicTabId = 'tab_1749148822653_8oekv3a0';
-    console.log(`=== FORCE ANALYZING PROBLEMATIC TAB: ${problematicTabId} ===`);
     const analysis = analyzeTabBehavior(problematicTabId);
     
     if (!analysis) {
-      console.log(`No data found for problematic tab ${problematicTabId}`);
       return res.json({ 
         message: `No connection history found for tab ${problematicTabId}`,
         tabId: problematicTabId,
@@ -101,7 +99,6 @@ router.get('/debug/problematic-tab', async (req, res) => {
       });
     }
     
-    console.log(`Found ${analysis.history.length} events for problematic tab`);
     res.json({
       tabId: problematicTabId,
       timestamp: new Date().toISOString(),
@@ -154,28 +151,31 @@ router.get('/sse', async (req, res) => {
   // Get the origin from the request
   const origin = req.headers.origin;
   
-  // Set headers for SSE with better timeout handling
+  // Define allowed origins
+  const allowedOrigins = [
+    'http://localhost:3000',
+    'http://localhost:5173', // Vite dev server
+    'https://valvrareteam.net',
+    'https://val-bh6h9.ondigitalocean.app' // Add DigitalOcean domain
+  ];
+
+  // Check if origin is allowed
+  if (!allowedOrigins.includes(origin)) {
+    return res.status(403).json({ error: 'Origin not allowed' });
+  }
+
+  // Set SSE headers with CORS
   const headers = {
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'X-Accel-Buffering': 'no' // Disable nginx buffering for SSE
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Allow-Headers': 'Cache-Control',
+    'Pragma': 'no-cache',
+    'Expires': '0'
   };
-  
-  // Set CORS origin header to match the requesting domain
-  if (origin && (
-    origin === 'https://valvrareteam.net' || 
-    origin === 'https://valvrareteam.netlify.app' || 
-    origin === 'https://val-bh6h9.ondigitalocean.app' ||
-    origin === 'http://localhost:5173'
-  )) {
-    headers['Access-Control-Allow-Origin'] = origin;
-    headers['Access-Control-Allow-Credentials'] = 'true';
-  }
-  
-  // Handle potential connection errors early
+
   try {
     res.writeHead(200, headers);
   } catch (writeError) {
@@ -195,12 +195,9 @@ router.get('/sse', async (req, res) => {
     }
   };
 
-  console.log(`🔌 New SSE connection request from Tab: ${client.info.tabId}, IP: ${client.info.ip}`);
-
   // Check if this tab is blocked due to ignoring duplicate events
   if (client.info.tabId && client.info.tabId !== 'unknown') {
     if (isTabBlocked(client.info.tabId)) {
-      console.log(`🚫 REJECTING connection from BLOCKED tab: ${client.info.tabId}`);
       res.status(429).json({ 
         error: 'Tab temporarily blocked due to repeated duplicate event ignoring',
         tabId: client.info.tabId,
@@ -213,9 +210,7 @@ router.get('/sse', async (req, res) => {
     const history = getTabConnectionHistory(client.info.tabId);
     if (history.stats && history.stats.lastConnectionTime) {
       const timeSinceLastConnection = Date.now() - history.stats.lastConnectionTime;
-      if (timeSinceLastConnection < 5000) { // Less than 5 seconds
-        console.log(`⚠️  RAPID RECONNECTION detected for ${client.info.tabId}: ${timeSinceLastConnection}ms since last connection`);
-      }
+      // Just track rapid reconnections without logging
     }
   }
 
@@ -234,7 +229,6 @@ router.get('/sse', async (req, res) => {
   ).length;
   
   if (clientsFromSameIP > 20) {
-    console.warn(`Too many connections from IP ${client.info.ip}: ${clientsFromSameIP}`);
     return res.status(429).json({ error: 'Too many connections from this IP' });
   }
 
@@ -242,10 +236,6 @@ router.get('/sse', async (req, res) => {
   const existingTabConnections = Array.from(sseClients).filter(existingClient => 
     existingClient.info?.tabId === client.info.tabId
   ).length;
-  
-  if (existingTabConnections > 0) {
-    console.log(`Tab ${client.info.tabId} already has ${existingTabConnections} connection(s), proceeding with new connection (server will clean up duplicates)`);
-  }
 
   // Send initial connection message with client ID  
   const clientId = addClient(client);
@@ -264,8 +254,7 @@ router.get('/sse', async (req, res) => {
     return;
   }
 
-  // Send a ping every 15 seconds to keep the connection alive (shorter interval)
-  // Also send heartbeat to detect broken connections faster
+  // Send a ping every 15 seconds to keep the connection alive
   const pingInterval = setInterval(() => {
     // Skip ping if cleanup already happened
     if (cleanedUp) {
@@ -287,7 +276,7 @@ router.get('/sse', async (req, res) => {
       clearInterval(pingInterval);
       cleanup('ping error');
     }
-  }, 15000); // Reduced from 20 seconds to 15 seconds
+  }, 15000);
 
   // Track cleanup state to prevent multiple calls
   let cleanedUp = false;
@@ -300,26 +289,15 @@ router.get('/sse', async (req, res) => {
     cleanedUp = true;
     
     clearInterval(pingInterval);
-    const wasRemoved = removeClient(client);
-    
-    // Only log if this was the cleanup that actually removed the client
-    if (wasRemoved && reason !== 'unknown') {
-      console.log(`SSE cleanup triggered by: ${reason}`);
-    }
+    removeClient(client);
   };
 
   // Handle client disconnect
   req.on('close', () => {
-    if (client.cleanupState !== 'cleaning') {
-      console.log(`🔌 Client ${clientId} (Tab: ${client.info.tabId}) disconnected via 'close' event`);
-    }
     cleanup('close_event');
   });
 
   req.on('error', (error) => {
-    if (client.cleanupState !== 'cleaning') {
-      console.log(`🔌 Client ${clientId} (Tab: ${client.info.tabId}) error:`, error.message);
-    }
     cleanup('error_event');
   });
   
