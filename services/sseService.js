@@ -17,6 +17,11 @@ const clientIds = new Map();
 const tabConnectionHistory = new Map(); // tabId -> array of connection events
 const tabStats = new Map(); // tabId -> stats object
 
+// Add blacklist for tabs that ignore duplicate events
+const ignoringDuplicateTabs = new Map(); // tabId -> { count, lastBlocked, blockUntil }
+const maxIgnoredDuplicates = 3; // Max ignored duplicate events before blocking
+const blockDuration = 60000; // Block for 1 minute
+
 // Track connection patterns for debugging
 const trackTabConnection = (tabId, eventType, clientId = null, details = {}) => {
   if (!tabConnectionHistory.has(tabId)) {
@@ -88,6 +93,9 @@ export const getTabConnectionHistory = (tabId) => {
     stats: tabStats.get(tabId) || null
   };
 };
+
+// Export the blocking functions for use in routes
+export { isTabBlocked, trackIgnoredDuplicate };
 
 // Add a client to the set
 export const addClient = (client) => {
@@ -306,6 +314,52 @@ export const sendMessageToClient = (clientId, event, data) => {
   }
 };
 
+// Track when a tab ignores a duplicate event (reconnects too quickly)
+const trackIgnoredDuplicate = (tabId) => {
+  if (!ignoringDuplicateTabs.has(tabId)) {
+    ignoringDuplicateTabs.set(tabId, { count: 0, lastBlocked: 0, blockUntil: 0 });
+  }
+  
+  const record = ignoringDuplicateTabs.get(tabId);
+  record.count++;
+  
+  console.log(`🚫 Tab ${tabId} ignored duplicate event (count: ${record.count})`);
+  
+  if (record.count >= maxIgnoredDuplicates) {
+    const blockUntil = Date.now() + blockDuration;
+    record.blockUntil = blockUntil;
+    record.lastBlocked = Date.now();
+    record.count = 0; // Reset counter
+    
+    console.log(`🚫 BLOCKING tab ${tabId} for ${blockDuration}ms due to repeated duplicate event ignoring`);
+    
+    // Track the blocking
+    trackTabConnection(tabId, 'blocked', null, {
+      reason: 'ignored_duplicate_events',
+      blockDuration: blockDuration,
+      blockUntil: new Date(blockUntil).toISOString()
+    });
+  }
+};
+
+// Check if a tab is currently blocked
+const isTabBlocked = (tabId) => {
+  if (!ignoringDuplicateTabs.has(tabId)) {
+    return false;
+  }
+  
+  const record = ignoringDuplicateTabs.get(tabId);
+  const now = Date.now();
+  
+  if (now < record.blockUntil) {
+    const remainingTime = record.blockUntil - now;
+    console.log(`🚫 Tab ${tabId} is BLOCKED for another ${Math.round(remainingTime/1000)}s`);
+    return true;
+  }
+  
+  return false;
+};
+
 // Comprehensive health check that combines cleanup and duplicate detection
 export const performHealthCheck = () => {
   console.log('=== SSE Health Check ===');
@@ -372,6 +426,26 @@ export const closeDuplicateConnections = () => {
   // For each tab with multiple connections, close all but the newest
   tabConnections.forEach((connections, tabId) => {
     if (connections.length > 1) {
+      // Check if tab recently had rapid reconnections (indicates ignoring duplicates)
+      const history = getTabConnectionHistory(tabId);
+      const hasRapidReconnections = history.stats?.connectionFrequency.some(interval => interval < 5000);
+      
+      if (hasRapidReconnections) {
+        console.log(`⚠️  Tab ${tabId} has rapid reconnections - checking for ignored duplicates`);
+        
+        // Check if this tab reconnected quickly after last duplicate event
+        const recentEvents = history.history.slice(-5);
+        const lastDuplicateEvent = recentEvents.findLast(e => e.eventType === 'duplicate_event_sent');
+        const lastConnection = recentEvents.findLast(e => e.eventType === 'connection');
+        
+        if (lastDuplicateEvent && lastConnection && 
+            lastConnection.timestamp > lastDuplicateEvent.timestamp &&
+            (lastConnection.timestamp - lastDuplicateEvent.timestamp) < 10000) {
+          console.log(`🚫 Tab ${tabId} reconnected ${lastConnection.timestamp - lastDuplicateEvent.timestamp}ms after duplicate event - IGNORING DUPLICATES!`);
+          trackIgnoredDuplicate(tabId);
+        }
+      }
+      
       // Sort by timestamp (newest first)
       connections.sort((a, b) => b.timestamp - a.timestamp);
       
@@ -392,7 +466,8 @@ export const closeDuplicateConnections = () => {
             reason: 'duplicate_connection_detected',
             keepNewest: true,
             timestamp: Date.now(),
-            clientId: clientId
+            clientId: clientId,
+            serverMessage: `You have multiple tabs open. This connection will be closed to prevent conflicts.`
           });
           
           // Send the event multiple times with slight delays
@@ -412,13 +487,16 @@ export const closeDuplicateConnections = () => {
           // Send again after 100ms
           setTimeout(sendEvent, 100);
           
-          // Send again after 200ms
-          setTimeout(sendEvent, 200);
+          // Send again after 300ms
+          setTimeout(sendEvent, 300);
           
-          // Close the connection after a longer delay to ensure messages are sent
+          // Send again after 500ms  
+          setTimeout(sendEvent, 500);
+          
+          // Close the connection after a much longer delay to ensure messages are sent and processed
           setTimeout(() => {
             if (client.res && !client.res.destroyed && !client.res.writableEnded) {
-              console.log(`🔄 Forcibly closing duplicate connection: Client ${clientId} (Tab: ${tabId}) after sending duplicate events`);
+              console.log(`🔄 Forcibly closing duplicate connection: Client ${clientId} (Tab: ${tabId}) after extended delay`);
               
               // Track the forced closure
               trackTabConnection(tabId, 'forced_closure', clientId, {
@@ -427,7 +505,7 @@ export const closeDuplicateConnections = () => {
               
               client.res.end();
             }
-          }, 1000); // Increased to 1 second
+          }, 3000); // Increased to 3 seconds to allow client processing
           
           closedCount++;
         } catch (error) {

@@ -6,7 +6,7 @@ import Chapter from "../models/Chapter.js";
 import Module from "../models/Module.js";
 import { cache, clearNovelCaches, notifyAllClients, shouldBypassCache } from '../utils/cacheUtils.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
-import { addClient, removeClient, sseClients, broadcastEvent, listConnectedClients, performHealthCheck, analyzeTabBehavior, getTabConnectionHistory } from '../services/sseService.js';
+import { addClient, removeClient, sseClients, broadcastEvent, listConnectedClients, performHealthCheck, analyzeTabBehavior, getTabConnectionHistory, isTabBlocked, trackIgnoredDuplicate } from '../services/sseService.js';
 import Request from '../models/Request.js';
 import Contribution from '../models/Contribution.js';
 import { createNovelTransaction } from '../routes/novelTransactions.js';
@@ -197,8 +197,18 @@ router.get('/sse', async (req, res) => {
 
   console.log(`🔌 New SSE connection request from Tab: ${client.info.tabId}, IP: ${client.info.ip}`);
 
-  // Track connection attempt
+  // Check if this tab is blocked due to ignoring duplicate events
   if (client.info.tabId && client.info.tabId !== 'unknown') {
+    if (isTabBlocked(client.info.tabId)) {
+      console.log(`🚫 REJECTING connection from BLOCKED tab: ${client.info.tabId}`);
+      res.status(429).json({ 
+        error: 'Tab temporarily blocked due to repeated duplicate event ignoring',
+        tabId: client.info.tabId,
+        message: 'Please close other tabs and wait before reconnecting'
+      });
+      return;
+    }
+    
     // Check if this might be a rapid reconnection
     const history = getTabConnectionHistory(client.info.tabId);
     if (history.stats && history.stats.lastConnectionTime) {
