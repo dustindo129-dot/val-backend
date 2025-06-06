@@ -91,6 +91,8 @@ const corsOptions = {
     // Include production URLs
     'https://valvrareteam.net',
     'https://valvrareteam.netlify.app',
+    // Include DigitalOcean domains
+    'https://val-bh6h9.ondigitalocean.app',
     // Include environment-specific URL if set
     ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])
   ],

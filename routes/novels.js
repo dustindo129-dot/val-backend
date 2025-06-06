@@ -69,6 +69,7 @@ router.options('/sse', (req, res) => {
   if (origin && (
     origin === 'https://valvrareteam.net' || 
     origin === 'https://valvrareteam.netlify.app' || 
+    origin === 'https://val-bh6h9.ondigitalocean.app' ||
     origin === 'http://localhost:5173'
   )) {
     corsHeaders['Access-Control-Allow-Origin'] = origin;
@@ -97,6 +98,7 @@ router.get('/sse', (req, res) => {
   if (origin && (
     origin === 'https://valvrareteam.net' || 
     origin === 'https://valvrareteam.netlify.app' || 
+    origin === 'https://val-bh6h9.ondigitalocean.app' ||
     origin === 'http://localhost:5173'
   )) {
     headers['Access-Control-Allow-Origin'] = origin;

@@ -287,24 +287,35 @@ export const closeDuplicateConnections = () => {
       // Close all but the first (newest) connection
       for (let i = 1; i < connections.length; i++) {
         const { client, clientId } = connections[i];
-        try {
-          console.log(`Closing duplicate connection: Client ${clientId} (Tab: ${tabId})`);
-          client.res.write(`event: duplicate_connection\ndata: ${JSON.stringify({
-            reason: 'duplicate_connection_detected',
-            keepNewest: true
-          })}\n\n`);
-          
-          // Close the connection after a short delay to let the message be sent
-          setTimeout(() => {
-            if (client.res && !client.res.destroyed) {
-              client.res.end();
-            }
-          }, 100);
-          
-          closedCount++;
-        } catch (error) {
-          console.error(`Error closing duplicate connection ${clientId}:`, error);
-        }
+                 try {
+           console.log(`Closing duplicate connection: Client ${clientId} (Tab: ${tabId})`);
+           
+           // Send the duplicate connection event
+           const eventData = JSON.stringify({
+             reason: 'duplicate_connection_detected',
+             keepNewest: true,
+             timestamp: Date.now()
+           });
+           
+           client.res.write(`event: duplicate_connection\ndata: ${eventData}\n\n`);
+           
+           // Force flush the message
+           if (typeof client.res.flush === 'function') {
+             client.res.flush();
+           }
+           
+           // Close the connection after a longer delay to ensure message is sent
+           setTimeout(() => {
+             if (client.res && !client.res.destroyed && !client.res.writableEnded) {
+               console.log(`Forcibly closing duplicate connection: Client ${clientId} (Tab: ${tabId})`);
+               client.res.end();
+             }
+           }, 500); // Increased from 100ms to 500ms
+           
+           closedCount++;
+         } catch (error) {
+           console.error(`Error closing duplicate connection ${clientId}:`, error);
+         }
       }
     }
   });
