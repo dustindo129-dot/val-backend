@@ -685,12 +685,19 @@ router.put('/:id', auth, async (req, res) => {
       await recalculateNovelWordCount(existingChapter.novelId, session);
     }
 
-    // Update novel's timestamp
-    await Novel.findByIdAndUpdate(
-      existingChapter.novelId,
-      { updatedAt: new Date() },
-      { session }
-    );
+    // Only update novel's timestamp for significant changes that should affect "latest updates"
+    // Don't update for simple content edits or manual mode changes
+    // Novel timestamp will be updated automatically when paid content is unlocked via contributions
+    const shouldUpdateNovelTimestamp = 
+      (req.user.role === 'admin' && chapterBalance !== existingChapter.chapterBalance); // Admin changed chapter balance (for accounting purposes)
+
+    if (shouldUpdateNovelTimestamp) {
+      await Novel.findByIdAndUpdate(
+        existingChapter.novelId,
+        { updatedAt: new Date() },
+        { session }
+      );
+    }
 
     await session.commitTransaction();
 
@@ -773,12 +780,8 @@ router.delete('/:id', auth, async (req, res) => {
     // Recalculate novel word count
     await recalculateNovelWordCount(novelId, session);
 
-    // Update novel's timestamp
-    await Novel.findByIdAndUpdate(
-      novelId,
-      { $set: { updatedAt: new Date() } },
-      { session }
-    );
+    // Don't update novel's timestamp when deleting chapters
+    // Chapter deletion is a management action, not new content
 
     await session.commitTransaction();
 

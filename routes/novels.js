@@ -55,18 +55,42 @@ const dedupQuery = async (key, queryFn) => {
   }
 };
 
+// Handle CORS preflight for SSE endpoint
+router.options('/sse', (req, res) => {
+  const origin = req.headers.origin;
+  
+  const corsHeaders = {
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Max-Age': '86400' // 24 hours
+  };
+  
+  // Set CORS origin header to match the requesting domain
+  if (origin && (
+    origin === 'https://valvrareteam.net' || 
+    origin === 'https://valvrareteam.netlify.app' || 
+    origin === 'http://localhost:5173'
+  )) {
+    corsHeaders['Access-Control-Allow-Origin'] = origin;
+    corsHeaders['Access-Control-Allow-Credentials'] = 'true';
+  }
+  
+  res.set(corsHeaders).status(204).send();
+});
+
 // Server-Sent Events endpoint for real-time updates
 router.get('/sse', (req, res) => {
   // Get the origin from the request
   const origin = req.headers.origin;
   
-  // Set headers for SSE
+  // Set headers for SSE with better timeout handling
   const headers = {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type'
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'X-Accel-Buffering': 'no' // Disable nginx buffering for SSE
   };
   
   // Set CORS origin header to match the requesting domain
@@ -79,7 +103,13 @@ router.get('/sse', (req, res) => {
     headers['Access-Control-Allow-Credentials'] = 'true';
   }
   
-  res.writeHead(200, headers);
+  // Handle potential connection errors early
+  try {
+    res.writeHead(200, headers);
+  } catch (writeError) {
+    console.error('Failed to write SSE headers:', writeError);
+    return;
+  }
 
   // Store client IP, user agent and tab ID to help identify unique clients
   const clientInfo = {
@@ -93,28 +123,59 @@ router.get('/sse', (req, res) => {
   const client = { res, info: clientInfo };
   const clientId = addClient(client);
   
-  res.write(`data: ${JSON.stringify({ 
-    message: 'Connected to novel updates',
-    clientId: clientId,
-    tabId: clientInfo.tabId,
-    timestamp: Date.now() 
-  })}\n\n`);
+  // Safely send initial message
+  try {
+    res.write(`data: ${JSON.stringify({ 
+      message: 'Connected to novel updates',
+      clientId: clientId,
+      tabId: clientInfo.tabId,
+      timestamp: Date.now() 
+    })}\n\n`);
+  } catch (writeError) {
+    console.error('Failed to send initial SSE message:', writeError);
+    removeClient(client);
+    return;
+  }
 
-  // Send a ping every 20 seconds to keep the connection alive
+  // Send a ping every 15 seconds to keep the connection alive (shorter interval)
+  // Also send heartbeat to detect broken connections faster
   const pingInterval = setInterval(() => {
     try {
-      res.write(`: ping ${clientId}:${clientInfo.tabId}\n\n`);
+      // Check if connection is still writable
+      if (res.writableEnded || res.destroyed) {
+        clearInterval(pingInterval);
+        removeClient(client);
+        return;
+      }
+      
+      res.write(`: heartbeat ${Date.now()}\n\n`);
     } catch (error) {
+      console.error('SSE ping error:', error);
       clearInterval(pingInterval);
       removeClient(client);
     }
-  }, 20000);
+  }, 15000); // Reduced from 20 seconds to 15 seconds
 
-  // Handle client disconnect
-  req.on('close', () => {
+  // Handle multiple types of disconnection
+  const cleanup = () => {
     clearInterval(pingInterval);
     removeClient(client);
+  };
+
+  // Handle client disconnect
+  req.on('close', cleanup);
+  req.on('error', (error) => {
+    console.error('SSE request error:', error);
+    cleanup();
   });
+  
+  // Handle response errors
+  res.on('error', (error) => {
+    console.error('SSE response error:', error);
+    cleanup();
+  });
+  
+  res.on('finish', cleanup);
 });
 
 // Add cache control headers middleware
@@ -949,7 +1010,6 @@ router.post("/", [auth, admin], async (req, res) => {
       note,
       illustration,
       status: status || 'Ongoing',
-      chapters: [],
       createdAt: new Date(),
       updatedAt: new Date()
     });
@@ -1306,11 +1366,18 @@ router.put("/:id", [auth, admin], async (req, res) => {
     novel.description = description;
     novel.note = note;
     novel.illustration = illustration;
+    
+    // Check if status changed (this should update timestamp for "latest updates")
+    const statusChanged = status && status !== novel.status;
     novel.status = status;
     
-    // Only update timestamp if explicitly requested or preserveTimestamp is not set
-    // Staff changes and other non-content updates should preserve the original timestamp
-    if (!req.body.preserveTimestamp) {
+    // Only update timestamp for significant changes that should affect "latest updates"
+    // - Status changes (completed, ongoing, etc.)
+    // - When explicitly requested (preserveTimestamp = false)
+    // - Don't update for staff changes, description edits, genre updates, etc.
+    const shouldUpdateTimestamp = statusChanged || (!req.body.preserveTimestamp && req.body.forceTimestampUpdate);
+    
+    if (shouldUpdateTimestamp) {
       novel.updatedAt = new Date();
     }
 
@@ -1516,116 +1583,13 @@ router.delete("/:id", auth, async (req, res) => {
   }
 });
 
-/**
- * Get a specific chapter of a novel
- * @route GET /api/novels/:id/chapters/:chapterId
- */
-router.get("/:id/chapters/:chapterId", async (req, res) => {
-  try {
-    const novel = await Novel.findById(req.params.id);
-    if (!novel) {
-      return res.status(404).json({ message: "Novel not found" });
-    }
 
-    const chapter = novel.chapters.find(
-      (ch) => ch._id.toString() === req.params.chapterId
-    );
-    if (!chapter) {
-      return res.status(404).json({ message: "Chapter not found" });
-    }
 
-    res.json(chapter);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
 
-/**
- * Add a new chapter to a novel
- * @route POST /api/novels/:id/chapters
- */
-router.post("/:id/chapters", auth, async (req, res) => {
-  try {
-    const novel = await Novel.findById(req.params.id);
-    if (!novel) {
-      return res.status(404).json({ message: "Novel not found" });
-    }
 
-    const { title, content } = req.body;
 
-    const newChapter = {
-      title,
-      content,
-      createdAt: new Date(),
-    };
 
-    novel.chapters.push(newChapter);
-    novel.updatedAt = new Date();
 
-    await novel.save();
-    res.status(201).json(novel);
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-});
-
-/**
- * Update a chapter
- * @route PUT /api/novels/:id/chapters/:chapterId
- */
-router.put("/:id/chapters/:chapterId", auth, async (req, res) => {
-  try {
-    const novel = await Novel.findById(req.params.id);
-    if (!novel) {
-      return res.status(404).json({ message: "Novel not found" });
-    }
-
-    const chapterIndex = novel.chapters.findIndex(
-      (ch) => ch._id.toString() === req.params.chapterId
-    );
-
-    if (chapterIndex === -1) {
-      return res.status(404).json({ message: "Chapter not found" });
-    }
-
-    const { title, content } = req.body;
-    novel.chapters[chapterIndex].title = title;
-    novel.chapters[chapterIndex].content = content;
-    novel.chapters[chapterIndex].updatedAt = new Date();
-
-    await novel.save();
-    res.json(novel);
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-});
-
-/**
- * Delete a chapter
- * @route DELETE /api/novels/:id/chapters/:chapterId
- */
-router.delete("/:id/chapters/:chapterId", auth, async (req, res) => {
-  try {
-    const novel = await Novel.findById(req.params.id);
-    if (!novel) {
-      return res.status(404).json({ message: "Novel not found" });
-    }
-
-    const chapterIndex = novel.chapters.findIndex(
-      (ch) => ch._id.toString() === req.params.chapterId
-    );
-
-    if (chapterIndex === -1) {
-      return res.status(404).json({ message: "Chapter not found" });
-    }
-
-    novel.chapters.splice(chapterIndex, 1);
-    await novel.save();
-    res.json(novel);
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-});
 
 /**
  * Update novel balance
@@ -2347,6 +2311,7 @@ export async function checkAndUnlockContent(novelId) {
             } else {
               // Cannot afford this chapter, stop here (sequential unlock)
               // This means we cannot proceed to the next module either
+              // Only update budget, not timestamp (no content was unlocked)
               return await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget });
             }
           }
@@ -2355,9 +2320,13 @@ export async function checkAndUnlockContent(novelId) {
       }
     }
 
-    // Update novel budget if anything was unlocked
+    // Update novel budget and timestamp if anything was unlocked
+    // This will make the novel jump to top of "latest updates" when paid content is auto-unlocked
     if (unlocked) {
-      await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget });
+      await Novel.findByIdAndUpdate(novelId, { 
+        novelBudget: remainingBudget,
+        updatedAt: new Date()
+      });
     }
 
   } catch (error) {
