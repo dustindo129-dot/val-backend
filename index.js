@@ -15,7 +15,7 @@ import { createServer } from 'vite';
 import isBot from './utils/isBot.js';
 import sirv from 'sirv';
 import fs from 'fs';
-import { cleanupStaleConnections, listConnectedClients, performHealthCheck } from './services/sseService.js';
+import { cleanupStaleConnections, listConnectedClients, performHealthCheck, closeDuplicateConnections } from './services/sseService.js';
 
 // Increase buffer limits and thread pool size
 process.env.UV_THREADPOOL_SIZE = 128; 

@@ -222,8 +222,9 @@ export const performHealthCheck = () => {
   // Clean up stale connections first
   const removedCount = cleanupStaleConnections();
   
-  // Check for duplicate tabs
+  // Check for duplicate tabs and close older connections
   const duplicateTabs = findDuplicateTabs();
+  let duplicatesClosed = 0;
   
   if (duplicateTabs.length > 0) {
     console.log(`⚠️  Found ${duplicateTabs.length} duplicate tab connections:`);
@@ -237,14 +238,80 @@ export const performHealthCheck = () => {
       });
       console.log(`   - Tab ${tabId}: clients ${tabClients.join(', ')}`);
     });
+    
+    // Close duplicate connections
+    duplicatesClosed = closeDuplicateConnections();
   }
   
   // Summary
-  console.log(`Health check complete: ${sseClients.size} active connections, ${removedCount} stale removed, ${duplicateTabs.length} duplicate tabs`);
+  console.log(`Health check complete: ${sseClients.size} active connections, ${removedCount} stale removed, ${duplicateTabs.length} duplicate tabs, ${duplicatesClosed} duplicates closed`);
   
   return {
     activeConnections: sseClients.size,
     staleRemoved: removedCount,
-    duplicateTabs: duplicateTabs.length
+    duplicateTabs: duplicateTabs.length,
+    duplicatesClosed: duplicatesClosed
   };
+};
+
+// Close duplicate connections for the same tab, keeping only the newest
+export const closeDuplicateConnections = () => {
+  const tabConnections = new Map(); // tabId -> [{client, clientId, timestamp}]
+  let closedCount = 0;
+  
+  // Group connections by tab ID
+  sseClients.forEach(client => {
+    const tabId = client.info?.tabId;
+    if (tabId) {
+      const clientId = clientIds.get(client);
+      const timestamp = client.info?.timestamp || 0;
+      
+      if (!tabConnections.has(tabId)) {
+        tabConnections.set(tabId, []);
+      }
+      
+      tabConnections.get(tabId).push({
+        client,
+        clientId,
+        timestamp
+      });
+    }
+  });
+  
+  // For each tab with multiple connections, close all but the newest
+  tabConnections.forEach((connections, tabId) => {
+    if (connections.length > 1) {
+      // Sort by timestamp (newest first)
+      connections.sort((a, b) => b.timestamp - a.timestamp);
+      
+      // Close all but the first (newest) connection
+      for (let i = 1; i < connections.length; i++) {
+        const { client, clientId } = connections[i];
+        try {
+          console.log(`Closing duplicate connection: Client ${clientId} (Tab: ${tabId})`);
+          client.res.write(`event: duplicate_connection\ndata: ${JSON.stringify({
+            reason: 'duplicate_connection_detected',
+            keepNewest: true
+          })}\n\n`);
+          
+          // Close the connection after a short delay to let the message be sent
+          setTimeout(() => {
+            if (client.res && !client.res.destroyed) {
+              client.res.end();
+            }
+          }, 100);
+          
+          closedCount++;
+        } catch (error) {
+          console.error(`Error closing duplicate connection ${clientId}:`, error);
+        }
+      }
+    }
+  });
+  
+  if (closedCount > 0) {
+    console.log(`Closed ${closedCount} duplicate connections`);
+  }
+  
+  return closedCount;
 }; 

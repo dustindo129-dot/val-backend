@@ -129,6 +129,15 @@ router.get('/sse', (req, res) => {
     return res.status(429).json({ error: 'Too many connections from this IP' });
   }
 
+  // Check for existing connections from the same tab
+  const existingTabConnections = Array.from(sseClients).filter(client => 
+    client.info?.tabId === clientInfo.tabId
+  ).length;
+  
+  if (existingTabConnections > 0) {
+    console.log(`Tab ${clientInfo.tabId} already has ${existingTabConnections} connection(s), proceeding with new connection (server will clean up duplicates)`);
+  }
+
   // Send initial connection message with client ID
   const client = { res, info: clientInfo };
   const clientId = addClient(client);
