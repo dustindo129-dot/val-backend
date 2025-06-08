@@ -567,8 +567,8 @@ router.get("/hot", async (req, res) => {
           },
           // Sort by the summed daily views
           { $sort: { dailyViews: -1 } },
-          // Limit to top 5
-          { $limit: 5 },
+          // Limit to top 15
+          { $limit: 15 },
           // Lookup latest chapters
           {
             $lookup: {
@@ -620,8 +620,8 @@ router.get("/hot", async (req, res) => {
           { $match: { "views.total": { $exists: true, $gt: 0 } } },
           // Sort by total views
           { $sort: { "views.total": -1 } },
-          // Limit to top 5
-          { $limit: 5 },
+          // Limit to top 15
+          { $limit: 15 },
           // Lookup latest chapters
           {
             $lookup: {
@@ -668,9 +668,9 @@ router.get("/hot", async (req, res) => {
     }
     
     // Check if we need to add more novels
-    if (hotNovels.length < 5) {
+    if (hotNovels.length < 15) {
       // Calculate how many more novels we need
-      const remainingCount = 5 - hotNovels.length;
+      const remainingCount = 15 - hotNovels.length;
       
       // Get IDs of novels we already have to exclude them
       const existingNovelIds = hotNovels.map(novel => novel._id);
