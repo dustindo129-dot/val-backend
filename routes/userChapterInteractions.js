@@ -18,7 +18,6 @@ const router = express.Router();
  * 3. db.userchapterinteractions.createIndex({ "userId": 1, "novelId": 1, "bookmarked": 1 }) // For bookmark queries
  * 4. db.userchapterinteractions.createIndex({ "userId": 1, "lastReadAt": -1 }) // For recently read queries
  * 5. db.userchapterinteractions.createIndex({ "chapterId": 1, "liked": 1 }) // For like count queries
- * 6. db.userchapterinteractions.createIndex({ "chapterId": 1, "rating": 1 }) // For rating queries
  * 
  * These indexes will eliminate the duplicate query patterns and improve response times significantly.
  */
@@ -71,7 +70,7 @@ router.get('/stats/:chapterId', async (req, res) => {
     
     // Use query deduplication for the aggregation
     const result = await dedupQuery(`stats:${chapterId}`, async () => {
-      // Aggregate interactions data
+      // Aggregate interactions data (only likes, no ratings)
       const [stats] = await UserChapterInteraction.aggregate([
         {
           $match: { chapterId: new mongoose.Types.ObjectId(chapterId) }
@@ -81,12 +80,6 @@ router.get('/stats/:chapterId', async (req, res) => {
             _id: null,
             totalLikes: {
               $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
-            },
-            totalRatings: {
-              $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
-            },
-            ratingSum: {
-              $sum: { $ifNull: ['$rating', 0] }
             }
           }
         }
@@ -95,16 +88,10 @@ router.get('/stats/:chapterId', async (req, res) => {
       // If no interactions exist yet, return default values
       return stats 
         ? {
-            totalLikes: stats.totalLikes,
-            totalRatings: stats.totalRatings,
-            averageRating: stats.totalRatings > 0 
-              ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
-              : '0.0'
+            totalLikes: stats.totalLikes
           }
         : {
-            totalLikes: 0,
-            totalRatings: 0,
-            averageRating: '0.0'
+            totalLikes: 0
           };
     });
     
@@ -145,7 +132,7 @@ router.get('/user/:chapterId', auth, async (req, res) => {
       // Use lean() for better performance and only select needed fields
       const interaction = await UserChapterInteraction.findOne(
         { userId, chapterId },
-        { liked: 1, rating: 1, bookmarked: 1, _id: 0 }  // Only select needed fields
+        { liked: 1, bookmarked: 1, _id: 0 }  // Only select needed fields, removed rating
       )
       .lean()
       .maxTimeMS(2000);  // Set timeout to prevent long-running queries
@@ -153,7 +140,6 @@ router.get('/user/:chapterId', auth, async (req, res) => {
       // Default response
       return {
         liked: interaction?.liked || false,
-        rating: interaction?.rating || null,
         bookmarked: interaction?.bookmarked || false
       };
     });
@@ -168,7 +154,6 @@ router.get('/user/:chapterId', auth, async (req, res) => {
     if (err.name === 'MongooseError' || err.name === 'MongoError') {
       return res.json({
         liked: false, 
-        rating: null, 
         bookmarked: false,
         error: "Database error, using default values"
       });
@@ -235,141 +220,6 @@ router.post('/like', auth, async (req, res) => {
     return res.json(result);
   } catch (err) {
     console.error("Error toggling like:", err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-/**
- * Rate a chapter
- * @route POST /api/userchapterinteractions/rate
- */
-router.post('/rate', auth, async (req, res) => {
-  try {
-    const { chapterId, rating } = req.body;
-    const userId = req.user._id;
-
-    if (!chapterId) {
-      return res.status(400).json({ message: 'Chapter ID is required' });
-    }
-
-    // Validate rating
-    if (!rating || rating < 1 || rating > 5) {
-      return res.status(400).json({ message: "Rating must be between 1 and 5" });
-    }
-
-    // Check if chapter exists
-    const chapter = await Chapter.findById(chapterId);
-    if (!chapter) {
-      return res.status(404).json({ message: "Chapter not found" });
-    }
-
-    // Find or create interaction
-    let interaction = await UserChapterInteraction.findOne({ 
-      userId, 
-      chapterId,
-      novelId: chapter.novelId 
-    });
-    
-    if (!interaction) {
-      interaction = new UserChapterInteraction({
-        userId,
-        chapterId,
-        novelId: chapter.novelId,
-        rating
-      });
-    } else {
-      interaction.rating = rating;
-    }
-    await interaction.save();
-
-    // Calculate new rating statistics
-    const [stats] = await UserChapterInteraction.aggregate([
-      { $match: { chapterId: new mongoose.Types.ObjectId(chapterId), rating: { $exists: true, $ne: null } } },
-      { 
-        $group: { 
-          _id: null, 
-          totalRatings: { $sum: 1 },
-          ratingSum: { $sum: "$rating" }
-        } 
-      }
-    ]);
-
-    const totalRatings = stats?.totalRatings || 0;
-    const averageRating = totalRatings > 0 
-      ? (stats.ratingSum / totalRatings).toFixed(1) 
-      : '0.0';
-
-    const result = {
-      rating,
-      totalRatings,
-      averageRating
-    };
-    
-    // Invalidate related caches
-    interactionCache.del(getUserInteractionCacheKey(userId, chapterId));
-    interactionCache.del(getChapterStatsCacheKey(chapterId));
-    
-    return res.json(result);
-  } catch (err) {
-    console.error("Error rating chapter:", err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-/**
- * Remove rating from a chapter
- * @route DELETE /api/userchapterinteractions/rate/:chapterId
- */
-router.delete('/rate/:chapterId', auth, async (req, res) => {
-  try {
-    const chapterId = req.params.chapterId;
-    const userId = req.user._id;
-
-    // Check if chapter exists
-    const chapter = await Chapter.findById(chapterId);
-    if (!chapter) {
-      return res.status(404).json({ message: "Chapter not found" });
-    }
-
-    // Find interaction
-    const interaction = await UserChapterInteraction.findOne({ userId, chapterId });
-    if (!interaction || !interaction.rating) {
-      return res.status(404).json({ message: "No rating found for this chapter" });
-    }
-
-    // Remove rating
-    interaction.rating = null;
-    await interaction.save();
-
-    // Calculate new rating statistics
-    const [stats] = await UserChapterInteraction.aggregate([
-      { $match: { chapterId: new mongoose.Types.ObjectId(chapterId), rating: { $exists: true, $ne: null } } },
-      { 
-        $group: { 
-          _id: null, 
-          totalRatings: { $sum: 1 },
-          ratingSum: { $sum: "$rating" }
-        } 
-      }
-    ]);
-
-    const totalRatings = stats?.totalRatings || 0;
-    const averageRating = totalRatings > 0 
-      ? (stats.ratingSum / totalRatings).toFixed(1) 
-      : '0.0';
-
-    const result = {
-      totalRatings,
-      averageRating
-    };
-    
-    // Invalidate related caches
-    interactionCache.del(getUserInteractionCacheKey(userId, chapterId));
-    interactionCache.del(getChapterStatsCacheKey(chapterId));
-    
-    return res.json(result);
-  } catch (err) {
-    console.error("Error removing rating:", err);
     res.status(500).json({ message: err.message });
   }
 });

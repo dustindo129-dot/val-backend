@@ -894,12 +894,6 @@ router.get('/:id/full', async (req, res) => {
             _id: null,
             totalLikes: {
               $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
-            },
-            totalRatings: {
-              $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
-            },
-            ratingSum: {
-              $sum: { $ifNull: ['$rating', 0] }
             }
           }
         }
@@ -925,13 +919,8 @@ router.get('/:id/full', async (req, res) => {
     // Build interaction response
     const interactions = {
       totalLikes: stats?.totalLikes || 0,
-      totalRatings: stats?.totalRatings || 0,
-      averageRating: stats?.totalRatings > 0 
-        ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
-        : '0.0',
       userInteraction: {
         liked: userInteraction?.liked || false,
-        rating: userInteraction?.rating || null,
         bookmarked: userInteraction?.bookmarked || false
       }
     };

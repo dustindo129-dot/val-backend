@@ -20,12 +20,7 @@ const userChapterInteractionSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  rating: {
-    type: Number,
-    min: 1,
-    max: 5,
-    default: null
-  },
+
   bookmarked: {
     type: Boolean,
     default: false
