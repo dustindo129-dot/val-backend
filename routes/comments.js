@@ -93,7 +93,7 @@ router.get('/', async (req, res) => {
           localField: 'user',
           foreignField: '_id',
           pipeline: [
-            { $project: { username: 1, avatar: 1 } }
+            { $project: { username: 1, displayName: 1, avatar: 1 } }
           ],
           as: 'userInfo'
         }
@@ -355,7 +355,7 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     clearRecentCommentsCache();
     
     // Populate user info
-    await reply.populate('user', 'username avatar');
+    await reply.populate('user', 'username displayName avatar');
 
     // Create notification for the original commenter
     if (parentComment.user.toString() !== req.user._id.toString()) {
@@ -474,7 +474,7 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
     clearRecentCommentsCache();
 
     // Populate user info
-    await comment.populate('user', 'username avatar');
+    await comment.populate('user', 'username displayName avatar');
 
     // Notify clients about the new comment via SSE
     broadcastEvent('new_comment', {
