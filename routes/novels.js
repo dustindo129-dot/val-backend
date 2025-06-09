@@ -159,9 +159,32 @@ router.get('/sse', async (req, res) => {
     'https://val-bh6h9.ondigitalocean.app' // Add DigitalOcean domain
   ];
 
+  // PRE-VALIDATION: All validation checks BEFORE setting SSE headers
   // Check if origin is allowed
   if (!allowedOrigins.includes(origin)) {
     return res.status(403).json({ error: 'Origin not allowed' });
+  }
+
+  // Pre-check connection limits per IP (prevent abuse)
+  const clientIP = req.ip || req.socket.remoteAddress;
+  const clientsFromSameIP = Array.from(sseClients).filter(existingClient => 
+    existingClient.info?.ip === clientIP
+  ).length;
+  
+  if (clientsFromSameIP > 20) {
+    return res.status(429).json({ error: 'Too many connections from this IP', maxConnections: 20 });
+  }
+
+  // Pre-check if this tab is blocked
+  const tabId = req.query.tabId || `manual_${Date.now()}`;
+  if (tabId && tabId !== 'unknown') {
+    if (isTabBlocked(tabId)) {
+      return res.status(429).json({ 
+        error: 'Tab temporarily blocked due to repeated duplicate event ignoring',
+        tabId: tabId,
+        message: 'Please close other tabs and wait before reconnecting'
+      });
+    }
   }
 
   // Set SSE headers with CORS
@@ -195,41 +218,25 @@ router.get('/sse', async (req, res) => {
     }
   };
 
-  // Check if this tab is blocked due to ignoring duplicate events
-  if (client.info.tabId && client.info.tabId !== 'unknown') {
-    if (isTabBlocked(client.info.tabId)) {
-      res.status(429).json({ 
-        error: 'Tab temporarily blocked due to repeated duplicate event ignoring',
-        tabId: client.info.tabId,
-        message: 'Please close other tabs and wait before reconnecting'
-      });
-      return;
-    }
-    
-    // Check if this might be a rapid reconnection
-    const history = getTabConnectionHistory(client.info.tabId);
+  // Update client info with parsed data
+  client.info = {
+    ...client.info,
+    ip: clientIP, // Use the pre-validated IP
+    userAgent: req.headers['user-agent'] || client.info.userAgent || 'unknown',
+    tabId: tabId, // Use the pre-validated tabId
+    timestamp: client.info.timestamp
+  };
+
+  // Note: All validation checks have been moved to pre-validation section above
+  // to prevent ERR_HTTP_HEADERS_SENT errors
+
+  // Check if this might be a rapid reconnection (monitoring only, no blocking)
+  if (tabId && tabId !== 'unknown') {
+    const history = getTabConnectionHistory(tabId);
     if (history.stats && history.stats.lastConnectionTime) {
       const timeSinceLastConnection = Date.now() - history.stats.lastConnectionTime;
       // Just track rapid reconnections without logging
     }
-  }
-
-  // Update client info with parsed data
-  client.info = {
-    ...client.info,
-    ip: req.ip || req.socket.remoteAddress,
-    userAgent: req.headers['user-agent'] || client.info.userAgent || 'unknown',
-    tabId: req.query.tabId || `manual_${Date.now()}`,
-    timestamp: client.info.timestamp
-  };
-
-  // Check for connection limits per IP (prevent abuse)
-  const clientsFromSameIP = Array.from(sseClients).filter(existingClient => 
-    existingClient.info?.ip === client.info.ip
-  ).length;
-  
-  if (clientsFromSameIP > 20) {
-    return res.status(429).json({ error: 'Too many connections from this IP' });
   }
 
   // Check for existing connections from the same tab
