@@ -177,22 +177,13 @@ if (!isProduction) {
         maxAge: 31536000, // 1 year in seconds
         immutable: true,
         setHeaders: (res, path) => {
-          // Set proper Cache-Control and Content-Type headers
+          // Set proper Cache-Control headers
           if (path.endsWith('.html')) {
             res.setHeader('Cache-Control', 'no-cache');
-          } else if (path.endsWith('.js')) {
-            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-            res.setHeader('Cache-Control', 'public,max-age=31536000,immutable');
-          } else if (path.endsWith('.mjs')) {
-            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-            res.setHeader('Cache-Control', 'public,max-age=31536000,immutable');
-          } else if (path.endsWith('.css')) {
-            res.setHeader('Content-Type', 'text/css; charset=utf-8');
-            res.setHeader('Cache-Control', 'public,max-age=31536000,immutable');
           } else if (path.endsWith('.xml')) {
             res.setHeader('Content-Type', 'application/xml; charset=utf-8');
             res.setHeader('Cache-Control', 'public,max-age=3600'); // Cache for 1 hour
-          } else if (path.match(/\.(png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/)) {
+          } else if (path.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/)) {
             res.setHeader('Cache-Control', 'public,max-age=31536000,immutable');
           }
         }
@@ -317,13 +308,9 @@ if (isProduction) {
     
     for (const assetPath of possiblePaths) {
       if (fs.existsSync(assetPath)) {
-        // Set proper content-type for different file types
+        // Set proper content-type for XML files
         if (url.endsWith('.xml')) {
           res.setHeader('Content-Type', 'application/xml; charset=utf-8');
-        } else if (url.endsWith('.js') || url.endsWith('.mjs')) {
-          res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-        } else if (url.endsWith('.css')) {
-          res.setHeader('Content-Type', 'text/css; charset=utf-8');
         }
         return res.sendFile(assetPath);
       }
