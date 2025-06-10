@@ -6,6 +6,7 @@ import User from '../models/User.js';
 import mongoose from 'mongoose';
 import { createNovelTransaction } from './novelTransactions.js';
 import { createTransaction } from './userTransaction.js';
+import { clearUserCache } from '../utils/userCache.js';
 
 const router = express.Router();
 
@@ -100,6 +101,9 @@ router.post('/', auth, async (req, res) => {
         // Deduct contribution amount from user balance
         user.balance -= amount;
         await user.save({ session });
+        
+        // Clear user cache to ensure fresh balance is returned by API calls
+        clearUserCache(user._id, user.username);
         
         // Record transaction in UserTransaction ledger
         await createTransaction({

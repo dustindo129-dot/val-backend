@@ -13,7 +13,7 @@ const requestSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['new', 'web'],
+    enum: ['new', 'open', 'web'],
     required: true
   },
   title: {

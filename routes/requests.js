@@ -6,6 +6,7 @@ import mongoose from 'mongoose';
 import { createTransaction } from './userTransaction.js';
 import { createNovelTransaction } from './novelTransactions.js';
 import ContributionHistory from '../models/ContributionHistory.js';
+import { clearUserCache } from '../utils/userCache.js';
 
 const router = express.Router();
 
@@ -29,10 +30,10 @@ router.get('/', async (req, res) => {
       sortCriteria = { createdAt: -1 };
     }
     
-    // Query both pending requests and approved web requests
+    // Query both pending requests and approved web requests (exclude 'open' requests as they're processed automatically)
     const requests = await Request.find({ 
       $or: [
-        { status: 'pending' },
+        { status: 'pending', type: { $in: ['new', 'web'] } },
         { type: 'web', status: 'approved' }
       ]
     })
@@ -115,9 +116,12 @@ router.post('/', auth, async (req, res) => {
       // Store old balance for transaction record
       const oldBalance = user.balance;
       
-      // Deduct deposit from user balance
-      user.balance -= deposit;
-      await user.save({ session });
+          // Deduct deposit from user balance
+    user.balance -= deposit;
+    await user.save({ session });
+    
+    // Clear user cache to ensure fresh balance is returned by API calls
+    clearUserCache(user._id, user.username);
       
       // Record the transaction in UserTransaction ledger
       let description;
@@ -435,6 +439,9 @@ router.post('/:requestId/decline', auth, async (req, res) => {
     user.balance += request.deposit;
     await user.save({ session });
     
+    // Clear user cache to ensure fresh balance is returned by API calls
+    clearUserCache(user._id, user.username);
+    
     // Record the refund transaction in UserTransaction ledger
     await createTransaction({
       userId: user._id,
@@ -447,8 +454,63 @@ router.post('/:requestId/decline', auth, async (req, res) => {
       balanceAfter: user.balance
     }, session);
     
+    // For 'new' type requests, find and refund all pending contributions
+    let contributionsRefunded = 0;
+    if (request.type === 'new') {
+      // Find all pending contributions for this request
+      const Contribution = mongoose.model('Contribution');
+      const pendingContributions = await Contribution.find({ 
+        request: request._id,
+        status: 'pending' 
+      }).session(session);
+      
+      // If there are pending contributions, process refunds
+      if (pendingContributions.length > 0) {
+        // Update all contributions to declined
+        await Contribution.updateMany(
+          { request: request._id, status: 'pending' },
+          { status: 'declined' },
+          { session }
+        );
+        
+        // Refund each contributor
+        for (const contribution of pendingContributions) {
+          const contributor = await User.findById(contribution.user).session(session);
+          if (contributor) {
+            const contributorOldBalance = contributor.balance;
+            contributor.balance += contribution.amount;
+            await contributor.save({ session });
+            
+            // Clear contributor's cache
+            clearUserCache(contributor._id, contributor.username);
+            
+            // Record the refund transaction
+            await createTransaction({
+              userId: contributor._id,
+              amount: contribution.amount,
+              type: 'refund',
+              description: `Hoàn tiền do admin từ chối yêu cầu`,
+              sourceId: request._id,
+              sourceModel: 'Request',
+              performedById: req.user._id, // Admin initiated
+              balanceAfter: contributor.balance
+            }, session);
+            
+            contributionsRefunded++;
+          }
+        }
+      }
+    }
+    
     await session.commitTransaction();
-    res.json({ message: 'Yêu cầu đã được từ chối và 🌾 gửi đã được hoàn trả' });
+    
+    // Prepare response message based on contributions refunded
+    let message = 'Yêu cầu đã được từ chối và 🌾 cọc đã được hoàn trả';
+    if (contributionsRefunded > 0) {
+      message = `Yêu cầu đã được từ chối và 🌾 cọc cùng ${contributionsRefunded} đóng góp đã được hoàn trả`;
+    }
+    
+    res.json({ message });
   } catch (error) {
     await session.abortTransaction();
     console.error('Failed to decline request:', error);
@@ -503,6 +565,9 @@ router.post('/:requestId/withdraw', auth, async (req, res) => {
     user.balance += request.deposit;
     await user.save({ session });
     
+    // Clear user cache to ensure fresh balance is returned by API calls
+    clearUserCache(user._id, user.username);
+    
     // Record the refund transaction in UserTransaction ledger
     await createTransaction({
       userId: user._id,
@@ -540,6 +605,9 @@ router.post('/:requestId/withdraw', auth, async (req, res) => {
             const contributorOldBalance = contributor.balance;
             contributor.balance += contribution.amount;
             await contributor.save({ session });
+            
+            // Clear contributor's cache
+            clearUserCache(contributor._id, contributor.username);
             
             // Record the refund transaction
             await createTransaction({
