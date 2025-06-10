@@ -8,7 +8,7 @@ import mongoose from 'mongoose';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
 
 // Import the novel cache clearing function
-import { clearNovelCaches, notifyAllClients } from '../utils/cacheUtils.js';
+import { clearNovelCaches, clearChapterCaches, notifyAllClients } from '../utils/cacheUtils.js';
 import { createNewChapterNotifications } from '../services/notificationService.js';
 import { populateStaffNames } from '../utils/populateStaffNames.js';
 
@@ -482,10 +482,7 @@ router.post('/', auth, async (req, res) => {
     ]);
 
     // Get novel info for the notification
-    const [novel, populatedChapter] = await Promise.all([
-      Novel.findById(novelId).select('title'),
-      Chapter.findById(newChapter._id).populate('moduleId', 'title')
-    ]);
+    const novel = await Novel.findById(novelId).select('title');
 
     // Create notifications for users who bookmarked this novel
     await createNewChapterNotifications(
@@ -508,7 +505,28 @@ router.post('/', auth, async (req, res) => {
       // Import the checkAndUnlockContent function from novels.js
       const { checkAndUnlockContent } = await import('./novels.js');
       await checkAndUnlockContent(novelId);
+      
+      // IMPORTANT: Clear all relevant caches after auto-unlock to prevent stale data
+      clearChapterCaches(newChapter._id.toString());
+      
+      // Clear slug cache entries for this chapter to prevent stale mode caching
+      const chapterIdString = newChapter._id.toString();
+      const keysToDelete = [];
+      for (const [key, value] of slugCache.entries()) {
+        if (value.data && value.data.id && value.data.id.toString() === chapterIdString) {
+          keysToDelete.push(key);
+        }
+      }
+      keysToDelete.forEach(key => slugCache.delete(key));
+      
+      // Clear query deduplication cache for this chapter
+      pendingQueries.delete(`chapter:${newChapter._id}`);
     }
+
+    // Fetch the final chapter state AFTER auto-unlock (if it happened)
+    // This ensures we return the correct mode to the client
+    const finalChapter = await Chapter.findById(newChapter._id).populate('moduleId', 'title');
+    const populatedChapter = await populateStaffNames(finalChapter.toObject());
 
     res.status(201).json(populatedChapter);
   } catch (err) {

@@ -2466,6 +2466,9 @@ export async function checkAndUnlockContent(novelId) {
         novelBudget: remainingBudget,
         updatedAt: new Date()
       });
+      
+      // Clear all caches since content was unlocked - this affects novel and chapter data
+      clearNovelCaches();
     }
 
   } catch (error) {

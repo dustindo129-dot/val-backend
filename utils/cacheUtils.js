@@ -21,11 +21,32 @@ export const clearNovelCaches = () => {
   // Clear novels list cache (all pages)
   const keys = cache.keys();
   keys.forEach(key => {
-    if (key.startsWith('novels_page_') || key.startsWith('novel_')) {
+    if (key.startsWith('novels_page_') || key.startsWith('novel_') || key.startsWith('chapter_')) {
       cache.del(key);
     }
   });
+};
 
+/**
+ * Clear chapter-specific caches (for use in chapters.js)
+ * @param {string} chapterId - Optional specific chapter ID to clear
+ */
+export const clearChapterCaches = (chapterId = null) => {
+  const keys = cache.keys();
+  keys.forEach(key => {
+    // Clear all chapter-related caches
+    if (key.startsWith('chapter_')) {
+      cache.del(key);
+    }
+    // If specific chapter ID provided, also clear novel caches
+    // since chapter changes affect novel data
+    if (chapterId && (key.startsWith('novel_') || key.startsWith('novels_page_'))) {
+      cache.del(key);
+    }
+  });
+  
+  // Also clear hot novels cache as chapter changes can affect rankings
+  cache.del('hot_novels');
 };
 
 /**
