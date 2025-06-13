@@ -1259,6 +1259,7 @@ router.get("/:id", async (req, res) => {
             ratings: 1,
             novelBalance: 1,
             novelBudget: 1,
+            wordCount: 1,
             modules: 1,
             allChapters: 1
           }
@@ -2505,7 +2506,7 @@ router.get("/:id/complete", async (req, res) => {
       ] = await Promise.all([
         // 1. Get novel data
         Novel.findById(novelId)
-          .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings novelBalance novelBudget')
+          .select('title description alternativeTitles author illustrator illustration status active inactive genres note updatedAt createdAt views ratings novelBalance novelBudget wordCount')
           .lean(),
           
         // 2. Get modules
@@ -3237,6 +3238,7 @@ router.get("/:id/dashboard", async (req, res) => {
             ratings: 1,
             novelBalance: 1,
             novelBudget: 1,
+            wordCount: 1,
             // Module data
             modules: 1,
             // Conditional chapter data
@@ -3273,7 +3275,8 @@ router.get("/:id/dashboard", async (req, res) => {
         views: dashboardData.views,
         ratings: dashboardData.ratings,
         novelBalance: dashboardData.novelBalance,
-        novelBudget: dashboardData.novelBudget
+        novelBudget: dashboardData.novelBudget,
+        wordCount: dashboardData.wordCount
       });
 
       let modulesWithChapters;
