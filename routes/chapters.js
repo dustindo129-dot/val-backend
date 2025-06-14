@@ -531,6 +531,9 @@ router.post('/', auth, async (req, res) => {
         { updatedAt: new Date() }
       ),
       
+      // Recalculate novel word count with the new chapter
+      recalculateNovelWordCount(novelId),
+      
       // Clear novel caches
       clearNovelCaches()
     ]);
@@ -1014,7 +1017,7 @@ router.get('/:id/full', async (req, res) => {
   } catch (err) {
     console.error('Error getting full chapter data:', err);
     res.status(500).json({ message: err.message });
-    }
+  }
 });
 
 /**
@@ -1034,51 +1037,56 @@ router.post('/batch-update-wordcount', auth, async (req, res) => {
       content: { $exists: true, $ne: '' }
     }).select('_id content novelId').lean();
 
-    if (chaptersToUpdate.length === 0) {
-      return res.json({ 
-        message: 'No chapters found with 0 word count that have content.',
-        updated: 0 
-      });
-    }
-
     console.log(`Found ${chaptersToUpdate.length} chapters to update word counts for.`);
 
     let updatedCount = 0;
     const batchSize = 50; // Process in batches to avoid overwhelming the database
     
-    for (let i = 0; i < chaptersToUpdate.length; i += batchSize) {
-      const batch = chaptersToUpdate.slice(i, i + batchSize);
-      const bulkOps = [];
+    if (chaptersToUpdate.length > 0) {
+      for (let i = 0; i < chaptersToUpdate.length; i += batchSize) {
+        const batch = chaptersToUpdate.slice(i, i + batchSize);
+        const bulkOps = [];
 
-      for (const chapter of batch) {
-        const wordCount = calculateWordCount(chapter.content);
-        if (wordCount > 0) {
-          bulkOps.push({
-            updateOne: {
-              filter: { _id: chapter._id },
-              update: { $set: { wordCount: wordCount, updatedAt: new Date() } }
-            }
-          });
+        for (const chapter of batch) {
+          const wordCount = calculateWordCount(chapter.content);
+          if (wordCount > 0) {
+            bulkOps.push({
+              updateOne: {
+                filter: { _id: chapter._id },
+                update: { $set: { wordCount: wordCount, updatedAt: new Date() } }
+              }
+            });
+          }
         }
-      }
 
-      if (bulkOps.length > 0) {
-        const result = await Chapter.bulkWrite(bulkOps);
-        updatedCount += result.modifiedCount;
-      }
+        if (bulkOps.length > 0) {
+          const result = await Chapter.bulkWrite(bulkOps);
+          updatedCount += result.modifiedCount;
+        }
 
-      console.log(`Processed batch ${Math.floor(i / batchSize) + 1} of ${Math.ceil(chaptersToUpdate.length / batchSize)}`);
+        console.log(`Processed batch ${Math.floor(i / batchSize) + 1} of ${Math.ceil(chaptersToUpdate.length / batchSize)}`);
+      }
     }
 
-    // Recalculate novel word counts for affected novels
-    const affectedNovels = [...new Set(chaptersToUpdate.map(ch => ch.novelId.toString()))];
-    console.log(`Recalculating word counts for ${affectedNovels.length} novels...`);
+    // Now find ALL novels that have chapters and recalculate their word counts
+    // This catches novels with correct chapter word counts but wrong novel totals
+    const novelsWithChapters = await Chapter.aggregate([
+      {
+        $group: {
+          _id: '$novelId'
+        }
+      }
+    ]);
 
-    for (const novelId of affectedNovels) {
+    console.log(`Recalculating word counts for ${novelsWithChapters.length} novels with chapters...`);
+
+    let novelsRecalculated = 0;
+    for (const novelGroup of novelsWithChapters) {
       try {
-        await recalculateNovelWordCount(novelId);
+        await recalculateNovelWordCount(novelGroup._id);
+        novelsRecalculated++;
       } catch (error) {
-        console.error(`Failed to recalculate word count for novel ${novelId}:`, error);
+        console.error(`Failed to recalculate word count for novel ${novelGroup._id}:`, error);
       }
     }
 
@@ -1086,15 +1094,81 @@ router.post('/batch-update-wordcount', auth, async (req, res) => {
     clearNovelCaches();
 
     res.json({
-      message: `Successfully updated word counts for ${updatedCount} chapters and recalculated ${affectedNovels.length} novel word counts.`,
+      message: `Successfully updated word counts for ${updatedCount} chapters and recalculated ${novelsRecalculated} novel word counts.`,
       updated: updatedCount,
-      novelsRecalculated: affectedNovels.length
+      novelsRecalculated: novelsRecalculated
     });
 
   } catch (error) {
     console.error('Error in batch word count update:', error);
     res.status(500).json({ 
       message: 'Error updating word counts', 
+      error: error.message 
+    });
+  }
+});
+
+/**
+ * Fix novel word counts specifically - recalculate all novels that have chapters
+ * @route POST /api/chapters/fix-novel-wordcounts
+ */
+router.post('/fix-novel-wordcounts', auth, async (req, res) => {
+  // Only allow admins to run this batch operation
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+  }
+
+  try {
+    // Find all novels that have chapters
+    const novelsWithChapters = await Chapter.aggregate([
+      {
+        $group: {
+          _id: '$novelId',
+          chapterCount: { $sum: 1 },
+          totalWords: { $sum: '$wordCount' }
+        }
+      }
+    ]);
+
+    console.log(`Found ${novelsWithChapters.length} novels with chapters to recalculate.`);
+
+    let novelsRecalculated = 0;
+    let novelsWith0WordCount = 0;
+
+    for (const novelGroup of novelsWithChapters) {
+      try {
+        // Get current novel word count
+        const currentNovel = await Novel.findById(novelGroup._id).select('wordCount title').lean();
+        
+        if (currentNovel) {
+          console.log(`Novel "${currentNovel.title}": Current DB=${currentNovel.wordCount}, Calculated=${novelGroup.totalWords}, Chapters=${novelGroup.chapterCount}`);
+          
+          if (currentNovel.wordCount === 0 && novelGroup.totalWords > 0) {
+            novelsWith0WordCount++;
+          }
+        }
+
+        await recalculateNovelWordCount(novelGroup._id);
+        novelsRecalculated++;
+      } catch (error) {
+        console.error(`Failed to recalculate word count for novel ${novelGroup._id}:`, error);
+      }
+    }
+
+    // Clear caches
+    clearNovelCaches();
+
+    res.json({
+      message: `Successfully recalculated word counts for ${novelsRecalculated} novels. Found ${novelsWith0WordCount} novels with 0 word count that should have had totals.`,
+      novelsRecalculated: novelsRecalculated,
+      novelsWith0Fixed: novelsWith0WordCount,
+      totalNovelsWithChapters: novelsWithChapters.length
+    });
+
+  } catch (error) {
+    console.error('Error in novel word count fix:', error);
+    res.status(500).json({ 
+      message: 'Error fixing novel word counts', 
       error: error.message 
     });
   }
