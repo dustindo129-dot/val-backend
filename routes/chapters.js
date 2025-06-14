@@ -22,6 +22,56 @@ const MAX_CACHE_SIZE = 1000;
 // Query deduplication cache to prevent multiple identical requests
 const pendingQueries = new Map();
 
+/**
+ * Server-side word counting function that replicates TinyMCE's algorithm
+ * @param {string} htmlContent - HTML content to count words in
+ * @returns {number} Word count using TinyMCE-compatible algorithm
+ */
+const calculateWordCount = (htmlContent) => {
+  if (!htmlContent || typeof htmlContent !== 'string') return 0;
+  
+  // Step 1: Extract text from HTML exactly like TinyMCE
+  const tempDiv = { innerHTML: htmlContent };
+  // Simple HTML tag removal for server-side processing
+  let text = htmlContent.replace(/<[^>]*>/g, ' ');
+  
+  if (!text.trim()) return 0;
+  
+  // Step 2: Handle HTML entities
+  text = text.replace(/&nbsp;/g, ' ')
+             .replace(/&amp;/g, '&')
+             .replace(/&lt;/g, '<')
+             .replace(/&gt;/g, '>')
+             .replace(/&quot;/g, '"')
+             .replace(/&#39;/g, "'")
+             .replace(/&apos;/g, "'");
+  
+  // Step 3: Use TinyMCE's word counting approach
+  const wordRegex = /[\w\u00C0-\u024F\u1E00-\u1EFF\u0100-\u017F\u0180-\u024F\u0250-\u02AF\u1D00-\u1D7F\u1D80-\u1DBF]+/g;
+  
+  // Step 4: Find all word matches
+  const matches = text.match(wordRegex);
+  
+  if (!matches) return 0;
+  
+  // Step 5: Filter matches like TinyMCE does
+  const filteredMatches = matches.filter(match => {
+    // Filter out single standalone digits
+    if (match.length === 1 && /^\d$/.test(match)) {
+      return false;
+    }
+    
+    // Filter out single standalone letters that are likely not words
+    if (match.length === 1 && /^[a-zA-Z]$/.test(match)) {
+      return false;
+    }
+    
+    return true;
+  });
+  
+  return filteredMatches.length;
+};
+
 // Helper function to manage cache
 const getCachedSlug = (slug) => {
   const cached = slugCache.get(slug);
@@ -444,6 +494,9 @@ router.post('/', auth, async (req, res) => {
 
     const order = moduleData.lastChapterOrder + 1;
 
+    // Calculate word count for the chapter content
+    const calculatedWordCount = calculateWordCount(content);
+
     // Create the new chapter with staff fields and footnotes
     const chapter = new Chapter({
       novelId,
@@ -457,7 +510,8 @@ router.post('/', auth, async (req, res) => {
       mode: mode || 'published',
       views: 0,
       footnotes: footnotes || [],
-      chapterBalance: mode === 'paid' ? (chapterBalance || 0) : 0
+      chapterBalance: mode === 'paid' ? (chapterBalance || 0) : 0,
+      wordCount: calculatedWordCount
     });
 
     // Save the chapter
@@ -671,10 +725,19 @@ router.put('/:id', auth, async (req, res) => {
       finalChapterBalance = mode === 'paid' ? existingChapter.chapterBalance : 0;
     }
 
-    // Check if content or word count changed (to determine if word count recalculation is needed)
+    // Check if content changed and calculate word count accordingly
     const contentChanged = content && content !== existingChapter.content;
-    const wordCountChanged = wordCount !== existingChapter.wordCount;
-    const shouldRecalculateWordCount = contentChanged || wordCountChanged;
+    let finalWordCount = existingChapter.wordCount;
+    
+    if (contentChanged) {
+      // If content changed, recalculate word count server-side
+      finalWordCount = calculateWordCount(content);
+    } else if (wordCount !== undefined && wordCount !== existingChapter.wordCount) {
+      // If word count was explicitly provided (from TinyMCE), use that
+      finalWordCount = Math.max(0, wordCount);
+    }
+    
+    const shouldRecalculateWordCount = contentChanged || finalWordCount !== existingChapter.wordCount;
 
     // Update the chapter
     const updatedChapter = await Chapter.findByIdAndUpdate(
@@ -688,7 +751,7 @@ router.put('/:id', auth, async (req, res) => {
         ...(mode && { mode }),
         chapterBalance: finalChapterBalance,
         footnotes,
-        wordCount: Math.max(0, wordCount), // Ensure word count is not negative
+        wordCount: finalWordCount, // Use calculated or provided word count
         updatedAt: new Date()
       },
       { 
@@ -951,9 +1014,90 @@ router.get('/:id/full', async (req, res) => {
   } catch (err) {
     console.error('Error getting full chapter data:', err);
     res.status(500).json({ message: err.message });
-  }
+    }
 });
 
+/**
+ * Batch update word counts for chapters with 0 word count
+ * @route POST /api/chapters/batch-update-wordcount
+ */
+router.post('/batch-update-wordcount', auth, async (req, res) => {
+  // Only allow admins to run this batch operation
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+  }
 
+  try {
+    // Find all chapters with 0 word count but have content
+    const chaptersToUpdate = await Chapter.find({
+      wordCount: 0,
+      content: { $exists: true, $ne: '' }
+    }).select('_id content novelId').lean();
+
+    if (chaptersToUpdate.length === 0) {
+      return res.json({ 
+        message: 'No chapters found with 0 word count that have content.',
+        updated: 0 
+      });
+    }
+
+    console.log(`Found ${chaptersToUpdate.length} chapters to update word counts for.`);
+
+    let updatedCount = 0;
+    const batchSize = 50; // Process in batches to avoid overwhelming the database
+    
+    for (let i = 0; i < chaptersToUpdate.length; i += batchSize) {
+      const batch = chaptersToUpdate.slice(i, i + batchSize);
+      const bulkOps = [];
+
+      for (const chapter of batch) {
+        const wordCount = calculateWordCount(chapter.content);
+        if (wordCount > 0) {
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: chapter._id },
+              update: { $set: { wordCount: wordCount, updatedAt: new Date() } }
+            }
+          });
+        }
+      }
+
+      if (bulkOps.length > 0) {
+        const result = await Chapter.bulkWrite(bulkOps);
+        updatedCount += result.modifiedCount;
+      }
+
+      console.log(`Processed batch ${Math.floor(i / batchSize) + 1} of ${Math.ceil(chaptersToUpdate.length / batchSize)}`);
+    }
+
+    // Recalculate novel word counts for affected novels
+    const affectedNovels = [...new Set(chaptersToUpdate.map(ch => ch.novelId.toString()))];
+    console.log(`Recalculating word counts for ${affectedNovels.length} novels...`);
+
+    for (const novelId of affectedNovels) {
+      try {
+        await recalculateNovelWordCount(novelId);
+      } catch (error) {
+        console.error(`Failed to recalculate word count for novel ${novelId}:`, error);
+      }
+    }
+
+    // Clear caches
+    clearNovelCaches();
+
+    res.json({
+      message: `Successfully updated word counts for ${updatedCount} chapters and recalculated ${affectedNovels.length} novel word counts.`,
+      updated: updatedCount,
+      novelsRecalculated: affectedNovels.length
+    });
+
+  } catch (error) {
+    console.error('Error in batch word count update:', error);
+    res.status(500).json({ 
+      message: 'Error updating word counts', 
+      error: error.message 
+    });
+  }
+});
 
 export default router; 
