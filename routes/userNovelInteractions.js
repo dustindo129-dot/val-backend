@@ -29,6 +29,9 @@ router.get('/stats/:novelId', async (req, res) => {
           totalRatings: {
             $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
           },
+          totalBookmarks: {
+            $sum: { $cond: [{ $eq: ['$bookmarked', true] }, 1, 0] }
+          },
           ratingSum: {
             $sum: { $ifNull: ['$rating', 0] }
           }
@@ -41,6 +44,7 @@ router.get('/stats/:novelId', async (req, res) => {
       return res.json({
         totalLikes: 0,
         totalRatings: 0,
+        totalBookmarks: 0,
         averageRating: '0.0'
       });
     }
@@ -52,6 +56,7 @@ router.get('/stats/:novelId', async (req, res) => {
     res.json({
       totalLikes: stats.totalLikes,
       totalRatings: stats.totalRatings,
+      totalBookmarks: stats.totalBookmarks,
       averageRating
     });
   } catch (err) {
