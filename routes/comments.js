@@ -113,6 +113,7 @@ router.get('/', async (req, res) => {
           adminDeleted: 1,
           likes: 1,
           likesCount: 1,
+          isPinned: 1,
           user: {
             _id: '$userInfo._id',
             username: '$userInfo.username',
@@ -543,6 +544,89 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
   } catch (err) {
     console.error('Error processing like:', err);
     res.status(400).json({ message: err.message });
+  }
+});
+
+/**
+ * Pin/Unpin a comment
+ * Only admin, moderator, or assigned pj_user can pin comments on novels
+ * @route POST /api/comments/:commentId/pin
+ */
+router.post('/:commentId/pin', auth, async (req, res) => {
+  try {
+    const comment = await Comment.findById(req.params.commentId);
+    if (!comment) {
+      return res.status(404).json({ message: 'Comment not found' });
+    }
+
+    // Only allow pinning on novel comments (not chapters or feedback)
+    if (comment.contentType !== 'novels') {
+      return res.status(400).json({ message: 'Comments can only be pinned on novels' });
+    }
+
+    // Check if user has permission to pin comments
+    const canPin = req.user.role === 'admin' || req.user.role === 'moderator';
+    
+    // If user is pj_user, check if they're assigned to this novel
+    let canPinAsPjUser = false;
+    if (req.user.role === 'pj_user') {
+      try {
+        // Import Novel model to check pj_user assignment
+        const Novel = (await import('../models/Novel.js')).default;
+        const novel = await Novel.findById(comment.contentId);
+        if (novel && novel.active && novel.active.pj_user) {
+          canPinAsPjUser = novel.active.pj_user.includes(req.user._id) ||
+                          novel.active.pj_user.includes(req.user.username) ||
+                          novel.active.pj_user.includes(req.user.displayName);
+        }
+      } catch (err) {
+        console.error('Error checking pj_user assignment:', err);
+      }
+    }
+
+    if (!canPin && !canPinAsPjUser) {
+      return res.status(403).json({ message: 'Not authorized to pin comments' });
+    }
+
+    if (comment.isPinned) {
+      // If comment is already pinned, unpin it
+      comment.isPinned = false;
+      await comment.save();
+      
+      // Clear recent comments cache since pin status changed
+      clearRecentCommentsCache();
+      
+      res.json({
+        isPinned: false,
+        message: 'Comment unpinned successfully'
+      });
+    } else {
+      // If comment is not pinned, first unpin any other pinned comments for this novel
+      await Comment.updateMany(
+        { 
+          contentType: 'novels', 
+          contentId: comment.contentId, 
+          isPinned: true,
+          _id: { $ne: comment._id } // Exclude current comment
+        },
+        { isPinned: false }
+      );
+      
+      // Then pin this comment
+      comment.isPinned = true;
+      await comment.save();
+      
+      // Clear recent comments cache since pin status changed
+      clearRecentCommentsCache();
+      
+      res.json({
+        isPinned: true,
+        message: 'Comment pinned successfully'
+      });
+    }
+  } catch (error) {
+    console.error('Error pinning comment:', error);
+    res.status(400).json({ message: error.message });
   }
 });
 
