@@ -2,7 +2,7 @@ import express from 'express';
 import { auth, checkBan } from '../middleware/auth.js';
 import Comment from '../models/Comment.js';
 import { broadcastEvent } from '../services/sseService.js';
-import { createCommentReplyNotification, createFollowCommentNotifications } from '../services/notificationService.js';
+import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification } from '../services/notificationService.js';
 
 const router = express.Router();
 
@@ -463,6 +463,14 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
   try {
     const userId = req.user._id;
 
+    // Get the comment before updating to check previous like status
+    const commentBefore = await Comment.findById(req.params.commentId);
+    if (!commentBefore) {
+      return res.status(404).json({ message: 'Comment not found' });
+    }
+
+    const wasLiked = commentBefore.likes.includes(userId);
+
     // Use findOneAndUpdate to handle concurrent requests atomically
     const comment = await Comment.findOneAndUpdate(
       { _id: req.params.commentId },
@@ -487,6 +495,46 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
     }
 
     const isLiked = comment.likes.includes(userId);
+
+    // Create notification only when liking (not when unliking)
+    if (!wasLiked && isLiked) {
+      // Extract novelId and chapterId from contentId and contentType
+      let novelId = null;
+      let chapterId = null;
+      
+      if (comment.contentType === 'novels') {
+        novelId = comment.contentId;
+      } else if (comment.contentType === 'chapters') {
+        // For chapters, contentId might be in format "novelId-chapterId"
+        const parts = comment.contentId.split('-');
+        if (parts.length === 2) {
+          novelId = parts[0];
+          chapterId = parts[1];
+        } else {
+          chapterId = comment.contentId;
+          // Try to get novelId from the chapter document
+          try {
+            const Chapter = require('../models/Chapter.js').default;
+            const chapterDoc = await Chapter.findById(chapterId);
+            if (chapterDoc) {
+              novelId = chapterDoc.novelId.toString();
+            }
+          } catch (err) {
+            console.error('Error getting novelId from chapter:', err);
+          }
+        }
+      }
+      
+      if (novelId) {
+        await createLikedCommentNotification(
+          comment.user.toString(),
+          comment._id.toString(),
+          userId.toString(),
+          novelId,
+          chapterId
+        );
+      }
+    }
 
     res.json({
       likes: comment.likes.length,

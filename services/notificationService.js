@@ -309,6 +309,71 @@ export const createFollowCommentNotifications = async (novelId, commentId, comme
 };
 
 /**
+ * Create notification for comment like
+ * @param {string} commentOwnerId - ID of the user who owns the comment
+ * @param {string} commentId - ID of the liked comment
+ * @param {string} likerId - ID of the user who liked the comment
+ * @param {string} novelId - ID of the novel where the comment was made
+ * @param {string} chapterId - ID of the chapter where the comment was made (optional)
+ */
+export const createLikedCommentNotification = async (commentOwnerId, commentId, likerId, novelId, chapterId = null) => {
+  try {
+    // Don't notify if user is liking their own comment
+    if (commentOwnerId === likerId) {
+      return;
+    }
+
+    const [novel, liker] = await Promise.all([
+      Novel.findById(novelId),
+      User.findById(likerId).select('displayName username')
+    ]);
+
+    if (!novel || !liker) return;
+
+    const likerDisplayName = liker.displayName || liker.username;
+
+    let message;
+    let linkData = { novelId, commentId };
+
+    if (chapterId) {
+      const chapter = await Chapter.findById(chapterId);
+      if (chapter) {
+        message = `<i>${likerDisplayName}</i> đã thích bình luận của bạn tại <b>${chapter.title}</b> trong truyện <b>${novel.title}</b>`;
+        linkData.chapterId = chapterId;
+        linkData.chapterTitle = chapter.title;
+      } else {
+        message = `<i>${likerDisplayName}</i> đã thích bình luận của bạn trong truyện <b>${novel.title}</b>`;
+      }
+    } else {
+      message = `<i>${likerDisplayName}</i> đã thích bình luận của bạn trong truyện <b>${novel.title}</b>`;
+    }
+
+    const notification = new Notification({
+      userId: commentOwnerId,
+      type: 'liked_comment',
+      title: 'Bình luận được thích',
+      message,
+      relatedUser: likerId,
+      relatedNovel: novelId,
+      relatedChapter: chapterId,
+      relatedComment: commentId,
+      data: linkData
+    });
+
+    await notification.save();
+    console.log(`Liked comment notification created for user ${commentOwnerId}`);
+    
+    // Broadcast new notification event
+    broadcastEvent('new_notification', {
+      userId: commentOwnerId,
+      notification: notification.toObject()
+    });
+  } catch (error) {
+    console.error('Error creating liked comment notification:', error);
+  }
+};
+
+/**
  * Get unread notification count for a user
  * @param {string} userId - ID of the user
  * @returns {number} Count of unread notifications
