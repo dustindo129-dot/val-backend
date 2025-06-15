@@ -511,6 +511,181 @@ router.get("/search", async (req, res) => {
 });
 
 /**
+ * Get Vietnamese novels with proper filtering and sorting
+ * @route GET /api/novels/vietnamese
+ */
+router.get("/vietnamese", async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 15;
+    const skip = (page - 1) * limit;
+    const sortOrder = req.query.sortOrder || 'updated';
+
+    // Check if we should bypass the cache
+    const bypass = shouldBypassCache(req.path, req.query);
+    
+    const cacheKey = `vietnamese_novels_${page}_${limit}_${sortOrder}`;
+    const cachedData = bypass ? null : cache.get(cacheKey);
+    
+    if (cachedData && !bypass) {
+      return res.json(cachedData);
+    }
+
+
+    
+    // Build sort criteria
+    let sortCriteria = {};
+    if (sortOrder === 'newest') {
+      sortCriteria = { createdAt: -1 };
+    } else if (sortOrder === 'updated') {
+      sortCriteria = { updatedAt: -1 };
+    } else if (sortOrder === 'rating') {
+      // Sort by calculated average rating
+      sortCriteria = { averageRating: -1 };
+    }
+
+    const [result] = await Novel.aggregate([
+      // Match novels with "Vietnamese Novel" genre
+      {
+        $match: {
+          genres: { $in: ['Vietnamese Novel'] }
+        }
+      },
+      
+      // Calculate average rating for sorting
+      {
+        $addFields: {
+          averageRating: {
+            $cond: {
+              if: { $gt: ['$ratings.total', 0] },
+              then: { $divide: ['$ratings.value', '$ratings.total'] },
+              else: 0
+            }
+          }
+        }
+      },
+      
+      {
+        $facet: {
+          total: [{ $count: 'count' }],
+          novels: [
+            // Sort first
+            { $sort: sortCriteria },
+            
+            // Then project needed fields
+            {
+              $project: {
+                title: 1,
+                illustration: 1,
+                status: 1,
+                genres: 1,
+                description: 1,
+                updatedAt: 1,
+                createdAt: 1,
+                averageRating: 1,
+                'ratings.total': 1,
+                'ratings.value': 1
+              }
+            },
+            
+            // Lookup latest chapters
+            {
+              $lookup: {
+                from: 'chapters',
+                let: { novelId: '$_id' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: ['$novelId', '$$novelId'] }
+                    }
+                  },
+                  { $sort: { createdAt: -1 } },
+                  { $limit: 3 },
+                  {
+                    $project: {
+                      _id: 1,
+                      title: 1,
+                      createdAt: 1
+                    }
+                  }
+                ],
+                as: 'chapters'
+              }
+            },
+            
+            // First chapter for "first chapter" link
+            {
+              $lookup: {
+                from: 'chapters',
+                let: { novelId: '$_id' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: ['$novelId', '$$novelId'] }
+                    }
+                  },
+                  { $sort: { order: 1 } },
+                  { $limit: 1 },
+                  {
+                    $project: {
+                      _id: 1,
+                      title: 1,
+                      order: 1
+                    }
+                  }
+                ],
+                as: 'firstChapter'
+              }
+            },
+            
+            // Set firstChapter as single object
+            {
+              $addFields: {
+                firstChapter: { $arrayElemAt: ['$firstChapter', 0] }
+              }
+            },
+            
+            // Apply pagination
+            { $skip: skip },
+            { $limit: limit }
+          ]
+        }
+      }
+    ]);
+
+    const total = result.total[0]?.count || 0;
+    const novels = result.novels || [];
+
+    const response = {
+      novels: novels,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit) || 1,
+        totalItems: total
+      }
+    };
+
+    // Cache the response
+    if (!bypass) {
+      cache.set(cacheKey, response);
+    }
+
+    res.json(response);
+  } catch (err) {
+    console.error("Error in GET /api/novels/vietnamese:", err);
+    res.status(500).json({
+      novels: [],
+      pagination: {
+        currentPage: 1,
+        totalPages: 1,
+        totalItems: 0
+      },
+      error: err.message
+    });
+  }
+});
+
+/**
  * Get hot novels (most viewed in specific time range)
  * @route GET /api/novels/hot
  */
