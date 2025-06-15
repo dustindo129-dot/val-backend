@@ -232,6 +232,83 @@ export const markAllNotificationsAsRead = async (userId) => {
 };
 
 /**
+ * Create notifications for new comments on followed novels
+ * @param {string} novelId - ID of the novel
+ * @param {string} commentId - ID of the new comment
+ * @param {string} commenterId - ID of the user who made the comment
+ * @param {string} chapterId - ID of the chapter (optional, null for novel comments)
+ */
+export const createFollowCommentNotifications = async (novelId, commentId, commenterId, chapterId = null) => {
+  try {
+    const novel = await Novel.findById(novelId);
+    if (!novel) return;
+
+    // Find all users who are following this novel using UserNovelInteraction
+    const followedInteractions = await UserNovelInteraction.find({
+      novelId: novelId,
+      followed: true
+    }).select('userId');
+
+    const followedUsers = followedInteractions.map(interaction => ({ _id: interaction.userId }));
+
+    if (followedUsers.length === 0) return;
+
+    // Get commenter info
+    const commenter = await User.findById(commenterId).select('displayName username');
+    if (!commenter) return;
+
+    const commenterDisplayName = commenter.displayName || commenter.username;
+
+    let message;
+    let linkData = { novelId, commentId };
+
+    if (chapterId) {
+      const chapter = await Chapter.findById(chapterId);
+      if (chapter) {
+        message = `<i>${commenterDisplayName}</i> đã bình luận tại <b>${chapter.title}</b> trong truyện <b>${novel.title}</b>`;
+        linkData.chapterId = chapterId;
+        linkData.chapterTitle = chapter.title;
+      } else {
+        message = `<i>${commenterDisplayName}</i> đã bình luận trong truyện <b>${novel.title}</b>`;
+      }
+    } else {
+      message = `<i>${commenterDisplayName}</i> đã bình luận trong truyện <b>${novel.title}</b>`;
+    }
+
+    // Create notifications for all following users (excluding the commenter)
+    const notifications = followedUsers
+      .filter(user => user._id.toString() !== commenterId) // Don't notify the commenter
+      .map(user => ({
+        userId: user._id,
+        type: 'follow_comment',
+        title: 'Bình luận mới',
+        message,
+        relatedUser: commenterId,
+        relatedNovel: novelId,
+        relatedChapter: chapterId,
+        relatedComment: commentId,
+        data: linkData
+      }));
+
+    if (notifications.length === 0) return;
+
+    const savedNotifications = await Notification.insertMany(notifications);
+    
+    // Broadcast new notification events for each user
+    savedNotifications.forEach(notification => {
+      broadcastEvent('new_notification', {
+        userId: notification.userId,
+        notification: notification.toObject()
+      });
+    });
+
+    console.log(`Follow comment notifications created for ${savedNotifications.length} users`);
+  } catch (error) {
+    console.error('Error creating follow comment notifications:', error);
+  }
+};
+
+/**
  * Get unread notification count for a user
  * @param {string} userId - ID of the user
  * @returns {number} Count of unread notifications

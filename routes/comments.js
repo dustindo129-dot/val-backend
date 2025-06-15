@@ -2,7 +2,7 @@ import express from 'express';
 import { auth, checkBan } from '../middleware/auth.js';
 import Comment from '../models/Comment.js';
 import { broadcastEvent } from '../services/sseService.js';
-import { createCommentReplyNotification } from '../services/notificationService.js';
+import { createCommentReplyNotification, createFollowCommentNotifications } from '../services/notificationService.js';
 
 const router = express.Router();
 
@@ -373,6 +373,16 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
           chapterId = parts[1];
         } else {
           chapterId = parentComment.contentId;
+          // Try to get novelId from the chapter document
+          try {
+            const Chapter = require('../models/Chapter.js').default;
+            const chapterDoc = await Chapter.findById(chapterId);
+            if (chapterDoc) {
+              novelId = chapterDoc.novelId.toString();
+            }
+          } catch (err) {
+            console.error('Error getting novelId from chapter:', err);
+          }
         }
       }
       
@@ -385,6 +395,42 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
           chapterId
         );
       }
+    }
+
+    // Create follow notifications for users following this novel (for replies too)
+    let novelId = null;
+    let chapterId = null;
+    
+    if (parentComment.contentType === 'novels') {
+      novelId = parentComment.contentId;
+    } else if (parentComment.contentType === 'chapters') {
+      // For chapters, contentId might be in format "novelId-chapterId"
+      const parts = parentComment.contentId.split('-');
+      if (parts.length === 2) {
+        novelId = parts[0];
+        chapterId = parts[1];
+      } else {
+        chapterId = parentComment.contentId;
+        // Try to get novelId from the chapter document
+        try {
+          const Chapter = require('../models/Chapter.js').default;
+          const chapterDoc = await Chapter.findById(chapterId);
+          if (chapterDoc) {
+            novelId = chapterDoc.novelId.toString();
+          }
+        } catch (err) {
+          console.error('Error getting novelId from chapter:', err);
+        }
+      }
+    }
+    
+    if (novelId) {
+      await createFollowCommentNotifications(
+        novelId,
+        reply._id.toString(),
+        req.user._id.toString(),
+        chapterId
+      );
     }
 
     // Notify clients about the new comment via SSE
@@ -475,6 +521,42 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
 
     // Populate user info
     await comment.populate('user', 'username displayName avatar');
+
+    // Create follow notifications for users following this novel
+    let novelId = null;
+    let chapterId = null;
+    
+    if (contentType === 'novels') {
+      novelId = contentId;
+    } else if (contentType === 'chapters') {
+      // For chapters, contentId might be in format "novelId-chapterId"
+      const parts = contentId.split('-');
+      if (parts.length === 2) {
+        novelId = parts[0];
+        chapterId = parts[1];
+      } else {
+        chapterId = contentId;
+        // Try to get novelId from the chapter document
+        try {
+          const Chapter = require('../models/Chapter.js').default;
+          const chapterDoc = await Chapter.findById(contentId);
+          if (chapterDoc) {
+            novelId = chapterDoc.novelId.toString();
+          }
+        } catch (err) {
+          console.error('Error getting novelId from chapter:', err);
+        }
+      }
+    }
+    
+    if (novelId) {
+      await createFollowCommentNotifications(
+        novelId,
+        comment._id.toString(),
+        req.user._id.toString(),
+        chapterId
+      );
+    }
 
     // Notify clients about the new comment via SSE
     broadcastEvent('new_comment', {

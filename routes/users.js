@@ -422,6 +422,190 @@ router.get('/:username/bookmarks', auth, async (req, res) => {
 });
 
 /**
+ * Check if a novel is followed by user
+ * @route GET /api/users/:username/follows/:novelId
+ */
+router.get('/:username/follows/:novelId', auth, async (req, res) => {
+  try {
+    // Check if user exists and matches the authenticated user
+    if (req.user.username !== req.params.username) {
+      return res.status(403).json({ message: 'Not authorized to view follows' });
+    }
+
+    // Validate novelId
+    if (!mongoose.Types.ObjectId.isValid(req.params.novelId)) {
+      return res.status(400).json({ message: 'Invalid novel ID' });
+    }
+
+    // Use UserNovelInteraction to check follow status
+    const interaction = await UserNovelInteraction.findOne({
+      userId: req.user._id,
+      novelId: req.params.novelId
+    });
+    
+    const isFollowed = interaction ? interaction.followed : false;
+    
+    res.json({ isFollowed });
+  } catch (error) {
+    console.error('Follow status check error:', error);
+    res.status(500).json({ message: 'Failed to check follow status' });
+  }
+});
+
+/**
+ * Follow/Unfollow a novel
+ * @route POST /api/users/:username/follows
+ */
+router.post('/:username/follows', auth, async (req, res) => {
+  try {
+    // Check if user exists and matches the authenticated user
+    if (req.user.username !== req.params.username) {
+      return res.status(403).json({ message: 'Not authorized to follow novels' });
+    }
+
+    const { novelId } = req.body;
+    if (!novelId || !mongoose.Types.ObjectId.isValid(novelId)) {
+      return res.status(400).json({ message: 'Invalid novel ID' });
+    }
+
+    // Find existing interaction or create a new one
+    let interaction = await UserNovelInteraction.findOne({
+      userId: req.user._id,
+      novelId: novelId
+    });
+
+    if (!interaction) {
+      // Create new interaction with followed=true
+      interaction = new UserNovelInteraction({
+        userId: req.user._id,
+        novelId: novelId,
+        followed: true,
+        updatedAt: new Date()
+      });
+      await interaction.save();
+      
+      return res.json({
+        message: 'Novel followed successfully',
+        isFollowed: true
+      });
+    } else {
+      // Toggle follow status
+      interaction.followed = !interaction.followed;
+      interaction.updatedAt = new Date();
+      await interaction.save();
+      
+      return res.json({
+        message: interaction.followed ? 'Novel followed successfully' : 'Novel unfollowed successfully',
+        isFollowed: interaction.followed
+      });
+    }
+  } catch (error) {
+    console.error('Follow toggle error:', error);
+    res.status(500).json({ message: 'Failed to toggle follow' });
+  }
+});
+
+/**
+ * Unfollow a novel
+ * @route DELETE /api/users/:username/follows/:novelId
+ */
+router.delete('/:username/follows/:novelId', auth, async (req, res) => {
+  try {
+    // Check if user exists and matches the authenticated user
+    if (req.user.username !== req.params.username) {
+      return res.status(403).json({ message: 'Not authorized to unfollow novels' });
+    }
+
+    // Validate novelId
+    if (!mongoose.Types.ObjectId.isValid(req.params.novelId)) {
+      return res.status(400).json({ message: 'Invalid novel ID' });
+    }
+
+    // Find interaction and set followed to false
+    const interaction = await UserNovelInteraction.findOne({
+      userId: req.user._id,
+      novelId: req.params.novelId
+    });
+
+    if (interaction && interaction.followed) {
+      interaction.followed = false;
+      interaction.updatedAt = new Date();
+      await interaction.save();
+    }
+
+    res.json({ 
+      message: 'Novel unfollowed successfully',
+      isFollowed: false 
+    });
+  } catch (error) {
+    console.error('Unfollow error:', error);
+    res.status(500).json({ message: 'Failed to unfollow novel' });
+  }
+});
+
+/**
+ * Get all followed novels for a user
+ * @route GET /api/users/:username/follows
+ */
+router.get('/:username/follows', auth, async (req, res) => {
+  try {
+    // Check if user exists and matches the authenticated user
+    if (req.user.username !== req.params.username) {
+      return res.status(403).json({ message: 'Not authorized to view follows' });
+    }
+
+    // Find all followed interactions for this user
+    const followedInteractions = await UserNovelInteraction.find({
+      userId: req.user._id,
+      followed: true
+    });
+    
+    if (followedInteractions.length === 0) {
+      return res.json([]);
+    }
+
+    // Extract novel IDs
+    const novelIds = followedInteractions.map(interaction => interaction.novelId);
+    
+    // Find all novels that are followed
+    const novels = await mongoose.model('Novel').find(
+      { _id: { $in: novelIds } },
+      { _id: 1, title: 1, illustration: 1 }
+    );
+    
+    // Then fetch the latest chapter for each novel
+    const followsWithDetails = await Promise.all(
+      novels.map(async (novel) => {
+        // Find the latest module and its latest chapter
+        const latestModule = await mongoose.model('Module')
+          .findOne({ novelId: novel._id })
+          .sort({ order: -1 })
+          .populate({
+            path: 'chapters',
+            select: 'title order',
+            options: { sort: { order: -1 }, limit: 1 }
+          });
+
+        return {
+          _id: novel._id,
+          title: novel.title || 'Untitled',
+          illustration: novel.illustration || '',
+          latestChapter: latestModule?.chapters?.[0] ? {
+            title: latestModule.chapters[0].title,
+            number: latestModule.chapters[0].order + 1
+          } : null
+        };
+      })
+    );
+
+    return res.json(followsWithDetails);
+  } catch (error) {
+    console.error('Follows fetch error:', error);
+    res.status(500).json({ message: 'Failed to fetch follows', error: error.message });
+  }
+});
+
+/**
  * Block a user
  * @route POST /api/users/:username/block
  */

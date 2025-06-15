@@ -77,7 +77,8 @@ router.get('/user/:novelId', auth, async (req, res) => {
         liked: false,
         rating: null,
         review: null,
-        bookmarked: false
+        bookmarked: false,
+        followed: false
       });
     }
 
@@ -85,7 +86,8 @@ router.get('/user/:novelId', auth, async (req, res) => {
       liked: interaction.liked || false,
       rating: interaction.rating || null,
       review: interaction.review || null,
-      bookmarked: interaction.bookmarked || false
+      bookmarked: interaction.bookmarked || false,
+      followed: interaction.followed || false
     });
   } catch (err) {
     console.error("Error getting user interaction:", err);
