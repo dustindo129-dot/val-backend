@@ -2733,10 +2733,9 @@ router.get("/:id/complete", async (req, res) => {
           .sort('order')
           .lean(),
           
-        // 3. Get chapters
+        // 3. Get chapters (no global sorting - we'll sort within modules)
         Chapter.find({ novelId: novelId })
           .select('title moduleId order createdAt updatedAt mode chapterBalance')
-          .sort('order')
           .lean(),
           
         // 4. Get gifts with counts (using the same aggregation but cached)
@@ -2823,7 +2822,7 @@ router.get("/:id/complete", async (req, res) => {
       // Populate staff ObjectIds with user display names
       const populatedNovel = await populateStaffNames(novel);
 
-      // Organize chapters by module
+      // Organize chapters by module and sort within each module
       const chaptersByModule = chapters.reduce((acc, chapter) => {
         const moduleId = chapter.moduleId.toString();
         if (!acc[moduleId]) {
@@ -2833,10 +2832,10 @@ router.get("/:id/complete", async (req, res) => {
         return acc;
       }, {});
 
-      // Attach chapters to their modules
+      // Attach chapters to their modules and sort chapters within each module by order
       const modulesWithChapters = modules.map(module => ({
         ...module,
-        chapters: chaptersByModule[module._id.toString()] || []
+        chapters: (chaptersByModule[module._id.toString()] || []).sort((a, b) => (a.order || 0) - (b.order || 0))
       }));
 
       // Build interaction response
