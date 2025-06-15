@@ -770,10 +770,9 @@ router.put('/:id', auth, async (req, res) => {
     }
 
     // Only update novel's timestamp for significant changes that should affect "latest updates"
-    // Don't update for simple content edits or manual mode changes
+    // Don't update for simple content edits, manual mode changes, or administrative balance changes
     // Novel timestamp will be updated automatically when paid content is unlocked via contributions
-    const shouldUpdateNovelTimestamp = 
-      (req.user.role === 'admin' && chapterBalance !== existingChapter.chapterBalance); // Admin changed chapter balance (for accounting purposes)
+    const shouldUpdateNovelTimestamp = false; // No manual admin actions should affect latest updates positioning
 
     if (shouldUpdateNovelTimestamp) {
       await Novel.findByIdAndUpdate(

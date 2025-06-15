@@ -2370,36 +2370,45 @@ router.get("/:id/contribution-history", async (req, res) => {
  * It stops at the first paid content that cannot be afforded
  */
 export async function checkAndUnlockContent(novelId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
   try {
-    const novel = await Novel.findById(novelId);
-    if (!novel || novel.novelBudget <= 0) return;
+    const novel = await Novel.findById(novelId).session(session);
+    if (!novel || novel.novelBudget <= 0) {
+      await session.abortTransaction();
+      return;
+    }
 
     // Get all modules for this novel, sorted by order
     const modules = await Module.find({ novelId })
       .sort({ order: 1 })
+      .session(session)
       .lean();
 
     let remainingBudget = novel.novelBudget;
     let unlocked = false;
+    let budgetChanged = false;
 
     for (const module of modules) {
       // If module is paid, try to unlock it first
       if (module.mode === 'paid') {
         if (remainingBudget >= module.moduleBalance) {
           // Unlock the module by changing mode to published
-          await Module.findByIdAndUpdate(module._id, { mode: 'published' });
+          await Module.findByIdAndUpdate(module._id, { mode: 'published' }, { session });
           remainingBudget -= module.moduleBalance;
           unlocked = true;
+          budgetChanged = true;
 
           // Create system contribution record
-          await ContributionHistory.create({
+          await ContributionHistory.create([{
             novelId,
             userId: null, // System action
             amount: -module.moduleBalance,
             note: `Mở khóa tự động: ${module.title}`,
             budgetAfter: remainingBudget,
             type: 'system'
-          });
+          }], { session });
 
           // Notify clients
           notifyAllClients('module_unlocked', { 
@@ -2420,6 +2429,7 @@ export async function checkAndUnlockContent(novelId) {
         // Get chapters for this module, sorted by order
         const chapters = await Chapter.find({ moduleId: module._id })
           .sort({ order: 1 })
+          .session(session)
           .lean();
 
         for (const chapter of chapters) {
@@ -2427,19 +2437,20 @@ export async function checkAndUnlockContent(novelId) {
           if (chapter.mode === 'paid') {
             if (remainingBudget >= chapter.chapterBalance) {
               // Unlock the chapter by changing mode to published
-              await Chapter.findByIdAndUpdate(chapter._id, { mode: 'published' });
+              await Chapter.findByIdAndUpdate(chapter._id, { mode: 'published' }, { session });
               remainingBudget -= chapter.chapterBalance;
               unlocked = true;
+              budgetChanged = true;
 
               // Create system contribution record
-              await ContributionHistory.create({
+              await ContributionHistory.create([{
                 novelId,
                 userId: null, // System action
                 amount: -chapter.chapterBalance,
                 note: `Mở khóa tự động: ${chapter.title}`,
                 budgetAfter: remainingBudget,
                 type: 'system'
-              });
+              }], { session });
 
               // Notify clients
               notifyAllClients('chapter_unlocked', { 
@@ -2451,8 +2462,12 @@ export async function checkAndUnlockContent(novelId) {
             } else {
               // Cannot afford this chapter, stop here (sequential unlock)
               // This means we cannot proceed to the next module either
-              // Only update budget, not timestamp (no content was unlocked)
-              return await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget });
+              // Update budget but don't update timestamp (no content was unlocked)
+              if (budgetChanged) {
+                await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget }, { session });
+              }
+              await session.commitTransaction();
+              return;
             }
           }
           // If chapter is already published, continue to next chapter
@@ -2466,14 +2481,23 @@ export async function checkAndUnlockContent(novelId) {
       await Novel.findByIdAndUpdate(novelId, { 
         novelBudget: remainingBudget,
         updatedAt: new Date()
-      });
+      }, { session });
       
       // Clear all caches since content was unlocked - this affects novel and chapter data
       clearNovelCaches();
+    } else if (budgetChanged) {
+      // Budget changed but nothing was unlocked (shouldn't happen, but safety check)
+      await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget }, { session });
     }
 
+    await session.commitTransaction();
+
   } catch (error) {
+    await session.abortTransaction();
     console.error('Error in auto-unlock:', error);
+    throw error; // Re-throw to allow calling code to handle the error
+  } finally {
+    session.endSession();
   }
 }
 
