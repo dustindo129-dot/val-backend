@@ -1390,7 +1390,7 @@ router.get("/:id", async (req, res) => {
           }
         },
         
-        // Lookup all chapters for this novel
+        // Lookup all chapters for this novel (no global sorting - we'll sort within modules)
         {
           $lookup: {
             from: 'chapters',
@@ -1407,8 +1407,8 @@ router.get("/:id", async (req, res) => {
                   mode: 1,
                   chapterBalance: 1
                 }
-              },
-              { $sort: { order: 1 } }
+              }
+              // Removed global sorting - we'll sort within each module instead
             ],
             as: 'allChapters'
           }
@@ -1445,7 +1445,7 @@ router.get("/:id", async (req, res) => {
         return { error: "Novel not found", status: 404 };
       }
 
-      // Organize chapters by module efficiently
+      // Organize chapters by module efficiently AND sort within each module
       const chaptersByModule = novelWithData.allChapters.reduce((acc, chapter) => {
         const moduleId = chapter.moduleId.toString();
         if (!acc[moduleId]) {
@@ -1455,10 +1455,10 @@ router.get("/:id", async (req, res) => {
         return acc;
       }, {});
 
-      // Attach chapters to their modules
+      // Attach chapters to their modules and sort chapters within each module by order
       const modulesWithChapters = novelWithData.modules.map(module => ({
         ...module,
-        chapters: chaptersByModule[module._id.toString()] || []
+        chapters: (chaptersByModule[module._id.toString()] || []).sort((a, b) => (a.order || 0) - (b.order || 0))
       }));
 
       // Clean up the response structure
@@ -2539,11 +2539,9 @@ router.get("/:id/contribution-history", async (req, res) => {
   }
 });
 
-/**
- * Auto-unlock content based on novel budget
- * This function checks if any paid modules/chapters can be unlocked in sequential order
- * It stops at the first paid content that cannot be afforded
- */
+
+
+// ... existing code ...
 export async function checkAndUnlockContent(novelId) {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -2607,6 +2605,10 @@ export async function checkAndUnlockContent(novelId) {
           .session(session)
           .lean();
 
+        // Process paid chapters in THIS module first, regardless of their global order numbers
+        // This ensures module-by-module unlocking rather than global order unlocking
+        let moduleHasUnpaidChapters = false;
+        
         for (const chapter of chapters) {
           // If chapter is paid, try to unlock it
           if (chapter.mode === 'paid') {
@@ -2635,17 +2637,24 @@ export async function checkAndUnlockContent(novelId) {
                 chapterTitle: chapter.title 
               });
             } else {
-              // Cannot afford this chapter, stop here (sequential unlock)
-              // This means we cannot proceed to the next module either
-              // Update budget but don't update timestamp (no content was unlocked)
-              if (budgetChanged) {
-                await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget }, { session });
-              }
-              await session.commitTransaction();
-              return;
+              // Cannot afford this chapter in current module
+              // Mark that this module still has unpaid chapters
+              moduleHasUnpaidChapters = true;
+              break; // Stop processing this module and don't proceed to next modules
             }
           }
           // If chapter is already published, continue to next chapter
+        }
+        
+        // If current module still has unpaid chapters, stop processing entirely
+        // Don't proceed to next modules until current module is fully unlocked
+        if (moduleHasUnpaidChapters) {
+          // Update budget but don't update timestamp (no content was unlocked)
+          if (budgetChanged) {
+            await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget }, { session });
+          }
+          await session.commitTransaction();
+          return;
         }
       }
     }
@@ -2657,15 +2666,25 @@ export async function checkAndUnlockContent(novelId) {
         novelBudget: remainingBudget,
         updatedAt: new Date()
       }, { session });
-      
-      // Clear all caches since content was unlocked - this affects novel and chapter data
-      clearNovelCaches();
     } else if (budgetChanged) {
       // Budget changed but nothing was unlocked (shouldn't happen, but safety check)
       await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget }, { session });
     }
 
     await session.commitTransaction();
+    
+    // Clear all caches AFTER successful transaction commit
+    // This ensures cache clearing only happens if database changes were persisted
+    if (unlocked) {
+      clearNovelCaches();
+      
+      // Send additional notification to ensure frontend refreshes
+      notifyAllClients('novel_updated_for_latest', { 
+        novelId, 
+        timestamp: new Date().toISOString(),
+        reason: 'content_unlocked'
+      });
+    }
 
   } catch (error) {
     await session.abortTransaction();
@@ -3541,5 +3560,7 @@ router.get("/:id/dashboard", async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
+
 
 export default router;
