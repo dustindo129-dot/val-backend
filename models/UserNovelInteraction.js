@@ -51,7 +51,13 @@ const userNovelInteractionSchema = new mongoose.Schema({
   toObject: { getters: true }
 });
 
-// Create a compound index to ensure each user can only have one interaction record per novel
+// Create indexes for better query performance
 userNovelInteractionSchema.index({ userId: 1, novelId: 1 }, { unique: true });
+userNovelInteractionSchema.index({ novelId: 1 });
+userNovelInteractionSchema.index({ novelId: 1, liked: 1 });
+userNovelInteractionSchema.index({ novelId: 1, rating: 1 });
+userNovelInteractionSchema.index({ novelId: 1, bookmarked: 1 });
+userNovelInteractionSchema.index({ userId: 1, bookmarked: 1 });
+userNovelInteractionSchema.index({ novelId: 1, review: 1, updatedAt: -1 });
 
 export default mongoose.model('UserNovelInteraction', userNovelInteractionSchema); 

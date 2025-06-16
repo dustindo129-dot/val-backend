@@ -57,8 +57,28 @@ const clearRecentCommentsCache = () => {
   recentCommentsCache.clear();
 };
 
-// Export the cache clearing function for use in other routes
-export { clearRecentCommentsCache };
+// Clear all comment-related caches
+const clearAllCommentCaches = () => {
+  recentCommentsCache.clear();
+  pendingCommentsQueries.clear();
+};
+
+// Clear user stats cache when user actions change
+const clearUserStatsCache = async (userId) => {
+  try {
+    // Import and call the user stats cache clearing function
+    const { clearUserStatsCache: clearStats } = await import('./users.js');
+    if (clearStats) {
+      clearStats(userId);
+    }
+  } catch (error) {
+    // Silently fail if user stats cache is not available
+    console.warn('Could not clear user stats cache:', error.message);
+  }
+};
+
+// Export the cache clearing functions for use in other routes
+export { clearRecentCommentsCache, clearAllCommentCaches, clearUserStatsCache };
 
 /**
  * Get all comments for a novel (including chapter comments)
@@ -73,76 +93,107 @@ router.get('/novel/:novelId', async (req, res) => {
       return res.status(400).json({ message: 'novelId is required' });
     }
 
-    // Get all comments for this novel and its chapters
-    const allComments = await Comment.aggregate([
-      {
-        $match: {
-          $or: [
-            // Direct novel comments
-            { contentType: 'novels', contentId: novelId },
-            // Chapter comments (contentId format: "novelId-chapterId" or just chapterId)
-            { 
-              contentType: 'chapters', 
-              $or: [
-                { contentId: { $regex: `^${novelId}-` } }, // Format: "novelId-chapterId"
-                { contentId: { $in: [] } } // Will be populated with chapter IDs
-              ]
-            }
-          ],
-          adminDeleted: { $ne: true }
-        }
-      },
-      {
-        $addFields: {
-          likesCount: { $size: "$likes" }
-        }
-      },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'user',
-          foreignField: '_id',
-          pipeline: [
-            { $project: { username: 1, displayName: 1, avatar: 1 } }
-          ],
-          as: 'userInfo'
-        }
-      },
-      {
-        $unwind: '$userInfo'
-      },
-      // Lookup chapter info for chapter comments
-      {
-        $lookup: {
-          from: 'chapters',
-          let: { 
-            contentId: '$contentId',
-            contentType: '$contentType'
-          },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $and: [
-                    { $eq: ['$$contentType', 'chapters'] },
-                    {
-                      $or: [
-                        // Handle contentId format: "novelId-chapterId"
-                        { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] },
-                        // Handle direct chapter ID
-                        { $eq: [{ $toString: '$_id' }, '$$contentId'] }
-                      ]
-                    }
-                  ]
-                }
+    // Use query deduplication to prevent multiple identical requests
+    const cacheKey = `novel_comments_${novelId}_${sort}_${req.user?._id || 'anonymous'}`;
+    
+    const comments = await dedupCommentsQuery(cacheKey, async () => {
+      // Get all chapter IDs for this novel first
+      const Chapter = (await import('../models/Chapter.js')).default;
+      const chapters = await Chapter.find({ novelId }, '_id');
+      const chapterIds = chapters.map(ch => ch._id.toString());
+
+      // Build the aggregation pipeline with proper sorting
+      const pipeline = [
+        {
+          $match: {
+            $or: [
+              // Direct novel comments
+              { contentType: 'novels', contentId: novelId },
+              // Chapter comments
+              { 
+                contentType: 'chapters', 
+                $or: [
+                  { contentId: { $regex: `^${novelId}-` } },
+                  ...(chapterIds.length > 0 ? [{ contentId: { $in: chapterIds } }] : [])
+                ]
               }
-            },
-            { $project: { title: 1, order: 1 } }
-          ],
-          as: 'chapterInfo'
+            ],
+            adminDeleted: { $ne: true }
+          }
+        },
+        {
+          $addFields: {
+            likesCount: { $size: "$likes" }
+          }
         }
-      },
-      {
+      ];
+
+      // Add sorting to the pipeline for better performance
+      switch (sort) {
+        case 'likes':
+          pipeline.push({ $sort: { likesCount: -1, createdAt: -1 } });
+          break;
+        case 'oldest':
+          pipeline.push({ $sort: { createdAt: 1 } });
+          break;
+        default: // newest
+          pipeline.push({ $sort: { createdAt: -1 } });
+      }
+
+      // Add user lookup
+      pipeline.push(
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'user',
+            foreignField: '_id',
+            pipeline: [
+              { $project: { username: 1, displayName: 1, avatar: 1 } }
+            ],
+            as: 'userInfo'
+          }
+        },
+        {
+          $unwind: '$userInfo'
+        }
+      );
+
+      // Add chapter info lookup only if we have chapter comments
+      if (chapterIds.length > 0) {
+        pipeline.push({
+          $lookup: {
+            from: 'chapters',
+            let: { 
+              contentId: '$contentId',
+              contentType: '$contentType'
+            },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ['$$contentType', 'chapters'] },
+                      {
+                        $or: [
+                          // Handle contentId format: "novelId-chapterId"
+                          { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] },
+                          // Handle direct chapter ID
+                          { $eq: [{ $toString: '$_id' }, '$$contentId'] }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              },
+              { $project: { title: 1, order: 1 } }
+            ],
+            as: 'chapterInfo'
+          }
+        });
+      }
+
+      // Final projection
+      pipeline.push({
         $project: {
           _id: 1,
           text: 1,
@@ -163,156 +214,22 @@ router.get('/novel/:novelId', async (req, res) => {
             avatar: '$userInfo.avatar'
           }
         }
-      }
-    ]);
-
-    // Get all chapter IDs for this novel to include in the query
-    try {
-      const Chapter = (await import('../models/Chapter.js')).default;
-      const chapters = await Chapter.find({ novelId }, '_id');
-      const chapterIds = chapters.map(ch => ch._id.toString());
-      
-      // Re-run the query with proper chapter IDs if needed
-      if (chapterIds.length > 0) {
-        const updatedComments = await Comment.aggregate([
-          {
-            $match: {
-              $or: [
-                // Direct novel comments
-                { contentType: 'novels', contentId: novelId },
-                // Chapter comments
-                { 
-                  contentType: 'chapters', 
-                  $or: [
-                    { contentId: { $regex: `^${novelId}-` } },
-                    { contentId: { $in: chapterIds } }
-                  ]
-                }
-              ],
-              adminDeleted: { $ne: true }
-            }
-          },
-          {
-            $addFields: {
-              likesCount: { $size: "$likes" }
-            }
-          },
-          {
-            $lookup: {
-              from: 'users',
-              localField: 'user',
-              foreignField: '_id',
-              pipeline: [
-                { $project: { username: 1, displayName: 1, avatar: 1 } }
-              ],
-              as: 'userInfo'
-            }
-          },
-          {
-            $unwind: '$userInfo'
-          },
-          // Lookup chapter info for chapter comments
-          {
-            $lookup: {
-              from: 'chapters',
-              let: { 
-                contentId: '$contentId',
-                contentType: '$contentType'
-              },
-              pipeline: [
-                {
-                  $match: {
-                    $expr: {
-                      $and: [
-                        { $eq: ['$$contentType', 'chapters'] },
-                        {
-                          $or: [
-                            // Handle contentId format: "novelId-chapterId"
-                            { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] },
-                            // Handle direct chapter ID
-                            { $eq: [{ $toString: '$_id' }, '$$contentId'] }
-                          ]
-                        }
-                      ]
-                    }
-                  }
-                },
-                { $project: { title: 1, order: 1 } }
-              ],
-              as: 'chapterInfo'
-            }
-          },
-          {
-            $project: {
-              _id: 1,
-              text: 1,
-              contentType: 1,
-              contentId: 1,
-              parentId: 1,
-              createdAt: 1,
-              isDeleted: 1,
-              adminDeleted: 1,
-              likes: 1,
-              likesCount: 1,
-              isPinned: 1,
-              chapterInfo: { $arrayElemAt: ['$chapterInfo', 0] },
-              user: {
-                _id: '$userInfo._id',
-                username: '$userInfo.username',
-                displayName: '$userInfo.displayName',
-                avatar: '$userInfo.avatar'
-              }
-            }
-          }
-        ]);
-        
-        // Sort all comments based on the sort parameter
-        switch (sort) {
-          case 'likes':
-            updatedComments.sort((a, b) => b.likesCount - a.likesCount || b.createdAt - a.createdAt);
-            break;
-          case 'oldest':
-            updatedComments.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-            break;
-          default: // newest
-            updatedComments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        }
-
-        // Add liked status if user is authenticated
-        if (req.user) {
-          const userId = req.user._id;
-          updatedComments.forEach(comment => {
-            comment.liked = comment.likes.includes(userId);
-          });
-        }
-
-        return res.json(updatedComments);
-      }
-    } catch (error) {
-      console.error('Error fetching chapters:', error);
-    }
-
-    // Sort all comments based on the sort parameter
-    switch (sort) {
-      case 'likes':
-        allComments.sort((a, b) => b.likesCount - a.likesCount || b.createdAt - a.createdAt);
-        break;
-      case 'oldest':
-        allComments.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-        break;
-      default: // newest
-        allComments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    }
-
-    // Add liked status if user is authenticated
-    if (req.user) {
-      const userId = req.user._id;
-      allComments.forEach(comment => {
-        comment.liked = comment.likes.includes(userId);
       });
-    }
 
-    res.json(allComments);
+      const allComments = await Comment.aggregate(pipeline);
+
+      // Add liked status if user is authenticated
+      if (req.user) {
+        const userId = req.user._id;
+        allComments.forEach(comment => {
+          comment.liked = comment.likes.includes(userId);
+        });
+      }
+
+      return allComments;
+    });
+
+    res.json(comments);
   } catch (err) {
     console.error('Error fetching novel comments:', err);
     res.status(500).json({ message: err.message });
@@ -332,78 +249,91 @@ router.get('/', async (req, res) => {
       return res.status(400).json({ message: 'contentType and contentId are required' });
     }
 
-    // Get all comments for this content, including replies
-    const allComments = await Comment.aggregate([
-      {
-        $match: {
-          contentType,
-          contentId,
-          adminDeleted: { $ne: true }
-        }
-      },
-      {
-        $addFields: {
-          likesCount: { $size: "$likes" }
-        }
-      },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'user',
-          foreignField: '_id',
-          pipeline: [
-            { $project: { username: 1, displayName: 1, avatar: 1 } }
-          ],
-          as: 'userInfo'
-        }
-      },
-      {
-        $unwind: '$userInfo'
-      },
-      {
-        $project: {
-          _id: 1,
-          text: 1,
-          contentType: 1,
-          contentId: 1,
-          parentId: 1,
-          createdAt: 1,
-          isDeleted: 1,
-          adminDeleted: 1,
-          likes: 1,
-          likesCount: 1,
-          isPinned: 1,
-          user: {
-            _id: '$userInfo._id',
-            username: '$userInfo.username',
-            displayName: '$userInfo.displayName',
-            avatar: '$userInfo.avatar'
+    // Use query deduplication to prevent multiple identical requests
+    const cacheKey = `comments_${contentType}_${contentId}_${sort}_${req.user?._id || 'anonymous'}`;
+    
+    const comments = await dedupCommentsQuery(cacheKey, async () => {
+      // Build the aggregation pipeline with proper sorting
+      const pipeline = [
+        {
+          $match: {
+            contentType,
+            contentId,
+            adminDeleted: { $ne: true }
+          }
+        },
+        {
+          $addFields: {
+            likesCount: { $size: "$likes" }
           }
         }
+      ];
+
+      // Add sorting to the pipeline for better performance
+      switch (sort) {
+        case 'likes':
+          pipeline.push({ $sort: { likesCount: -1, createdAt: -1 } });
+          break;
+        case 'oldest':
+          pipeline.push({ $sort: { createdAt: 1 } });
+          break;
+        default: // newest
+          pipeline.push({ $sort: { createdAt: -1 } });
       }
-    ]);
 
-    // Sort all comments based on the sort parameter
-    switch (sort) {
-      case 'likes':
-        allComments.sort((a, b) => b.likesCount - a.likesCount || b.createdAt - a.createdAt);
-        break;
-      case 'oldest':
-        allComments.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-        break;
-      default: // newest
-        allComments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    }
+      // Add user lookup and projection
+      pipeline.push(
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'user',
+            foreignField: '_id',
+            pipeline: [
+              { $project: { username: 1, displayName: 1, avatar: 1 } }
+            ],
+            as: 'userInfo'
+          }
+        },
+        {
+          $unwind: '$userInfo'
+        },
+        {
+          $project: {
+            _id: 1,
+            text: 1,
+            contentType: 1,
+            contentId: 1,
+            parentId: 1,
+            createdAt: 1,
+            isDeleted: 1,
+            adminDeleted: 1,
+            likes: 1,
+            likesCount: 1,
+            isPinned: 1,
+            user: {
+              _id: '$userInfo._id',
+              username: '$userInfo.username',
+              displayName: '$userInfo.displayName',
+              avatar: '$userInfo.avatar'
+            }
+          }
+        }
+      );
 
-    // Add liked status if user is authenticated
-    if (req.user) {
-      const userId = req.user._id;
-      allComments.forEach(comment => {
-        comment.liked = comment.likes.includes(userId);
-      });
-    }
+      const allComments = await Comment.aggregate(pipeline);
 
-    res.json(allComments);
+      // Add liked status if user is authenticated
+      if (req.user) {
+        const userId = req.user._id;
+        allComments.forEach(comment => {
+          comment.liked = comment.likes.includes(userId);
+        });
+      }
+
+      return allComments;
+    });
+
+    res.json(comments);
   } catch (err) {
     console.error('Error fetching comments:', err);
     res.status(500).json({ message: err.message });
@@ -611,8 +541,11 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     // Save the reply
     await reply.save();
     
-    // Clear recent comments cache since a new comment was added
-    clearRecentCommentsCache();
+    // Clear all comment caches since a new comment was added
+    clearAllCommentCaches();
+    
+    // Clear user stats cache for the comment author
+    clearUserStatsCache(req.user._id.toString());
     
     // Populate user info
     await reply.populate('user', 'username displayName avatar');
@@ -852,8 +785,8 @@ router.post('/:commentId/pin', auth, async (req, res) => {
       comment.isPinned = false;
       await comment.save();
       
-      // Clear recent comments cache since pin status changed
-      clearRecentCommentsCache();
+      // Clear all comment caches since pin status changed
+      clearAllCommentCaches();
       
       res.json({
         isPinned: false,
@@ -875,8 +808,8 @@ router.post('/:commentId/pin', auth, async (req, res) => {
       comment.isPinned = true;
       await comment.save();
       
-      // Clear recent comments cache since pin status changed
-      clearRecentCommentsCache();
+      // Clear all comment caches since pin status changed
+      clearAllCommentCaches();
       
       res.json({
         isPinned: true,
@@ -907,8 +840,11 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
 
     await comment.save();
     
-    // Clear recent comments cache since a new comment was added
-    clearRecentCommentsCache();
+    // Clear all comment caches since a new comment was added
+    clearAllCommentCaches();
+    
+    // Clear user stats cache for the comment author
+    clearUserStatsCache(req.user._id.toString());
 
     // Populate user info
     await comment.populate('user', 'username displayName avatar');
@@ -1038,6 +974,10 @@ router.delete('/:commentId', auth, async (req, res) => {
     }
 
     await comment.save();
+    
+    // Clear user stats cache for the comment author
+    clearUserStatsCache(comment.user.toString());
+    
     res.json({ 
       message: 'Comment deleted successfully',
       isAdminDelete: isAdmin

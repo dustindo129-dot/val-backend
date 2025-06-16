@@ -7,6 +7,61 @@ import Novel from '../models/Novel.js';
 
 const router = express.Router();
 
+// Simple in-memory cache for user interaction stats
+const userStatsCache = new Map();
+const USER_STATS_CACHE_TTL = 1000 * 60 * 5; // 5 minutes
+const MAX_USER_STATS_CACHE_SIZE = 100;
+
+// Query deduplication cache for user interactions
+const pendingUserQueries = new Map();
+
+// Helper function to manage user stats cache
+const getCachedUserStats = (userId) => {
+  const cached = userStatsCache.get(userId);
+  if (cached && Date.now() - cached.timestamp < USER_STATS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedUserStats = (userId, data) => {
+  if (userStatsCache.size >= MAX_USER_STATS_CACHE_SIZE) {
+    const oldestKey = userStatsCache.keys().next().value;
+    userStatsCache.delete(oldestKey);
+  }
+  
+  userStatsCache.set(userId, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+// Query deduplication helper for user interactions
+const dedupUserQuery = async (key, queryFn) => {
+  if (pendingUserQueries.has(key)) {
+    return await pendingUserQueries.get(key);
+  }
+  
+  const queryPromise = queryFn();
+  pendingUserQueries.set(key, queryPromise);
+  
+  try {
+    const result = await queryPromise;
+    return result;
+  } finally {
+    pendingUserQueries.delete(key);
+  }
+};
+
+// Clear user stats cache
+const clearUserStatsCache = (userId = null) => {
+  if (userId) {
+    userStatsCache.delete(userId);
+  } else {
+    userStatsCache.clear();
+  }
+};
+
 /**
  * Get novel interaction statistics
  * @route GET /api/usernovelinteractions/stats/:novelId
@@ -15,50 +70,57 @@ router.get('/stats/:novelId', async (req, res) => {
   try {
     const novelId = req.params.novelId;
     
-    // Aggregate interactions data
-    const [stats] = await UserNovelInteraction.aggregate([
-      {
-        $match: { novelId: new mongoose.Types.ObjectId(novelId) }
-      },
-      {
-        $group: {
-          _id: null,
-          totalLikes: {
-            $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
-          },
-          totalRatings: {
-            $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
-          },
-          totalBookmarks: {
-            $sum: { $cond: [{ $eq: ['$bookmarked', true] }, 1, 0] }
-          },
-          ratingSum: {
-            $sum: { $ifNull: ['$rating', 0] }
+    // Use query deduplication to prevent multiple identical requests
+    const cacheKey = `novel_stats_${novelId}`;
+    
+    const stats = await dedupUserQuery(cacheKey, async () => {
+      // Aggregate interactions data
+      const [result] = await UserNovelInteraction.aggregate([
+        {
+          $match: { novelId: new mongoose.Types.ObjectId(novelId) }
+        },
+        {
+          $group: {
+            _id: null,
+            totalLikes: {
+              $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
+            },
+            totalRatings: {
+              $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
+            },
+            totalBookmarks: {
+              $sum: { $cond: [{ $eq: ['$bookmarked', true] }, 1, 0] }
+            },
+            ratingSum: {
+              $sum: { $ifNull: ['$rating', 0] }
+            }
           }
         }
+      ]);
+
+      // If no interactions exist yet, return default values
+      if (!result) {
+        return {
+          totalLikes: 0,
+          totalRatings: 0,
+          totalBookmarks: 0,
+          averageRating: '0.0'
+        };
       }
-    ]);
 
-    // If no interactions exist yet, return default values
-    if (!stats) {
-      return res.json({
-        totalLikes: 0,
-        totalRatings: 0,
-        totalBookmarks: 0,
-        averageRating: '0.0'
-      });
-    }
+      const averageRating = result.totalRatings > 0 
+        ? (result.ratingSum / result.totalRatings).toFixed(1) 
+        : '0.0';
 
-    const averageRating = stats.totalRatings > 0 
-      ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
-      : '0.0';
-
-    res.json({
-      totalLikes: stats.totalLikes,
-      totalRatings: stats.totalRatings,
-      totalBookmarks: stats.totalBookmarks,
-      averageRating
+      return {
+        totalLikes: result.totalLikes,
+        totalRatings: result.totalRatings,
+        totalBookmarks: result.totalBookmarks,
+        averageRating
+      };
     });
+
+    res.json(stats);
   } catch (err) {
     console.error('Error getting novel interactions:', err);
     res.status(500).json({ message: err.message });
@@ -74,26 +136,33 @@ router.get('/user/:novelId', auth, async (req, res) => {
     const novelId = req.params.novelId;
     const userId = req.user._id;
 
-    // Get user's interaction
-    const interaction = await UserNovelInteraction.findOne({ userId, novelId });
+    // Use query deduplication to prevent multiple identical requests
+    const cacheKey = `user_interaction_${userId}_${novelId}`;
     
-    if (!interaction) {
-      return res.json({
-        liked: false,
-        rating: null,
-        review: null,
-        bookmarked: false,
-        followed: false
-      });
-    }
+    const interaction = await dedupUserQuery(cacheKey, async () => {
+      // Get user's interaction
+      const result = await UserNovelInteraction.findOne({ userId, novelId });
+      
+      if (!result) {
+        return {
+          liked: false,
+          rating: null,
+          review: null,
+          bookmarked: false,
+          followed: false
+        };
+      }
 
-    return res.json({
-      liked: interaction.liked || false,
-      rating: interaction.rating || null,
-      review: interaction.review || null,
-      bookmarked: interaction.bookmarked || false,
-      followed: interaction.followed || false
+      return {
+        liked: result.liked || false,
+        rating: result.rating || null,
+        review: result.review || null,
+        bookmarked: result.bookmarked || false,
+        followed: result.followed || false
+      };
     });
+
+    res.json(interaction);
   } catch (err) {
     console.error("Error getting user interaction:", err);
     res.status(500).json({ message: err.message });
@@ -134,6 +203,21 @@ router.post('/like', auth, async (req, res) => {
       interaction.liked = !interaction.liked;
     }
     await interaction.save();
+
+    // Clear caches for this user and novel
+    clearUserStatsCache(userId);
+    pendingUserQueries.delete(`novel_stats_${novelId}`);
+    pendingUserQueries.delete(`user_interaction_${userId}_${novelId}`);
+    
+    // Clear user stats cache from users route
+    try {
+      const { clearUserStatsCache: clearStats } = await import('./users.js');
+      if (clearStats) {
+        clearStats(userId.toString());
+      }
+    } catch (error) {
+      console.warn('Could not clear user stats cache:', error.message);
+    }
 
     // Get total likes count
     const [stats] = await UserNovelInteraction.aggregate([
@@ -194,6 +278,21 @@ router.post('/rate', auth, async (req, res) => {
     }
     await interaction.save();
 
+    // Clear caches for this user and novel
+    clearUserStatsCache(userId);
+    pendingUserQueries.delete(`novel_stats_${novelId}`);
+    pendingUserQueries.delete(`user_interaction_${userId}_${novelId}`);
+    
+    // Clear user stats cache from users route
+    try {
+      const { clearUserStatsCache: clearStats } = await import('./users.js');
+      if (clearStats) {
+        clearStats(userId.toString());
+      }
+    } catch (error) {
+      console.warn('Could not clear user stats cache:', error.message);
+    }
+
     // Calculate new rating statistics
     const [stats] = await UserNovelInteraction.aggregate([
       { $match: { novelId: new mongoose.Types.ObjectId(novelId), rating: { $exists: true, $ne: null } } },
@@ -247,6 +346,21 @@ router.delete('/rate/:novelId', auth, async (req, res) => {
     // Remove rating
     interaction.rating = null;
     await interaction.save();
+
+    // Clear caches for this user and novel
+    clearUserStatsCache(userId);
+    pendingUserQueries.delete(`novel_stats_${novelId}`);
+    pendingUserQueries.delete(`user_interaction_${userId}_${novelId}`);
+    
+    // Clear user stats cache from users route
+    try {
+      const { clearUserStatsCache: clearStats } = await import('./users.js');
+      if (clearStats) {
+        clearStats(userId.toString());
+      }
+    } catch (error) {
+      console.warn('Could not clear user stats cache:', error.message);
+    }
 
     // Calculate new rating statistics
     const [stats] = await UserNovelInteraction.aggregate([
@@ -309,6 +423,21 @@ router.post('/bookmark', auth, async (req, res) => {
       interaction.bookmarked = !interaction.bookmarked;
     }
     await interaction.save();
+
+    // Clear caches for this user and novel
+    clearUserStatsCache(userId);
+    pendingUserQueries.delete(`novel_stats_${novelId}`);
+    pendingUserQueries.delete(`user_interaction_${userId}_${novelId}`);
+    
+    // Clear user stats cache from users route
+    try {
+      const { clearUserStatsCache: clearStats } = await import('./users.js');
+      if (clearStats) {
+        clearStats(userId.toString());
+      }
+    } catch (error) {
+      console.warn('Could not clear user stats cache:', error.message);
+    }
 
     return res.json({ 
       bookmarked: interaction.bookmarked

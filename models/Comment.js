@@ -121,8 +121,13 @@ const commentSchema = new mongoose.Schema({
   }
 });
 
-// Add index for faster querying of replies
+// Add indexes for faster querying
 commentSchema.index({ parentId: 1 });
+commentSchema.index({ contentType: 1, contentId: 1 });
+commentSchema.index({ contentType: 1, contentId: 1, adminDeleted: 1 });
+commentSchema.index({ createdAt: -1 });
+commentSchema.index({ user: 1, isDeleted: 1 });
+commentSchema.index({ isPinned: 1, contentType: 1, contentId: 1 });
 
 // Virtual property to get the count of likes
 commentSchema.virtual('likeCount').get(function() {

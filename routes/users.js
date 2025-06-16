@@ -16,6 +16,131 @@ import { getCachedUserById, getCachedUserByUsername, clearUserCache } from '../u
 const router = express.Router();
 
 /**
+ * Get comprehensive user statistics
+ * @route GET /api/users/:userId/stats
+ */
+router.get('/:userId/stats', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Only allow users to view their own stats or admins to view any stats
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to view these stats' });
+    }
+
+    // Use query deduplication and caching
+    const cacheKey = `user_stats_${userId}`;
+    
+    const stats = await dedupUserStatsQuery(cacheKey, async () => {
+      // Check cache first
+      const cachedStats = getCachedUserStats(userId);
+      if (cachedStats) {
+        return cachedStats;
+      }
+
+      // Fetch all stats in parallel for better performance
+      const [
+        commentsCount,
+        chapterInteractionsCount,
+        novelRatingsCount,
+        notificationsCount
+      ] = await Promise.all([
+        Comment.countDocuments({ 
+          user: new mongoose.Types.ObjectId(userId), 
+          isDeleted: { $ne: true } 
+        }),
+        UserChapterInteraction.countDocuments({ 
+          userId: new mongoose.Types.ObjectId(userId) 
+        }),
+        UserNovelInteraction.countDocuments({ 
+          userId: new mongoose.Types.ObjectId(userId), 
+          rating: { $ne: null } 
+        }),
+        // Only fetch notification count if it's the requesting user
+        req.user._id.toString() === userId 
+          ? (await import('../models/Notification.js')).default.countDocuments({ 
+              userId: new mongoose.Types.ObjectId(userId), 
+              isRead: false 
+            })
+          : 0
+      ]);
+
+      const userStats = {
+        commentsCount,
+        chapterInteractionsCount,
+        novelRatingsCount,
+        unreadNotificationsCount: notificationsCount
+      };
+
+      // Cache the results
+      setCachedUserStats(userId, userStats);
+      
+      return userStats;
+    });
+
+    res.json(stats);
+  } catch (err) {
+    console.error('Error fetching user stats:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Simple in-memory cache for user stats
+const userStatsCache = new Map();
+const USER_STATS_CACHE_TTL = 1000 * 60 * 5; // 5 minutes
+const MAX_USER_STATS_CACHE_SIZE = 200;
+
+// Query deduplication cache for user stats
+const pendingUserStatsQueries = new Map();
+
+// Helper function to manage user stats cache
+const getCachedUserStats = (userId) => {
+  const cached = userStatsCache.get(userId);
+  if (cached && Date.now() - cached.timestamp < USER_STATS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedUserStats = (userId, data) => {
+  if (userStatsCache.size >= MAX_USER_STATS_CACHE_SIZE) {
+    const oldestKey = userStatsCache.keys().next().value;
+    userStatsCache.delete(oldestKey);
+  }
+  
+  userStatsCache.set(userId, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+// Query deduplication helper for user stats
+const dedupUserStatsQuery = async (key, queryFn) => {
+  if (pendingUserStatsQueries.has(key)) {
+    return await pendingUserStatsQueries.get(key);
+  }
+  
+  const queryPromise = queryFn();
+  pendingUserStatsQueries.set(key, queryPromise);
+  
+  try {
+    const result = await queryPromise;
+    return result;
+  } finally {
+    pendingUserStatsQueries.delete(key);
+  }
+};
+
+// Clear user stats cache
+const clearUserStatsCache = (userId = null) => {
+  if (userId) {
+    userStatsCache.delete(userId);
+  } else {
+    userStatsCache.clear();
+  }
+};
+
+/**
  * Update user's avatar
  * @route POST /api/users/:username/avatar
  */
@@ -920,5 +1045,8 @@ router.get('/search/:query', [auth, admin], async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
+// Export cache clearing function for use by other routes
+export { clearUserStatsCache };
 
 export default router; 
