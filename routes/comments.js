@@ -921,8 +921,16 @@ router.patch('/:commentId', auth, checkBan, async (req, res) => {
     }
 
     await comment.save();
+    
+    // Clear all comment caches since a comment was edited
+    clearAllCommentCaches();
+    
+    // Populate user info before returning
+    await comment.populate('user', 'username displayName avatar');
+    
     res.json(comment);
   } catch (error) {
+    console.error('Error editing comment:', error);
     res.status(400).json({ message: error.message });
   }
 });
