@@ -1,3 +1,24 @@
+/**
+ * CHAPTERS ROUTE - MongoDB Write Conflict Prevention
+ * 
+ * This module implements retry logic to handle MongoDB write conflicts that can occur
+ * during high-concurrency operations, especially when multiple users are:
+ * - Creating/updating/deleting chapters simultaneously
+ * - Updating novel word counts
+ * - Modifying module references
+ * 
+ * RECOMMENDED MONGODB CONFIGURATION:
+ * - Ensure proper indexing on frequently queried fields
+ * - Consider using MongoDB transactions with appropriate read/write concerns
+ * - Monitor for lock contention in high-traffic scenarios
+ * 
+ * PERFORMANCE INDEXES RECOMMENDED:
+ * - db.chapters.createIndex({ "novelId": 1, "order": 1 })
+ * - db.chapters.createIndex({ "moduleId": 1, "order": 1 })
+ * - db.chapters.createIndex({ "_id": 1 }) // Usually exists by default
+ * - db.novels.createIndex({ "_id": 1, "wordCount": 1 })
+ */
+
 import express from 'express';
 import Chapter from '../models/Chapter.js';
 import { auth } from '../middleware/auth.js';
@@ -111,6 +132,44 @@ const dedupQuery = async (key, queryFn) => {
   } finally {
     // Clean up pending query
     pendingQueries.delete(key);
+  }
+};
+
+/**
+ * Helper function to execute MongoDB operations with retry logic for write conflicts
+ * @param {Function} operation - The operation to execute
+ * @param {number} maxRetries - Maximum number of retry attempts
+ * @param {string} operationName - Name of the operation for logging
+ */
+const executeWithRetry = async (operation, maxRetries = 3, operationName = 'operation') => {
+  let attempt = 0;
+  
+  while (attempt < maxRetries) {
+    try {
+      return await operation();
+    } catch (error) {
+      attempt++;
+      
+      // Check if this is a transient error that can be retried
+      const isRetryableError = error.errorLabels?.includes('TransientTransactionError') ||
+                              error.code === 112 || // WriteConflict
+                              error.code === 11000 || // DuplicateKey
+                              error.code === 16500; // InterruptedAtShutdown
+      
+      if (isRetryableError && attempt < maxRetries) {
+        console.warn(`Retrying ${operationName} (attempt ${attempt}/${maxRetries}):`, error.message);
+        
+        // Exponential backoff with jitter
+        const baseDelay = Math.pow(2, attempt - 1) * 100; // 100ms, 200ms, 400ms
+        const jitter = Math.random() * 50; // Add up to 50ms random jitter
+        await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
+        
+        continue;
+      }
+      
+      console.error(`${operationName} failed after ${attempt} attempts:`, error);
+      throw error;
+    }
   }
 };
 
@@ -517,21 +576,23 @@ router.post('/', auth, async (req, res) => {
     // Save the chapter
     const newChapter = await chapter.save();
 
-    // Perform multiple updates in parallel
+    // Perform multiple updates in parallel with timeout protection
     await Promise.all([
       // Update the module's chapters array
       Module.findByIdAndUpdate(
         moduleId,
-        { $addToSet: { chapters: newChapter._id } }
+        { $addToSet: { chapters: newChapter._id } },
+        { maxTimeMS: 5000 }
       ),
       
       // Update novel's updatedAt timestamp ONLY (no view count updates)
       Novel.findByIdAndUpdate(
         novelId,
-        { updatedAt: new Date() }
+        { updatedAt: new Date() },
+        { maxTimeMS: 5000 }
       ),
       
-      // Recalculate novel word count with the new chapter
+      // Recalculate novel word count with the new chapter (has built-in retry logic)
       recalculateNovelWordCount(novelId),
       
       // Clear novel caches
@@ -593,224 +654,278 @@ router.post('/', auth, async (req, res) => {
 });
 
 /**
- * Helper function to recalculate and update novel word count
+ * Helper function to recalculate and update novel word count with retry logic
  * @param {string} novelId - The novel ID
  * @param {object} session - MongoDB session (optional)
+ * @param {number} maxRetries - Maximum number of retry attempts
  */
-const recalculateNovelWordCount = async (novelId, session = null) => {
-  try {
-    // Ensure novelId is a proper ObjectId (handle both string and ObjectId inputs)
-    const novelObjectId = mongoose.Types.ObjectId.isValid(novelId) 
-      ? (typeof novelId === 'string' ? mongoose.Types.ObjectId.createFromHexString(novelId) : novelId)
-      : null;
-    
-    if (!novelObjectId) {
-      throw new Error('Invalid novelId provided to recalculateNovelWordCount');
-    }
-    
-    // Aggregate total word count from all chapters in this novel
-    const result = await Chapter.aggregate([
-      { $match: { novelId: novelObjectId } },
-      { 
-        $group: {
-          _id: null,
-          totalWordCount: { $sum: '$wordCount' }
-        }
+const recalculateNovelWordCount = async (novelId, session = null, maxRetries = 3) => {
+  let attempt = 0;
+  
+  while (attempt < maxRetries) {
+    try {
+      // Ensure novelId is a proper ObjectId (handle both string and ObjectId inputs)
+      const novelObjectId = mongoose.Types.ObjectId.isValid(novelId) 
+        ? (typeof novelId === 'string' ? mongoose.Types.ObjectId.createFromHexString(novelId) : novelId)
+        : null;
+      
+      if (!novelObjectId) {
+        throw new Error('Invalid novelId provided to recalculateNovelWordCount');
       }
-    ]).session(session);
+      
+      // Aggregate total word count from all chapters in this novel
+      const result = await Chapter.aggregate([
+        { $match: { novelId: novelObjectId } },
+        { 
+          $group: {
+            _id: null,
+            totalWordCount: { $sum: '$wordCount' }
+          }
+        }
+      ]).session(session);
 
-    const totalWordCount = result.length > 0 ? result[0].totalWordCount : 0;
+      const totalWordCount = result.length > 0 ? result[0].totalWordCount : 0;
 
-    // Update the novel with the new word count
-    await Novel.findByIdAndUpdate(
-      novelObjectId,
-      { wordCount: totalWordCount },
-      { session }
-    );
+      // Update the novel with the new word count using retry-safe options
+      await Novel.findByIdAndUpdate(
+        novelObjectId,
+        { wordCount: totalWordCount },
+        { 
+          session,
+          // Add options to handle write conflicts better
+          upsert: false,
+          new: true,
+          maxTimeMS: 5000 // 5 second timeout
+        }
+      );
 
-    return totalWordCount;
-  } catch (error) {
-    console.error('Error recalculating novel word count:', error);
-    throw error;
+      return totalWordCount;
+    } catch (error) {
+      attempt++;
+      
+      // Check if this is a transient error that can be retried
+      const isRetryableError = error.errorLabels?.includes('TransientTransactionError') ||
+                              error.code === 112 || // WriteConflict
+                              error.code === 11000 || // DuplicateKey
+                              error.code === 16500; // InterruptedAtShutdown
+      
+      if (isRetryableError && attempt < maxRetries) {
+        console.warn(`Retrying novel word count update (attempt ${attempt}/${maxRetries}) for novel ${novelId}:`, error.message);
+        
+        // Exponential backoff with jitter
+        const baseDelay = Math.pow(2, attempt - 1) * 100; // 100ms, 200ms, 400ms
+        const jitter = Math.random() * 50; // Add up to 50ms random jitter
+        await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
+        
+        continue;
+      }
+      
+      console.error(`Error recalculating novel word count after ${attempt} attempts:`, error);
+      throw error;
+    }
   }
 };
 
 /**
- * Update a chapter
+ * Update a chapter with retry logic for transaction conflicts
  * @route PUT /api/chapters/:id
  */
 router.put('/:id', auth, async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  
-  try {
-    const chapterId = req.params.id;
+  const maxRetries = 3;
+  let attempt = 0;
+
+  while (attempt < maxRetries) {
+    const session = await mongoose.startSession();
     
-    // Validate ObjectId format
-    if (!mongoose.Types.ObjectId.isValid(chapterId)) {
-      await session.abortTransaction();
-      return res.status(400).json({ message: 'Invalid chapter ID format' });
-    }
-
-    const {
-      title,
-      content,
-      translator,
-      editor,
-      proofreader,
-      mode,
-      chapterBalance = 0,
-      footnotes = [],
-      wordCount = 0
-    } = req.body;
-    
-    // Find the existing chapter
-    const existingChapter = await Chapter.findById(chapterId).session(session);
-    if (!existingChapter) {
-      await session.abortTransaction();
-      return res.status(404).json({ message: 'Chapter not found' });
-    }
-    
-
-
-    // Check if user has permission to edit this chapter
-    const novel = await Novel.findById(existingChapter.novelId).session(session);
-    if (!novel) {
-      await session.abortTransaction();
-      return res.status(404).json({ message: 'Novel not found' });
-    }
-
-    // Permission check: admin, moderator, or pj_user managing this novel
-    let hasPermission = false;
-    if (req.user.role === 'admin' || req.user.role === 'moderator') {
-      hasPermission = true;
-    } else if (req.user.role === 'pj_user') {
-      // Check if user manages this novel
-      const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
-                          novel.active?.pj_user?.includes(req.user.username);
-      hasPermission = isAuthorized;
-    }
-
-    if (!hasPermission) {
-      await session.abortTransaction();
-      return res.status(403).json({ 
-        message: 'Access denied. You do not have permission to edit this chapter.' 
-      });
-    }
-
-    // Prevent pj_users from changing paid mode (only when actually changing, not when keeping the same)
-    if (req.user.role === 'pj_user' && mode && mode !== existingChapter.mode && (existingChapter.mode === 'paid' || mode === 'paid')) {
-      await session.abortTransaction();
-      return res.status(403).json({ 
-        message: 'Bạn không có quyền thay đổi chế độ trả phí. Chỉ admin mới có thể thay đổi.' 
-      });
-    }
-
-    // Validate chapter balance for paid chapters
-    // Only enforce minimum balance validation when:
-    // 1. User is admin (who can actually set the balance), AND
-    // 2. Mode is being changed TO paid (not already paid), AND 
-    // 3. Balance is less than 1
-    if (req.user.role === 'admin' && mode === 'paid' && existingChapter.mode !== 'paid' && chapterBalance < 1) {
-      await session.abortTransaction();
-      return res.status(400).json({ 
-        message: 'Số lúa chương tối thiểu là 1 🌾 cho chương trả phí.' 
-      });
-    }
-    
-    // Determine the final chapter balance
-    let finalChapterBalance;
-    if (req.user.role === 'admin') {
-      // Admins can set the balance
-      finalChapterBalance = mode === 'paid' ? Math.max(0, chapterBalance || 0) : 0;
-    } else {
-      // Non-admins preserve existing balance for paid chapters, 0 for others
-      finalChapterBalance = mode === 'paid' ? existingChapter.chapterBalance : 0;
-    }
-
-    // Check if content changed and calculate word count accordingly
-    const contentChanged = content && content !== existingChapter.content;
-    let finalWordCount = existingChapter.wordCount;
-    
-    if (contentChanged) {
-      // If content changed, recalculate word count server-side
-      finalWordCount = calculateWordCount(content);
-    } else if (wordCount !== undefined && wordCount !== existingChapter.wordCount) {
-      // If word count was explicitly provided (from TinyMCE), use that
-      finalWordCount = Math.max(0, wordCount);
-    }
-    
-    const shouldRecalculateWordCount = contentChanged || finalWordCount !== existingChapter.wordCount;
-
-    // Update the chapter
-    const updatedChapter = await Chapter.findByIdAndUpdate(
-      chapterId,
-      {
-        ...(title && { title }),
-        ...(content && { content }),
-        ...(translator !== undefined && { translator }),
-        ...(editor !== undefined && { editor }),
-        ...(proofreader !== undefined && { proofreader }),
-        ...(mode && { mode }),
-        chapterBalance: finalChapterBalance,
-        footnotes,
-        wordCount: finalWordCount, // Use calculated or provided word count
-        updatedAt: new Date()
-      },
-      { 
-        new: true, 
-        session,
-        runValidators: true 
+    try {
+      session.startTransaction();
+      
+      const chapterId = req.params.id;
+      
+      // Validate ObjectId format
+      if (!mongoose.Types.ObjectId.isValid(chapterId)) {
+        await session.abortTransaction();
+        return res.status(400).json({ message: 'Invalid chapter ID format' });
       }
-    );
 
-    // Only recalculate novel word count if content or word count actually changed
-    if (shouldRecalculateWordCount) {
-      await recalculateNovelWordCount(existingChapter.novelId, session);
-    }
+      const {
+        title,
+        content,
+        translator,
+        editor,
+        proofreader,
+        mode,
+        chapterBalance = 0,
+        footnotes = [],
+        wordCount = 0
+      } = req.body;
+      
+      // Find the existing chapter
+      const existingChapter = await Chapter.findById(chapterId).session(session);
+      if (!existingChapter) {
+        await session.abortTransaction();
+        return res.status(404).json({ message: 'Chapter not found' });
+      }
 
-    // Only update novel's timestamp for significant changes that should affect "latest updates"
-    // Don't update for simple content edits, manual mode changes, or administrative balance changes
-    // Novel timestamp will be updated automatically when paid content is unlocked via contributions
-    const shouldUpdateNovelTimestamp = false; // No manual admin actions should affect latest updates positioning
+      // Check if user has permission to edit this chapter
+      const novel = await Novel.findById(existingChapter.novelId).session(session);
+      if (!novel) {
+        await session.abortTransaction();
+        return res.status(404).json({ message: 'Novel not found' });
+      }
 
-    if (shouldUpdateNovelTimestamp) {
-      await Novel.findByIdAndUpdate(
-        existingChapter.novelId,
-        { updatedAt: new Date() },
-        { session }
+      // Permission check: admin, moderator, or pj_user managing this novel
+      let hasPermission = false;
+      if (req.user.role === 'admin' || req.user.role === 'moderator') {
+        hasPermission = true;
+      } else if (req.user.role === 'pj_user') {
+        // Check if user manages this novel
+        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                            novel.active?.pj_user?.includes(req.user.username);
+        hasPermission = isAuthorized;
+      }
+
+      if (!hasPermission) {
+        await session.abortTransaction();
+        return res.status(403).json({ 
+          message: 'Access denied. You do not have permission to edit this chapter.' 
+        });
+      }
+
+      // Prevent pj_users from changing paid mode (only when actually changing, not when keeping the same)
+      if (req.user.role === 'pj_user' && mode && mode !== existingChapter.mode && (existingChapter.mode === 'paid' || mode === 'paid')) {
+        await session.abortTransaction();
+        return res.status(403).json({ 
+          message: 'Bạn không có quyền thay đổi chế độ trả phí. Chỉ admin mới có thể thay đổi.' 
+        });
+      }
+
+      // Validate chapter balance for paid chapters
+      // Only enforce minimum balance validation when:
+      // 1. User is admin (who can actually set the balance), AND
+      // 2. Mode is being changed TO paid (not already paid), AND 
+      // 3. Balance is less than 1
+      if (req.user.role === 'admin' && mode === 'paid' && existingChapter.mode !== 'paid' && chapterBalance < 1) {
+        await session.abortTransaction();
+        return res.status(400).json({ 
+          message: 'Số lúa chương tối thiểu là 1 🌾 cho chương trả phí.' 
+        });
+      }
+      
+      // Determine the final chapter balance
+      let finalChapterBalance;
+      if (req.user.role === 'admin') {
+        // Admins can set the balance
+        finalChapterBalance = mode === 'paid' ? Math.max(0, chapterBalance || 0) : 0;
+      } else {
+        // Non-admins preserve existing balance for paid chapters, 0 for others
+        finalChapterBalance = mode === 'paid' ? existingChapter.chapterBalance : 0;
+      }
+
+      // Check if content changed and calculate word count accordingly
+      const contentChanged = content && content !== existingChapter.content;
+      let finalWordCount = existingChapter.wordCount;
+      
+      if (contentChanged) {
+        // If content changed, recalculate word count server-side
+        finalWordCount = calculateWordCount(content);
+      } else if (wordCount !== undefined && wordCount !== existingChapter.wordCount) {
+        // If word count was explicitly provided (from TinyMCE), use that
+        finalWordCount = Math.max(0, wordCount);
+      }
+      
+      const shouldRecalculateWordCount = contentChanged || finalWordCount !== existingChapter.wordCount;
+
+      // Update the chapter
+      const updatedChapter = await Chapter.findByIdAndUpdate(
+        chapterId,
+        {
+          ...(title && { title }),
+          ...(content && { content }),
+          ...(translator !== undefined && { translator }),
+          ...(editor !== undefined && { editor }),
+          ...(proofreader !== undefined && { proofreader }),
+          ...(mode && { mode }),
+          chapterBalance: finalChapterBalance,
+          footnotes,
+          wordCount: finalWordCount, // Use calculated or provided word count
+          updatedAt: new Date()
+        },
+        { 
+          new: true, 
+          session,
+          runValidators: true,
+          maxTimeMS: 5000
+        }
       );
+
+      // Only recalculate novel word count if content or word count actually changed
+      if (shouldRecalculateWordCount) {
+        await recalculateNovelWordCount(existingChapter.novelId, session);
+      }
+
+      // Only update novel's timestamp for significant changes that should affect "latest updates"
+      // Don't update for simple content edits, manual mode changes, or administrative balance changes
+      // Novel timestamp will be updated automatically when paid content is unlocked via contributions
+      const shouldUpdateNovelTimestamp = false; // No manual admin actions should affect latest updates positioning
+
+      if (shouldUpdateNovelTimestamp) {
+        await Novel.findByIdAndUpdate(
+          existingChapter.novelId,
+          { updatedAt: new Date() },
+          { session }
+        );
+      }
+
+      await session.commitTransaction();
+
+      // Clear novel caches
+      clearNovelCaches();
+
+      // Notify clients of the update
+      notifyAllClients('update', {
+        type: 'chapter_updated',
+        novelId: existingChapter.novelId,
+        chapterId: updatedChapter._id,
+        chapterTitle: updatedChapter.title,
+        timestamp: new Date().toISOString()
+      });
+
+      // Populate and return the updated chapter
+      const populatedChapter = await populateStaffNames(updatedChapter.toObject());
+      return res.json(populatedChapter);
+
+    } catch (err) {
+      await session.abortTransaction();
+      attempt++;
+      
+      // Check if this is a transient error that can be retried
+      const isRetryableError = err.errorLabels?.includes('TransientTransactionError') ||
+                              err.code === 112 || // WriteConflict
+                              err.code === 11000 || // DuplicateKey
+                              err.code === 16500; // InterruptedAtShutdown
+      
+      if (isRetryableError && attempt < maxRetries) {
+        console.warn(`Retrying chapter update (attempt ${attempt}/${maxRetries}) for chapter ${chapterId}:`, err.message);
+        
+        // Exponential backoff with jitter
+        const baseDelay = Math.pow(2, attempt - 1) * 150; // 150ms, 300ms, 600ms
+        const jitter = Math.random() * 75; // Add up to 75ms random jitter
+        await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
+        
+        continue;
+      }
+      
+      console.error(`Error updating chapter after ${attempt} attempts:`, err);
+      return res.status(400).json({ message: err.message });
+    } finally {
+      session.endSession();
     }
-
-    await session.commitTransaction();
-
-    // Clear novel caches
-    clearNovelCaches();
-
-    // Notify clients of the update
-    notifyAllClients('update', {
-      type: 'chapter_updated',
-      novelId: existingChapter.novelId,
-      chapterId: updatedChapter._id,
-      chapterTitle: updatedChapter.title,
-      timestamp: new Date().toISOString()
-    });
-
-    // Populate and return the updated chapter
-    const populatedChapter = await populateStaffNames(updatedChapter.toObject());
-    res.json(populatedChapter);
-
-  } catch (err) {
-    await session.abortTransaction();
-    console.error('Error updating chapter:', err);
-    res.status(400).json({ message: err.message });
-  } finally {
-    session.endSession();
   }
 });
 
 /**
- * Delete a chapter
+ * Delete a chapter with retry logic for transaction conflicts
  * @route DELETE /api/chapters/:id
  */
 router.delete('/:id', auth, async (req, res) => {
@@ -819,81 +934,106 @@ router.delete('/:id', auth, async (req, res) => {
     return res.status(403).json({ message: 'Access denied. Admin or moderator privileges required.' });
   }
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  
-  try {
-    const chapterId = req.params.id;
+  const maxRetries = 3;
+  let attempt = 0;
 
-    // Validate chapter ID format
-    if (!mongoose.Types.ObjectId.isValid(chapterId)) {
-      await session.abortTransaction();
-      return res.status(400).json({ message: 'Invalid chapter ID format' });
-    }
+  while (attempt < maxRetries) {
+    const session = await mongoose.startSession();
+    
+    try {
+      session.startTransaction();
+      
+      const chapterId = req.params.id;
 
-    // Find the chapter to delete
-    const chapter = await Chapter.findById(chapterId).session(session);
-    if (!chapter) {
-      await session.abortTransaction();
-      return res.status(404).json({ message: 'Chapter not found' });
-    }
-
-    // Store IDs for cleanup operations
-    const { novelId, moduleId } = chapter;
-
-    // Delete the chapter
-    await Chapter.findByIdAndDelete(chapterId).session(session);
-
-    // Remove chapter reference from module
-    await Module.findByIdAndUpdate(
-      moduleId,
-      { 
-        $pull: { chapters: chapterId },
-        $set: { updatedAt: new Date() }
-      },
-      { session }
-    );
-
-    // Delete all user interactions for this chapter
-    await UserChapterInteraction.deleteMany(
-      { chapterId: mongoose.Types.ObjectId.createFromHexString(chapterId) },
-      { session }
-    );
-
-    // Recalculate novel word count
-    await recalculateNovelWordCount(novelId, session);
-
-    // Don't update novel's timestamp when deleting chapters
-    // Chapter deletion is a management action, not new content
-
-    await session.commitTransaction();
-
-    // Clear novel caches
-    clearNovelCaches();
-
-    // Notify clients of the chapter deletion
-    notifyAllClients('update', {
-      type: 'chapter_deleted',
-      novelId: novelId,
-      chapterId: chapterId,
-      chapterTitle: chapter.title,
-      timestamp: new Date().toISOString()
-    });
-
-    res.json({ 
-      message: 'Chapter deleted successfully',
-      deletedChapter: {
-        id: chapterId,
-        title: chapter.title
+      // Validate chapter ID format
+      if (!mongoose.Types.ObjectId.isValid(chapterId)) {
+        await session.abortTransaction();
+        return res.status(400).json({ message: 'Invalid chapter ID format' });
       }
-    });
 
-  } catch (err) {
-    await session.abortTransaction();
-    console.error('Error deleting chapter:', err);
-    res.status(500).json({ message: err.message });
-  } finally {
-    session.endSession();
+      // Find the chapter to delete
+      const chapter = await Chapter.findById(chapterId).session(session);
+      if (!chapter) {
+        await session.abortTransaction();
+        return res.status(404).json({ message: 'Chapter not found' });
+      }
+
+      // Store IDs for cleanup operations
+      const { novelId, moduleId } = chapter;
+
+      // Delete the chapter
+      await Chapter.findByIdAndDelete(chapterId).session(session);
+
+      // Remove chapter reference from module
+      await Module.findByIdAndUpdate(
+        moduleId,
+        { 
+          $pull: { chapters: chapterId },
+          $set: { updatedAt: new Date() }
+        },
+        { session, maxTimeMS: 5000 }
+      );
+
+      // Delete all user interactions for this chapter
+      await UserChapterInteraction.deleteMany(
+        { chapterId: mongoose.Types.ObjectId.createFromHexString(chapterId) },
+        { session }
+      );
+
+      // Recalculate novel word count with retry logic
+      await recalculateNovelWordCount(novelId, session);
+
+      // Don't update novel's timestamp when deleting chapters
+      // Chapter deletion is a management action, not new content
+
+      await session.commitTransaction();
+
+      // Clear novel caches
+      clearNovelCaches();
+
+      // Notify clients of the chapter deletion
+      notifyAllClients('update', {
+        type: 'chapter_deleted',
+        novelId: novelId,
+        chapterId: chapterId,
+        chapterTitle: chapter.title,
+        timestamp: new Date().toISOString()
+      });
+
+      return res.json({ 
+        message: 'Chapter deleted successfully',
+        deletedChapter: {
+          id: chapterId,
+          title: chapter.title
+        }
+      });
+
+    } catch (err) {
+      await session.abortTransaction();
+      attempt++;
+      
+      // Check if this is a transient error that can be retried
+      const isRetryableError = err.errorLabels?.includes('TransientTransactionError') ||
+                              err.code === 112 || // WriteConflict
+                              err.code === 11000 || // DuplicateKey
+                              err.code === 16500; // InterruptedAtShutdown
+      
+      if (isRetryableError && attempt < maxRetries) {
+        console.warn(`Retrying chapter deletion (attempt ${attempt}/${maxRetries}) for chapter ${req.params.id}:`, err.message);
+        
+        // Exponential backoff with jitter
+        const baseDelay = Math.pow(2, attempt - 1) * 200; // 200ms, 400ms, 800ms
+        const jitter = Math.random() * 100; // Add up to 100ms random jitter
+        await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
+        
+        continue;
+      }
+      
+      console.error(`Error deleting chapter after ${attempt} attempts:`, err);
+      return res.status(500).json({ message: err.message });
+    } finally {
+      session.endSession();
+    }
   }
 });
 
