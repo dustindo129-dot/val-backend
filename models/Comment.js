@@ -10,25 +10,54 @@ import mongoose from 'mongoose';
 const sanitizeText = (text) => {
   if (!text) return '';
   
-  // Just strip HTML tags and clean up formatting, don't escape HTML entities
-  // Let DOMPurify on the client handle the security sanitization
-  const stripTags = (str) => {
-    // Replace HTML tags with newlines to preserve formatting
-    const withNewlines = str.replace(/<br\s*\/?>/gi, '\n')
-                           .replace(/<\/p>/gi, '\n\n')
-                           .replace(/<\/div>/gi, '\n');
+  // Check if the text contains HTML tags (indicating rich text content)
+  const hasHtmlTags = /<[^>]+>/.test(text);
+  
+  if (hasHtmlTags) {
+    // For rich text content, preserve safe HTML tags
+    // Allow: p, br, strong, b, em, i, u, a, img, ul, ol, li
+    const allowedTags = /^(p|br|strong|b|em|i|u|a|img|ul|ol|li)$/i;
+    const allowedAttributes = /^(href|src|alt|title|target)$/i;
     
-    // Remove all remaining HTML tags
-    const noTags = withNewlines.replace(/<[^>]+>/g, '');
+    // Basic HTML sanitization - remove dangerous tags and attributes
+    let sanitized = text
+      // Remove script tags and their content
+      .replace(/<script[^>]*>.*?<\/script>/gis, '')
+      // Remove style tags and their content
+      .replace(/<style[^>]*>.*?<\/style>/gis, '')
+      // Remove on* event attributes
+      .replace(/\s*on\w+\s*=\s*["'][^"']*["']/gi, '')
+      // Remove javascript: links
+      .replace(/href\s*=\s*["']javascript:[^"']*["']/gi, '')
+      // Remove data: URLs except for images
+      .replace(/src\s*=\s*["']data:(?!image\/)[^"']*["']/gi, '');
     
-    // Clean up excessive newlines and spaces
-    return noTags.replace(/\n\s*\n\s*\n/g, '\n\n')
-                 .replace(/\s+/g, ' ')
-                 .trim();
-  };
+    // Clean up excessive whitespace but preserve structure
+    sanitized = sanitized
+      .replace(/\s+/g, ' ')
+      .replace(/>\s+</g, '><')
+      .trim();
+    
+    return sanitized;
+  } else {
+    // For plain text content, strip all HTML tags
+    const stripTags = (str) => {
+      // Replace HTML tags with newlines to preserve formatting
+      const withNewlines = str.replace(/<br\s*\/?>/gi, '\n')
+                             .replace(/<\/p>/gi, '\n\n')
+                             .replace(/<\/div>/gi, '\n');
+      
+      // Remove all remaining HTML tags
+      const noTags = withNewlines.replace(/<[^>]+>/g, '');
+      
+      // Clean up excessive newlines and spaces
+      return noTags.replace(/\n\s*\n\s*\n/g, '\n\n')
+                   .replace(/\s+/g, ' ')
+                   .trim();
+    };
 
-  // Only strip tags, don't escape HTML entities
-  return stripTags(text);
+    return stripTags(text);
+  }
 };
 
 const commentSchema = new mongoose.Schema({
@@ -37,6 +66,18 @@ const commentSchema = new mongoose.Schema({
     required: true,
     set: function(text) {
       return sanitizeText(text);
+    },
+    validate: {
+      validator: function(text) {
+        if (!text) return false;
+        
+        // Check if text has meaningful content (either text or images)
+        const hasText = text.replace(/<[^>]*>/g, '').trim().length > 0;
+        const hasImages = /<img[^>]*>/i.test(text);
+        
+        return hasText || hasImages;
+      },
+      message: 'Comment must contain either text or images'
     }
   },
   user: {

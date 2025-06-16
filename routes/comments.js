@@ -698,6 +698,7 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
 
     res.status(201).json(comment);
   } catch (err) {
+    console.error('Error creating comment:', err);
     res.status(400).json({ message: err.message });
   }
 });
