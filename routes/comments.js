@@ -97,7 +97,21 @@ router.get('/novel/:novelId', async (req, res) => {
     const cacheKey = `novel_comments_${novelId}_${sort}_${req.user?._id || 'anonymous'}`;
     
     const comments = await dedupCommentsQuery(cacheKey, async () => {
-      // Get all chapter IDs for this novel first
+      // Quick check: see if there are any comments for this novel at all
+      const hasAnyComments = await Comment.countDocuments({
+        $or: [
+          { contentType: 'novels', contentId: novelId },
+          { contentType: 'chapters', contentId: { $regex: `^${novelId}-` } }
+        ],
+        adminDeleted: { $ne: true }
+      });
+
+      // If no comments exist, return empty array immediately
+      if (hasAnyComments === 0) {
+        return [];
+      }
+
+      // Get all chapter IDs for this novel only if we have comments
       const Chapter = (await import('../models/Chapter.js')).default;
       const chapters = await Chapter.find({ novelId }, '_id');
       const chapterIds = chapters.map(ch => ch._id.toString());
@@ -253,6 +267,18 @@ router.get('/', async (req, res) => {
     const cacheKey = `comments_${contentType}_${contentId}_${sort}_${req.user?._id || 'anonymous'}`;
     
     const comments = await dedupCommentsQuery(cacheKey, async () => {
+      // Quick check: see if there are any comments for this content
+      const hasAnyComments = await Comment.countDocuments({
+        contentType,
+        contentId,
+        adminDeleted: { $ne: true }
+      });
+
+      // If no comments exist, return empty array immediately
+      if (hasAnyComments === 0) {
+        return [];
+      }
+
       // Build the aggregation pipeline with proper sorting
       const pipeline = [
         {

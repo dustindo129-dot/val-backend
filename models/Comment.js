@@ -132,6 +132,8 @@ commentSchema.index({ contentType: 1, contentId: 1, adminDeleted: 1 });
 commentSchema.index({ createdAt: -1 });
 commentSchema.index({ user: 1, isDeleted: 1 });
 commentSchema.index({ isPinned: 1, contentType: 1, contentId: 1 });
+// Index for novel comment queries (including regex searches)
+commentSchema.index({ contentType: 1, contentId: 1, adminDeleted: 1, createdAt: -1 });
 
 // Virtual property to get the count of likes
 commentSchema.virtual('likeCount').get(function() {

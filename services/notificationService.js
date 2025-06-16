@@ -100,14 +100,24 @@ export const createCommentReplyNotification = async (originalCommenterId, replyC
     const replierDisplayName = replyComment.user.displayName || replyComment.user.username;
 
     let message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn tại <b>${novel.title}</b>`;
-    let linkData = { novelId };
+    let linkData = { 
+      novelId,
+      novelTitle: novel.title
+    };
 
     if (chapterId) {
       const chapter = await Chapter.findById(chapterId);
       if (chapter) {
         message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn tại <b>${chapter.title}</b>`;
         linkData.chapterId = chapterId;
+        linkData.chapterTitle = chapter.title;
       }
+    }
+
+    // Get the parent comment ID from the reply comment for navigation
+    const parentComment = await Comment.findById(replyComment.parentId);
+    if (parentComment) {
+      linkData.originalCommentId = parentComment._id.toString();
     }
 
     const notification = new Notification({
@@ -168,6 +178,7 @@ export const createNewChapterNotifications = async (novelId, chapterId, chapterT
       relatedChapter: chapterId,
       data: {
         novelId,
+        novelTitle: novel.title,
         chapterId,
         chapterTitle
       }
@@ -260,7 +271,11 @@ export const createFollowCommentNotifications = async (novelId, commentId, comme
     const commenterDisplayName = commenter.displayName || commenter.username;
 
     let message;
-    let linkData = { novelId, commentId };
+    let linkData = { 
+      novelId, 
+      novelTitle: novel.title,
+      commentId 
+    };
 
     if (chapterId) {
       const chapter = await Chapter.findById(chapterId);
@@ -333,7 +348,11 @@ export const createLikedCommentNotification = async (commentOwnerId, commentId, 
     const likerDisplayName = liker.displayName || liker.username;
 
     let message;
-    let linkData = { novelId, commentId };
+    let linkData = { 
+      novelId, 
+      novelTitle: novel.title,
+      commentId 
+    };
 
     if (chapterId) {
       const chapter = await Chapter.findById(chapterId);
