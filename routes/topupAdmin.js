@@ -5,6 +5,7 @@ import TopUpAdmin from '../models/TopUpAdmin.js';
 import TopUpRequest from '../models/TopUpRequest.js';
 import mongoose from 'mongoose';
 import { createTransaction } from './userTransaction.js';
+import { clearUserCache } from '../utils/userCache.js';
 
 const router = express.Router();
 
@@ -48,8 +49,16 @@ router.post('/', auth, async (req, res) => {
     
     // Update user balance
     const oldBalance = user.balance || 0;
+    console.log(`💰 [Admin TopUp] Admin ${req.user.username} adding ${amount} 🌾 to ${user.username}`);
+    console.log(`💰 [Admin TopUp] User balance before topup: ${oldBalance} 🌾`);
+    
     user.balance = oldBalance + amount;
     await user.save({ session });
+    console.log(`💰 [Admin TopUp] User balance after topup: ${user.balance} 🌾`);
+    
+    // Clear user cache to ensure fresh balance is returned by API calls
+    clearUserCache(user._id, user.username);
+    console.log(`🗑️ [Admin TopUp] Cleared user cache for ${user.username} (ID: ${user._id})`);
     
     // Record in UserTransaction ledger
     await createTransaction({
@@ -183,10 +192,20 @@ router.post('/process-request/:requestId', auth, async (req, res) => {
       }
       
       // Add to user balance (removed bonus)
-      user.balance = (user.balance || 0) + finalBalance;
+      const oldBalance = user.balance || 0;
+      console.log(`💰 [TopUp Request] Processing request ${requestId} for ${user.username}`);
+      console.log(`💰 [TopUp Request] User balance before topup: ${oldBalance} 🌾`);
+      console.log(`💰 [TopUp Request] Adding ${finalBalance} 🌾 to balance`);
+      
+      user.balance = oldBalance + finalBalance;
+      console.log(`💰 [TopUp Request] User balance after topup: ${user.balance} 🌾`);
       
       await request.save({ session });
       await user.save({ session });
+      
+      // Clear user cache to ensure fresh balance is returned by API calls
+      clearUserCache(user._id, user.username);
+      console.log(`🗑️ [TopUp Request] Cleared user cache for ${user.username} (ID: ${user._id})`);
       
       // Record in UserTransaction ledger
       await createTransaction({

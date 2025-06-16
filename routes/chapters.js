@@ -620,6 +620,7 @@ router.post('/', auth, async (req, res) => {
 
     // Check for auto-unlock if a paid chapter was created
     if (mode === 'paid') {
+      console.log(`💰 Paid chapter "${newChapter.title}" created - checking for auto-unlock...`);
       // Import the checkAndUnlockContent function from novels.js
       const { checkAndUnlockContent } = await import('./novels.js');
       await checkAndUnlockContent(novelId);

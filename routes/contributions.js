@@ -94,6 +94,9 @@ router.post('/', auth, async (req, res) => {
           contributionData.note = note;
         }
         
+        console.log(`💰 [Market Contribution] Starting contribution: ${amount} 🌾 for request ${requestId}`);
+        console.log(`💰 [Market Contribution] User balance before contribution: ${user.balance} 🌾`);
+
         // Create contribution (all contributions start as pending)
         const newContribution = new Contribution(contributionData);
         await newContribution.save({ session });
@@ -101,9 +104,12 @@ router.post('/', auth, async (req, res) => {
         // Deduct contribution amount from user balance
         user.balance -= amount;
         await user.save({ session });
+        console.log(`💰 [Market Contribution] User balance after contribution: ${user.balance} 🌾`);
         
         // Clear user cache to ensure fresh balance is returned by API calls
         clearUserCache(user._id, user.username);
+        console.log(`🗑️ [Market Contribution] Cleared user cache for ${user.username} (ID: ${user._id})`);
+        console.log(`📡 [Market Contribution] Dispatching balanceUpdated event for ${user.username}`);
         
         // Record transaction in UserTransaction ledger
         await createTransaction({
@@ -380,8 +386,16 @@ router.post('/request/:requestId/decline-all', auth, async (req, res) => {
         for (const contribution of contributions) {
           const user = await User.findById(contribution.user).session(session);
           if (user) {
+            console.log(`💰 [Contribution Refund] Refunding ${contribution.amount} 🌾 to ${user.username}`);
+            console.log(`💰 [Contribution Refund] User balance before refund: ${user.balance} 🌾`);
+            
             user.balance += contribution.amount;
             await user.save({ session });
+            console.log(`💰 [Contribution Refund] User balance after refund: ${user.balance} 🌾`);
+            
+            // Clear user cache to ensure fresh balance is returned by API calls
+            clearUserCache(user._id, user.username);
+            console.log(`🗑️ [Contribution Refund] Cleared user cache for ${user.username} (ID: ${user._id})`);
             
             // Record refund transaction
             await createTransaction({

@@ -282,13 +282,6 @@ router.put('/:novelId/modules/reorder', auth, async (req, res) => {
       { session }
     );
 
-    // Update novel's timestamp
-    await Novel.findByIdAndUpdate(
-      novelId,
-      { updatedAt: new Date() },
-      { session }
-    );
-
     // Commit the transaction
     await session.commitTransaction();
     
@@ -459,12 +452,6 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
       return res.status(404).json({ message: 'Module not found' });
     }
     
-    // Update the novel's updatedAt timestamp to bring it to the top of latest updates
-    await Novel.findByIdAndUpdate(
-      req.params.novelId,
-      { updatedAt: new Date() }
-    );
-    
     // Clear novel caches to ensure fresh data on next request
     clearNovelCaches();
 
@@ -509,12 +496,10 @@ router.delete('/:novelId/modules/:moduleId', auth, async (req, res) => {
       });
     }
     
-    // Update novel updatedAt timestamp and increment view in one operation
+    // Only increment view count if needed (no timestamp update for administrative actions)
     await Novel.findByIdAndUpdate(
       req.params.novelId,
       { 
-        updatedAt: new Date(),
-        // Using $inc for views.total to avoid a separate query
         $inc: { 'views.total': 1 },
         // Add a conditional update for daily views
         $push: {
@@ -727,14 +712,8 @@ router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, asyn
       { session }
     );
 
-    // Only update novel's timestamp if not skipping
-    if (!skipUpdateTimestamp) {
-      await Novel.findByIdAndUpdate(
-        novelId,
-        { updatedAt: new Date() },
-        { session }
-      );
-    }
+    // Chapter reordering is an administrative action - don't update novel timestamp
+    // (Novel timestamp should only be updated for new content, not reorganization)
 
     // Commit the transaction
     await session.commitTransaction();
