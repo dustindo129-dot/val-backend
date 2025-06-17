@@ -2396,9 +2396,6 @@ router.post("/:id/contribute", auth, async (req, res) => {
     session.startTransaction();
 
     try {
-      console.log(`💰 [Novel Contribution] Starting contribution: ${amount} 🌾 for novel ${novelId}`);
-      console.log(`💰 [Novel Contribution] User balance before contribution: ${user.balance} 🌾`);
-
       // Deduct from user balance
       await User.findByIdAndUpdate(userId, {
         $inc: { balance: -amount }
@@ -2406,15 +2403,11 @@ router.post("/:id/contribute", auth, async (req, res) => {
 
       // Get updated user balance for transaction recording
       const updatedUser = await User.findById(userId).session(session);
-      console.log(`💰 [Novel Contribution] User balance after contribution: ${updatedUser.balance} 🌾`);
 
       // Clear user cache to ensure fresh balance is returned by API calls
       clearUserCache(userId, user.username);
-      console.log(`🗑️ [Novel Contribution] Cleared user cache for ${user.username} (ID: ${userId})`);
 
-      // Dispatch balanceUpdated event to notify SecondaryNavbar
-      console.log(`📡 [Novel Contribution] Dispatching balanceUpdated event for ${user.username}`);
-      // Note: This will be handled by the frontend after the response
+      // Note: balanceUpdated event will be handled by the frontend after the response
 
       // Add to novel budget and balance
       const updatedNovel = await Novel.findByIdAndUpdate(novelId, {
@@ -2458,7 +2451,6 @@ router.post("/:id/contribute", auth, async (req, res) => {
 
       await session.commitTransaction();
 
-      console.log(`💰 Contribution completed for "${novel.title}" - checking for auto-unlock...`);
       // Check for auto-unlock after contribution
       await checkAndUnlockContent(novelId);
 
@@ -2562,12 +2554,9 @@ export async function checkAndUnlockContent(novelId) {
   try {
     const novel = await Novel.findById(novelId).session(session);
     if (!novel || novel.novelBudget <= 0) {
-      console.log(`🔐 Auto-unlock check: Novel ${novelId} - No budget available (${novel?.novelBudget || 0} 🌾)`);
       await session.abortTransaction();
       return;
     }
-
-    console.log(`🔐 Auto-unlock started for novel "${novel.title}" (${novelId}) with budget: ${novel.novelBudget} 🌾`);
 
     // Get all modules for this novel, sorted by order
     const modules = await Module.find({ novelId })
@@ -2575,35 +2564,30 @@ export async function checkAndUnlockContent(novelId) {
       .session(session)
       .lean();
 
-    console.log(`🗂️ Found ${modules.length} modules to check in order:`, modules.map(m => `"${m.title}" (order: ${m.order}, mode: ${m.mode})`));
-
     let remainingBudget = novel.novelBudget;
     let unlocked = false;
     let budgetChanged = false;
     let unlockedContent = [];
 
     for (const module of modules) {
-      console.log(`\n📁 Processing Module: "${module.title}" (order: ${module.order}, mode: ${module.mode})`);
-      
-      // If module is paid, try to unlock it first
-      if (module.mode === 'paid') {
-        console.log(`💰 Module "${module.title}" is PAID - requires ${module.moduleBalance} 🌾 (available: ${remainingBudget} 🌾)`);
+      // If module is paid or undefined (treat undefined as paid), try to unlock it first
+      if (module.mode === 'paid' || module.mode === undefined) {
+        const moduleBalance = module.moduleBalance || 0;
         
-        if (remainingBudget >= module.moduleBalance) {
-          console.log(`✅ UNLOCKING MODULE: "${module.title}" - deducting ${module.moduleBalance} 🌾`);
+        if (remainingBudget >= moduleBalance) {
           
           // Unlock the module by changing mode to published
           await Module.findByIdAndUpdate(module._id, { mode: 'published' }, { session });
-          remainingBudget -= module.moduleBalance;
+          remainingBudget -= moduleBalance;
           unlocked = true;
           budgetChanged = true;
-          unlockedContent.push({ type: 'module', title: module.title, cost: module.moduleBalance });
+          unlockedContent.push({ type: 'module', title: module.title, cost: moduleBalance });
 
           // Create system contribution record
           await ContributionHistory.create([{
             novelId,
             userId: null, // System action
-            amount: -module.moduleBalance,
+            amount: -moduleBalance,
             note: `Mở khóa tự động: ${module.title}`,
             budgetAfter: remainingBudget,
             type: 'system'
@@ -2616,10 +2600,8 @@ export async function checkAndUnlockContent(novelId) {
             moduleTitle: module.title 
           });
 
-          console.log(`✅ Module "${module.title}" unlocked! Remaining budget: ${remainingBudget} 🌾`);
           // Continue to check chapters in this now-unlocked module
         } else {
-          console.log(`❌ Cannot afford module "${module.title}" (need ${module.moduleBalance} 🌾, have ${remainingBudget} 🌾) - STOPPING sequential unlock`);
           // Cannot afford this module, stop here (sequential unlock)
           break;
         }
@@ -2627,22 +2609,12 @@ export async function checkAndUnlockContent(novelId) {
 
       // If module is published (free or just unlocked), check its chapters in order
       if (module.mode === 'published') {
-        console.log(`📖 Module "${module.title}" is PUBLISHED - checking chapters...`);
-        
-        // Get chapters for this module, sorted by order
+        // Get chapters for this module, sorted by order (only load essential fields for performance)
         const chapters = await Chapter.find({ moduleId: module._id })
+          .select('title order mode chapterBalance')
           .sort({ order: 1 })
           .session(session)
           .lean();
-
-        const paidChapters = chapters.filter(c => c.mode === 'paid');
-        const publishedChapters = chapters.filter(c => c.mode === 'published');
-        
-        console.log(`📊 Module "${module.title}" has ${chapters.length} total chapters: ${publishedChapters.length} published, ${paidChapters.length} paid`);
-        
-        if (paidChapters.length > 0) {
-          console.log(`💰 Paid chapters in "${module.title}":`, paidChapters.map(c => `"${c.title}" (order: ${c.order}, cost: ${c.chapterBalance} 🌾)`));
-        }
 
         // Process paid chapters in THIS module first, regardless of their global order numbers
         // This ensures module-by-module unlocking rather than global order unlocking
@@ -2651,10 +2623,7 @@ export async function checkAndUnlockContent(novelId) {
         for (const chapter of chapters) {
           // If chapter is paid, try to unlock it
           if (chapter.mode === 'paid') {
-            console.log(`💰 Chapter "${chapter.title}" (order: ${chapter.order}) is PAID - requires ${chapter.chapterBalance} 🌾 (available: ${remainingBudget} 🌾)`);
-            
             if (remainingBudget >= chapter.chapterBalance) {
-              console.log(`✅ UNLOCKING CHAPTER: "${chapter.title}" - deducting ${chapter.chapterBalance} 🌾`);
               
               // Unlock the chapter by changing mode to published
               await Chapter.findByIdAndUpdate(chapter._id, { mode: 'published' }, { session });
@@ -2680,10 +2649,7 @@ export async function checkAndUnlockContent(novelId) {
                 chapterId: chapter._id,
                 chapterTitle: chapter.title 
               });
-              
-              console.log(`✅ Chapter "${chapter.title}" unlocked! Remaining budget: ${remainingBudget} 🌾`);
             } else {
-              console.log(`❌ Cannot afford chapter "${chapter.title}" (need ${chapter.chapterBalance} 🌾, have ${remainingBudget} 🌾) - Module "${module.title}" still has unpaid chapters`);
               // Cannot afford this chapter in current module
               // Mark that this module still has unpaid chapters
               moduleHasUnpaidChapters = true;
@@ -2696,9 +2662,6 @@ export async function checkAndUnlockContent(novelId) {
         // If current module still has unpaid chapters, stop processing entirely
         // Don't proceed to next modules until current module is fully unlocked
         if (moduleHasUnpaidChapters) {
-          console.log(`🛑 STOPPING: Module "${module.title}" still has unpaid chapters - will not proceed to next modules (sequential unlock rule)`);
-          console.log(`📊 Final unlock summary: ${unlockedContent.length} items unlocked, budget ${novel.novelBudget} → ${remainingBudget} 🌾`);
-          
           // Update budget and timestamp if ANY content was unlocked (even if module isn't fully unlocked)
           if (budgetChanged) {
             if (unlockedContent.length > 0) {
@@ -2709,13 +2672,9 @@ export async function checkAndUnlockContent(novelId) {
                 updatedAt: newTimestamp
               }, { session });
               
-              console.log(`🚀 NOVEL MOVED TO TOP OF LATEST UPDATES: "${novel.title}" timestamp updated to ${newTimestamp.toISOString()}`);
-              console.log(`💾 Updated novel budget to ${remainingBudget} 🌾 with timestamp update (content was unlocked)`);
-              
               // Clear caches and notify clients
               await session.commitTransaction();
               
-              console.log(`🗑️ Clearing novel caches due to content unlock`);
               clearNovelCaches();
               
               // Send additional notification to ensure frontend refreshes
@@ -2724,12 +2683,9 @@ export async function checkAndUnlockContent(novelId) {
                 timestamp: newTimestamp.toISOString(),
                 reason: 'content_unlocked'
               });
-              
-              console.log(`📡 Sent notifications to all clients about novel update for latest section`);
             } else {
               // Budget changed but no content was unlocked
               await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget }, { session });
-              console.log(`💾 Updated novel budget to ${remainingBudget} 🌾 (no timestamp update - no content unlocked)`);
               await session.commitTransaction();
             }
           } else {
@@ -2737,19 +2693,7 @@ export async function checkAndUnlockContent(novelId) {
           }
           return;
         }
-        
-        console.log(`✅ Module "${module.title}" fully processed - all chapters are now published`);
       }
-    }
-
-    console.log(`\n🏁 Auto-unlock completed for "${novel.title}"`);
-    console.log(`📊 Final summary: ${unlockedContent.length} items unlocked, budget ${novel.novelBudget} → ${remainingBudget} 🌾`);
-    
-    if (unlockedContent.length > 0) {
-      console.log(`🎉 Unlocked content:`, unlockedContent.map(item => `${item.type}: "${item.title}"${item.module ? ` (in ${item.module})` : ''} - ${item.cost} 🌾`));
-      console.log(`📈 Novel will be moved to top of latest updates because content was unlocked!`);
-    } else {
-      console.log(`📊 No content was unlocked - novel will not move to top of latest updates`);
     }
 
     // Update novel budget and timestamp if anything was unlocked
@@ -2760,13 +2704,9 @@ export async function checkAndUnlockContent(novelId) {
         novelBudget: remainingBudget,
         updatedAt: newTimestamp
       }, { session });
-      
-      console.log(`🚀 NOVEL MOVED TO TOP OF LATEST UPDATES: "${novel.title}" timestamp updated to ${newTimestamp.toISOString()}`);
-      console.log(`💾 Updated novel budget to ${remainingBudget} 🌾 with timestamp update (content was unlocked)`);
     } else if (budgetChanged) {
       // Budget changed but nothing was unlocked (shouldn't happen, but safety check)
       await Novel.findByIdAndUpdate(novelId, { novelBudget: remainingBudget }, { session });
-      console.log(`💾 Updated novel budget to ${remainingBudget} 🌾 (no timestamp update - no content unlocked)`);
     }
 
     await session.commitTransaction();
@@ -2774,7 +2714,6 @@ export async function checkAndUnlockContent(novelId) {
     // Clear all caches AFTER successful transaction commit
     // This ensures cache clearing only happens if database changes were persisted
     if (unlockedContent.length > 0) {
-      console.log(`🗑️ Clearing novel caches due to content unlock`);
       clearNovelCaches();
       
       // Send additional notification to ensure frontend refreshes
@@ -2783,8 +2722,6 @@ export async function checkAndUnlockContent(novelId) {
         timestamp: new Date().toISOString(),
         reason: 'content_unlocked'
       });
-      
-      console.log(`📡 Sent notifications to all clients about novel update for latest section`);
     }
 
   } catch (error) {

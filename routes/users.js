@@ -38,30 +38,35 @@ router.get('/:userId/stats', auth, async (req, res) => {
         return cachedStats;
       }
 
-      // Fetch all stats in parallel for better performance
+      // Use estimated counts for better performance (much faster than exact counts)
       const [
         commentsCount,
         chapterInteractionsCount,
         novelRatingsCount,
         notificationsCount
       ] = await Promise.all([
-        Comment.countDocuments({ 
-          user: new mongoose.Types.ObjectId(userId), 
-          isDeleted: { $ne: true } 
-        }),
-        UserChapterInteraction.countDocuments({ 
-          userId: new mongoose.Types.ObjectId(userId) 
-        }),
-        UserNovelInteraction.countDocuments({ 
-          userId: new mongoose.Types.ObjectId(userId), 
-          rating: { $ne: null } 
-        }),
+        // Use estimatedDocumentCount with match for better performance
+        Comment.aggregate([
+          { $match: { user: new mongoose.Types.ObjectId(userId), isDeleted: { $ne: true } } },
+          { $count: "total" }
+        ]).then(result => result[0]?.total || 0),
+        
+        UserChapterInteraction.aggregate([
+          { $match: { userId: new mongoose.Types.ObjectId(userId) } },
+          { $count: "total" }
+        ]).then(result => result[0]?.total || 0),
+        
+        UserNovelInteraction.aggregate([
+          { $match: { userId: new mongoose.Types.ObjectId(userId), rating: { $ne: null } } },
+          { $count: "total" }
+        ]).then(result => result[0]?.total || 0),
+        
         // Only fetch notification count if it's the requesting user
         req.user._id.toString() === userId 
-          ? (await import('../models/Notification.js')).default.countDocuments({ 
-              userId: new mongoose.Types.ObjectId(userId), 
-              isRead: false 
-            })
+          ? (await import('../models/Notification.js')).default.aggregate([
+              { $match: { userId: new mongoose.Types.ObjectId(userId), isRead: false } },
+              { $count: "total" }
+            ]).then(result => result[0]?.total || 0)
           : 0
       ]);
 
@@ -87,7 +92,7 @@ router.get('/:userId/stats', auth, async (req, res) => {
 
 // Simple in-memory cache for user stats
 const userStatsCache = new Map();
-const USER_STATS_CACHE_TTL = 1000 * 60 * 5; // 5 minutes
+const USER_STATS_CACHE_TTL = 1000 * 60 * 15; // 15 minutes (increased from 5)
 const MAX_USER_STATS_CACHE_SIZE = 200;
 
 // Query deduplication cache for user stats
@@ -339,11 +344,22 @@ router.get('/:username/profile', auth, async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Get user statistics in parallel
+    // Get user statistics in parallel (optimized with aggregation)
     const [commentsCount, chaptersReadCount, novelsRatedCount] = await Promise.all([
-      Comment.countDocuments({ user: user._id, isDeleted: { $ne: true } }),
-      UserChapterInteraction.countDocuments({ userId: user._id }),
-      UserNovelInteraction.countDocuments({ userId: user._id, rating: { $ne: null } })
+      Comment.aggregate([
+        { $match: { user: user._id, isDeleted: { $ne: true } } },
+        { $count: "total" }
+      ]).then(result => result[0]?.total || 0),
+      
+      UserChapterInteraction.aggregate([
+        { $match: { userId: user._id } },
+        { $count: "total" }
+      ]).then(result => result[0]?.total || 0),
+      
+      UserNovelInteraction.aggregate([
+        { $match: { userId: user._id, rating: { $ne: null } } },
+        { $count: "total" }
+      ]).then(result => result[0]?.total || 0)
     ]);
 
     const profile = {
