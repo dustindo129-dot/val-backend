@@ -982,9 +982,10 @@ router.get("/", optionalAuth, async (req, res) => {
         // Exclude: note, active, inactive, novelBalance, novelBudget, author, illustrator, alternativeTitles, createdAt
       };
       
-      // Add wordCount only for novel directory requests
+      // Add wordCount and views for novel directory requests
       if (isNovelDirectoryRequest) {
         projection.wordCount = 1;
+        projection.views = 1;
       }
 
       const [result] = await Novel.aggregate([
