@@ -148,7 +148,7 @@ router.post('/send', auth, async (req, res) => {
   session.startTransaction();
 
   try {
-    const { novelId, giftId } = req.body;
+    const { novelId, giftId, note } = req.body;
     const userId = req.user._id;
 
     // Validate input
@@ -250,11 +250,15 @@ router.post('/send', auth, async (req, res) => {
     }, session);
 
     // Create contribution history record
+    const giftNote = note && note.trim() 
+      ? note.trim() 
+      : `Quà tặng ${gift.icon} ${gift.name}`;
+
     await ContributionHistory.create([{
       novelId,
       userId,
       amount: gift.price,
-      note: `Quà tặng ${gift.icon} ${gift.name}`,
+      note: giftNote,
       budgetAfter: novel.novelBudget || 0, // Budget doesn't change for gifts
       balanceAfter: novelBalanceAfter,
       type: 'gift'
