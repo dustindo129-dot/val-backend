@@ -360,6 +360,19 @@ router.get('/:id', async (req, res) => {
           }
         },
         
+        // Lookup the user who created this chapter
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'createdBy',
+            foreignField: '_id',
+            pipeline: [
+              { $project: { displayName: 1, username: 1 } }
+            ],
+            as: 'createdByUser'
+          }
+        },
+        
         // Then, lookup all chapters from the same module
         {
           $lookup: {
@@ -387,10 +400,11 @@ router.get('/:id', async (req, res) => {
           }
         },
         
-        // Add fields for novel, prevChapter, and nextChapter
+        // Add fields for novel, createdByUser, prevChapter, and nextChapter
         {
           $addFields: {
             novel: { $arrayElemAt: ['$novel', 0] },
+            createdByUser: { $arrayElemAt: ['$createdByUser', 0] },
             prevChapter: {
               $let: {
                 vars: {
@@ -566,6 +580,7 @@ router.post('/', auth, async (req, res) => {
       translator,
       editor,
       proofreader,
+      createdBy: req.user._id,
       mode: mode || 'published',
       views: 0,
       footnotes: footnotes || [],
@@ -1059,6 +1074,13 @@ router.get('/:id/full', async (req, res) => {
             as: 'novel' 
         }},
         { '$lookup': { 
+            from: 'users', 
+            localField: 'createdBy', 
+            foreignField: '_id', 
+            pipeline: [ { '$project': { displayName: 1, username: 1 } } ], 
+            as: 'createdByUser' 
+        }},
+        { '$lookup': { 
             from: 'chapters', 
             let: { moduleId: '$moduleId', currentOrder: '$order', chapterId: '$_id' }, 
             pipeline: [ 
@@ -1075,6 +1097,7 @@ router.get('/:id/full', async (req, res) => {
         }},
         { '$addFields': { 
             novel: { '$arrayElemAt': [ '$novel', 0 ] },
+            createdByUser: { '$arrayElemAt': [ '$createdByUser', 0 ] },
             prevChapter: { 
               '$let': { 
                 vars: { 
@@ -1312,5 +1335,6 @@ router.post('/fix-novel-wordcounts', auth, async (req, res) => {
     });
   }
 });
+
 
 export default router; 

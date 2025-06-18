@@ -35,6 +35,11 @@ const chapterSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
   mode: {
     type: String,
     enum: ['published', 'draft', 'protected', 'paid'],
