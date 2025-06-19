@@ -897,6 +897,38 @@ router.put('/:id', auth, async (req, res) => {
       // Clear novel caches
       clearNovelCaches();
 
+      // Check if chapterBalance changed and trigger auto-unlock if needed
+      const chapterBalanceChanged = req.user.role === 'admin' && 
+        finalChapterBalance !== existingChapter.chapterBalance;
+      
+      if (chapterBalanceChanged) {
+        try {
+          // Import and call the auto-unlock function
+          const { checkAndUnlockContent } = await import('./novels.js');
+          await checkAndUnlockContent(existingChapter.novelId);
+          
+          // Clear caches again after potential auto-unlock
+          clearNovelCaches();
+          clearChapterCaches(updatedChapter._id.toString());
+          
+          // Clear slug cache entries for this chapter to prevent stale mode caching
+          const chapterIdString = updatedChapter._id.toString();
+          const keysToDelete = [];
+          for (const [key, value] of slugCache.entries()) {
+            if (value.data && value.data.id && value.data.id.toString() === chapterIdString) {
+              keysToDelete.push(key);
+            }
+          }
+          keysToDelete.forEach(key => slugCache.delete(key));
+          
+          // Clear query deduplication cache for this chapter
+          pendingQueries.delete(`chapter:${updatedChapter._id}`);
+        } catch (unlockError) {
+          console.error('Error during auto-unlock after chapterBalance change:', unlockError);
+          // Don't fail the chapter update if auto-unlock fails
+        }
+      }
+
       // Notify clients of the update
       notifyAllClients('update', {
         type: 'chapter_updated',
