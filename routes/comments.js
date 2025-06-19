@@ -220,6 +220,7 @@ router.get('/novel/:novelId', async (req, res) => {
           likes: 1,
           likesCount: 1,
           isPinned: 1,
+          isEdited: 1,
           chapterInfo: { $arrayElemAt: ['$chapterInfo', 0] },
           user: {
             _id: '$userInfo._id',
@@ -336,6 +337,7 @@ router.get('/', async (req, res) => {
             likes: 1,
             likesCount: 1,
             isPinned: 1,
+            isEdited: 1,
             user: {
               _id: '$userInfo._id',
               username: '$userInfo.username',
