@@ -250,9 +250,10 @@ router.post('/send', auth, async (req, res) => {
     }, session);
 
     // Create contribution history record
+    const defaultGiftMessage = `Quà tặng ${gift.icon} ${gift.name}`;
     const giftNote = note && note.trim() 
-      ? note.trim() 
-      : `Quà tặng ${gift.icon} ${gift.name}`;
+      ? `${note.trim()} (${defaultGiftMessage})` 
+      : defaultGiftMessage;
 
     await ContributionHistory.create([{
       novelId,
