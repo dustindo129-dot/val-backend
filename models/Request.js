@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 /**
  * Request Schema
- * Represents user requests for new novels or chapter openings
+ * Represents user requests for new novels
  * with deposit functionality for request processing
  */
 const requestSchema = new mongoose.Schema({
@@ -13,7 +13,7 @@ const requestSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['new', 'open', 'web'],
+    enum: ['new', 'web'],
     required: true
   },
   title: {
@@ -55,10 +55,6 @@ const requestSchema = new mongoose.Schema({
     type: String,
     enum: ['pending', 'approved', 'declined'],
     default: 'pending'
-  },
-  openNow: {
-    type: Boolean,
-    default: false
   },
   likes: [{
     type: mongoose.Schema.Types.ObjectId,

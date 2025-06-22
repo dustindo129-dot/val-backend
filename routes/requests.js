@@ -30,7 +30,7 @@ router.get('/', async (req, res) => {
       sortCriteria = { createdAt: -1 };
     }
     
-    // Query both pending requests and approved web requests (exclude 'open' requests as they're processed automatically)
+    // Query both pending requests and approved web requests
     const requests = await Request.find({ 
       $or: [
         { status: 'pending', type: { $in: ['new', 'web'] } },
@@ -67,7 +67,7 @@ router.post('/', auth, async (req, res) => {
   session.startTransaction();
   
   try {
-    const { type, title, novelId, moduleId, chapterId, deposit, note, openNow, goalBalance, image } = req.body;
+    const { type, title, novelId, moduleId, chapterId, deposit, note, goalBalance, image } = req.body;
     
     // Validate deposit amount (except for web requests which use goalBalance)
     if (type !== 'web' && (!deposit || isNaN(deposit) || deposit <= 0)) {
@@ -130,9 +130,7 @@ router.post('/', auth, async (req, res) => {
       
       // Record the transaction in UserTransaction ledger
       let description;
-      if (type === 'open') {
-        description = 'Yêu cầu mở chương truyện';
-      } else if (type === 'new') {
+      if (type === 'new') {
         description = 'Yêu cầu truyện mới';
       }
       
@@ -714,16 +712,11 @@ router.get('/history', auth, async (req, res) => {
 });
 
 /**
- * Update a request (admin and moderator only)
+ * Update a request (admin, moderator, or user who created a 'new' request)
  * @route PUT /api/requests/:requestId
  */
 router.put('/:requestId', auth, async (req, res) => {
   try {
-    // Verify user is admin or moderator
-    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-      return res.status(403).json({ message: 'Chỉ admin và moderator mới có thể chỉnh sửa yêu cầu' });
-    }
-    
     const { requestId } = req.params;
     const { note, illustration } = req.body;
     
@@ -733,9 +726,25 @@ router.put('/:requestId', auth, async (req, res) => {
       return res.status(404).json({ message: 'Yêu cầu không tồn tại' });
     }
     
-    // Only allow editing of 'new' and 'web' type requests
-    if (request.type !== 'new' && request.type !== 'web') {
-      return res.status(400).json({ message: 'Loại yêu cầu này không thể chỉnh sửa' });
+    // Check user permissions
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'moderator';
+    const isOwnerOfNewRequest = request.type === 'new' && request.user.toString() === req.user._id.toString();
+    
+    if (!isAdmin && !isOwnerOfNewRequest) {
+      return res.status(403).json({ message: 'Bạn không có quyền chỉnh sửa yêu cầu này' });
+    }
+    
+    // Admin/moderator can edit both 'new' and 'web' requests, users can only edit their own 'new' requests
+    if (isAdmin) {
+      // Admin and moderator can edit 'new' and 'web' type requests
+      if (request.type !== 'new' && request.type !== 'web') {
+        return res.status(400).json({ message: 'Loại yêu cầu này không thể chỉnh sửa' });
+      }
+    } else {
+      // Regular users can only edit their own 'new' requests
+      if (request.type !== 'new') {
+        return res.status(400).json({ message: 'Bạn chỉ có thể chỉnh sửa yêu cầu truyện mới của chính mình' });
+      }
     }
     
     // Update the fields that are allowed to be edited
