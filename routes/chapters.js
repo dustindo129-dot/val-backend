@@ -879,10 +879,16 @@ router.put('/:id', auth, async (req, res) => {
         await recalculateNovelWordCount(existingChapter.novelId, session);
       }
 
+      // Check if chapter is being switched from paid to published/protected mode
+      // This should update the novel timestamp to show it in latest updates
+      const isUnlockingPaidContent = existingChapter.mode === 'paid' && 
+        mode && (mode === 'published' || mode === 'protected');
+
       // Only update novel's timestamp for significant changes that should affect "latest updates"
-      // Don't update for simple content edits, manual mode changes, or administrative balance changes
+      // Don't update for simple content edits, administrative balance changes, etc.
       // Novel timestamp will be updated automatically when paid content is unlocked via contributions
-      const shouldUpdateNovelTimestamp = false; // No manual admin actions should affect latest updates positioning
+      // Exception: When manually switching a chapter from paid to published/protected
+      const shouldUpdateNovelTimestamp = isUnlockingPaidContent;
 
       if (shouldUpdateNovelTimestamp) {
         await Novel.findByIdAndUpdate(
