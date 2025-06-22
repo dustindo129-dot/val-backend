@@ -124,7 +124,7 @@ router.post('/', auth, async (req, res) => {
         }, session);
         
         // Populate user data before sending response
-        await newContribution.populate('user', 'username avatar role');
+        await newContribution.populate('user', 'username displayName avatar role');
         
         await session.commitTransaction();
         return newContribution;
@@ -171,7 +171,7 @@ router.get('/request/:requestId', async (req, res) => {
     
     // Find contributions for the request
     const contributions = await Contribution.find({ request: requestId })
-      .populate('user', 'username avatar role')
+      .populate('user', 'username displayName avatar role')
       .sort({ createdAt: -1 });
     
     res.json(contributions);

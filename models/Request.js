@@ -24,6 +24,10 @@ const requestSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  illustration: {
+    type: String,
+    trim: true
+  },
   novel: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Novel',
@@ -59,7 +63,11 @@ const requestSchema = new mongoose.Schema({
   likes: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
-  }]
+  }],
+  isEdited: {
+    type: Boolean,
+    default: false
+  }
 }, {
   timestamps: true
 });

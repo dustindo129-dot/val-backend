@@ -37,7 +37,7 @@ router.get('/', async (req, res) => {
         { type: 'web', status: 'approved' }
       ]
     })
-      .populate('user', 'username avatar role')
+      .populate('user', 'username displayName avatar role')
       .populate('novel', 'title _id')
       .populate('module', 'title _id')
       .populate('chapter', 'title _id')
@@ -67,7 +67,7 @@ router.post('/', auth, async (req, res) => {
   session.startTransaction();
   
   try {
-    const { type, title, novelId, moduleId, chapterId, deposit, note, openNow, goalBalance } = req.body;
+    const { type, title, novelId, moduleId, chapterId, deposit, note, openNow, goalBalance, image } = req.body;
     
     // Validate deposit amount (except for web requests which use goalBalance)
     if (type !== 'web' && (!deposit || isNaN(deposit) || deposit <= 0)) {
@@ -103,6 +103,11 @@ router.post('/', auth, async (req, res) => {
     // Add note if provided
     if (note) {
       requestData.note = note;
+    }
+    
+    // Add illustration if provided
+    if (image) {
+      requestData.illustration = image;
     }
     
     // Web requests don't need a novel reference at creation time
@@ -146,7 +151,7 @@ router.post('/', auth, async (req, res) => {
     // For admin web recommendations, we don't add to novel balance - that happens via contributions
     
     // Populate user and novel data before sending response
-    await newRequest.populate('user', 'username avatar role');
+    await newRequest.populate('user', 'username displayName avatar role');
     if (type === 'web') {
       await newRequest.populate('novel', 'title _id');
     }
@@ -672,7 +677,7 @@ router.get('/all', auth, async (req, res) => {
     
     // Query all requests matching filters
     const requests = await Request.find(query)
-      .populate('user', 'username avatar role')
+      .populate('user', 'username displayName avatar role')
       .populate('novel', 'title _id')
       .populate('module', 'title _id')
       .populate('chapter', 'title _id')
@@ -695,7 +700,7 @@ router.get('/history', auth, async (req, res) => {
   try {
     // Get all requests for the user, both pending and processed
     const requests = await Request.find({ user: req.user._id })
-      .populate('user', 'username avatar')
+      .populate('user', 'username displayName avatar')
       .populate('novel', 'title _id')
       .populate('module', 'title _id')
       .populate('chapter', 'title _id')
@@ -705,6 +710,60 @@ router.get('/history', auth, async (req, res) => {
   } catch (error) {
     console.error('Failed to fetch request history:', error);
     res.status(500).json({ message: 'Lỗi khi tải lại lịch sử yêu cầu' });
+  }
+});
+
+/**
+ * Update a request (admin and moderator only)
+ * @route PUT /api/requests/:requestId
+ */
+router.put('/:requestId', auth, async (req, res) => {
+  try {
+    // Verify user is admin or moderator
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      return res.status(403).json({ message: 'Chỉ admin và moderator mới có thể chỉnh sửa yêu cầu' });
+    }
+    
+    const { requestId } = req.params;
+    const { note, illustration } = req.body;
+    
+    // Find the request
+    const request = await Request.findById(requestId);
+    if (!request) {
+      return res.status(404).json({ message: 'Yêu cầu không tồn tại' });
+    }
+    
+    // Only allow editing of 'new' and 'web' type requests
+    if (request.type !== 'new' && request.type !== 'web') {
+      return res.status(400).json({ message: 'Loại yêu cầu này không thể chỉnh sửa' });
+    }
+    
+    // Update the fields that are allowed to be edited
+    const updateData = { isEdited: true };
+    
+    if (note !== undefined) {
+      updateData.note = note;
+    }
+    
+    if (illustration !== undefined) {
+      updateData.illustration = illustration;
+    }
+    
+    // Update the request
+         const updatedRequest = await Request.findByIdAndUpdate(
+       requestId,
+       updateData,
+       { new: true }
+     ).populate('user', 'username displayName avatar role')
+      .populate('novel', 'title _id');
+    
+    res.json({
+      message: 'Yêu cầu đã được cập nhật thành công',
+      request: updatedRequest
+    });
+  } catch (error) {
+    console.error('Failed to update request:', error);
+    res.status(500).json({ message: 'Lỗi khi cập nhật yêu cầu' });
   }
 });
 
