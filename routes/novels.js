@@ -2586,14 +2586,14 @@ export async function checkAndUnlockContent(novelId) {
 
           // Only create system contribution record if there was actually a cost
           if (moduleBalance > 0) {
-            await ContributionHistory.create([{
-              novelId,
-              userId: null, // System action
-              amount: -moduleBalance,
-              note: `Mở khóa tự động: ${module.title}`,
-              budgetAfter: remainingBudget,
-              type: 'system'
-            }], { session });
+          await ContributionHistory.create([{
+            novelId,
+            userId: null, // System action
+            amount: -moduleBalance,
+            note: `Mở khóa tự động: ${module.title}`,
+            budgetAfter: remainingBudget,
+            type: 'system'
+          }], { session });
           }
 
           // Notify clients
@@ -2637,14 +2637,14 @@ export async function checkAndUnlockContent(novelId) {
 
               // Only create system contribution record if there was actually a cost
               if (chapter.chapterBalance > 0) {
-                await ContributionHistory.create([{
-                  novelId,
-                  userId: null, // System action
-                  amount: -chapter.chapterBalance,
-                  note: `Mở khóa tự động: ${chapter.title}`,
-                  budgetAfter: remainingBudget,
-                  type: 'system'
-                }], { session });
+              await ContributionHistory.create([{
+                novelId,
+                userId: null, // System action
+                amount: -chapter.chapterBalance,
+                note: `Mở khóa tự động: ${chapter.title}`,
+                budgetAfter: remainingBudget,
+                type: 'system'
+              }], { session });
               }
 
               // Notify clients
