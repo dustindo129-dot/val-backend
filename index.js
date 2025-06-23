@@ -80,22 +80,35 @@ app.use(compression());
 
 // Configure CORS
 const corsOptions = {
-  origin: [
-    // Always include these development URLs
-    'http://localhost:5173', 
-    'http://127.0.0.1:5173', 
-    'http://localhost:4173', 
-    'http://127.0.0.1:4173',
-    'http://localhost:4174',  // For when port 4173 is already in use
-    'http://127.0.0.1:4174',
-    // Include production URLs
-    'https://valvrareteam.net',
-    'https://valvrareteam.netlify.app',
-    // Include DigitalOcean domains
-    'https://val-bh6h9.ondigitalocean.app',
-    // Include environment-specific URL if set
-    ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])
-  ],
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      // Always include these development URLs
+      'http://localhost:5173', 
+      'http://127.0.0.1:5173', 
+      'http://localhost:4173', 
+      'http://127.0.0.1:4173',
+      'http://localhost:4174',  // For when port 4173 is already in use
+      'http://127.0.0.1:4174',
+      // Include production URLs
+      'https://valvrareteam.net',
+      'https://www.valvrareteam.net',
+      'https://valvrareteam.netlify.app',
+      // Include DigitalOcean domains
+      'https://val-bh6h9.ondigitalocean.app',
+      // Include environment-specific URL if set
+      ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])
+    ];
+    
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    console.warn(`CORS blocked origin: ${origin}`);
+    return callback(new Error(`Origin ${origin} not allowed by CORS policy`), false);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
@@ -107,13 +120,45 @@ const corsOptions = {
     'Access-Control-Allow-Headers',
     'Access-Control-Allow-Origin',
     'Access-Control-Allow-Methods',
-    'Pragma'
+    'Pragma',
+    'Cache-Control'
   ],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  optionsSuccessStatus: 200, // Some legacy browsers (IE11, various SmartTVs) choke on 204
   maxAge: 600 // Cache preflight requests for 10 minutes
 };
 
 app.use(cors(corsOptions));
+
+// Additional CORS headers for EventSource/SSE specifically
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowedOrigins = [
+    'http://localhost:5173', 
+    'http://127.0.0.1:5173', 
+    'http://localhost:4173', 
+    'http://127.0.0.1:4173',
+    'https://valvrareteam.net',
+    'https://www.valvrareteam.net',
+    'https://valvrareteam.netlify.app',
+    'https://val-bh6h9.ondigitalocean.app'
+  ];
+  
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
+  }
+  
+  // Handle preflight OPTIONS requests
+  if (req.method === 'OPTIONS') {
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Pragma');
+    res.header('Access-Control-Max-Age', '86400');
+    return res.status(200).end();
+  }
+  
+  next();
+});
 
 // Security headers middleware
 app.use((req, res, next) => {

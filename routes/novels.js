@@ -126,24 +126,32 @@ router.get('/debug/problematic-tab', async (req, res) => {
 router.options('/sse', (req, res) => {
   const origin = req.headers.origin;
   
+  const allowedOrigins = [
+    'https://valvrareteam.net',
+    'https://www.valvrareteam.net', 
+    'https://valvrareteam.netlify.app', 
+    'https://val-bh6h9.ondigitalocean.app',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173'
+  ];
+  
   const corsHeaders = {
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Max-Age': '86400' // 24 hours
+    'Access-Control-Allow-Headers': 'Content-Type, Cache-Control, Pragma',
+    'Access-Control-Max-Age': '86400', // 24 hours
+    'Vary': 'Origin'
   };
   
   // Set CORS origin header to match the requesting domain
-  if (origin && (
-    origin === 'https://valvrareteam.net' || 
-    origin === 'https://valvrareteam.netlify.app' || 
-    origin === 'https://val-bh6h9.ondigitalocean.app' ||
-    origin === 'http://localhost:5173'
-  )) {
+  if (origin && allowedOrigins.includes(origin)) {
     corsHeaders['Access-Control-Allow-Origin'] = origin;
     corsHeaders['Access-Control-Allow-Credentials'] = 'true';
+  } else if (!origin) {
+    // Allow requests with no origin
+    corsHeaders['Access-Control-Allow-Origin'] = '*';
   }
   
-  res.set(corsHeaders).status(204).send();
+  res.set(corsHeaders).status(200).send(); // Changed from 204 to 200 for better compatibility
 });
 
 // Server-Sent Events endpoint for real-time updates
@@ -155,7 +163,10 @@ router.get('/sse', async (req, res) => {
   const allowedOrigins = [
     'http://localhost:3000',
     'http://localhost:5173', // Vite dev server
+    'http://127.0.0.1:5173',
     'https://valvrareteam.net',
+    'https://www.valvrareteam.net',
+    'https://valvrareteam.netlify.app',
     'https://val-bh6h9.ondigitalocean.app' // Add DigitalOcean domain
   ];
 
