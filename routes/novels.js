@@ -2584,15 +2584,17 @@ export async function checkAndUnlockContent(novelId) {
           budgetChanged = true;
           unlockedContent.push({ type: 'module', title: module.title, cost: moduleBalance });
 
-          // Create system contribution record
-          await ContributionHistory.create([{
-            novelId,
-            userId: null, // System action
-            amount: -moduleBalance,
-            note: `Mở khóa tự động: ${module.title}`,
-            budgetAfter: remainingBudget,
-            type: 'system'
-          }], { session });
+          // Only create system contribution record if there was actually a cost
+          if (moduleBalance > 0) {
+            await ContributionHistory.create([{
+              novelId,
+              userId: null, // System action
+              amount: -moduleBalance,
+              note: `Mở khóa tự động: ${module.title}`,
+              budgetAfter: remainingBudget,
+              type: 'system'
+            }], { session });
+          }
 
           // Notify clients
           notifyAllClients('module_unlocked', { 
@@ -2633,15 +2635,17 @@ export async function checkAndUnlockContent(novelId) {
               budgetChanged = true;
               unlockedContent.push({ type: 'chapter', title: chapter.title, module: module.title, cost: chapter.chapterBalance });
 
-              // Create system contribution record
-              await ContributionHistory.create([{
-                novelId,
-                userId: null, // System action
-                amount: -chapter.chapterBalance,
-                note: `Mở khóa tự động: ${chapter.title}`,
-                budgetAfter: remainingBudget,
-                type: 'system'
-              }], { session });
+              // Only create system contribution record if there was actually a cost
+              if (chapter.chapterBalance > 0) {
+                await ContributionHistory.create([{
+                  novelId,
+                  userId: null, // System action
+                  amount: -chapter.chapterBalance,
+                  note: `Mở khóa tự động: ${chapter.title}`,
+                  budgetAfter: remainingBudget,
+                  type: 'system'
+                }], { session });
+              }
 
               // Notify clients
               notifyAllClients('chapter_unlocked', { 
