@@ -1583,6 +1583,274 @@ router.get('/:userId/novel-roles', auth, async (req, res) => {
   }
 });
 
+/**
+ * Get user's role-based modules (auto-populated based on novel roles + user preferences)
+ * @route GET /api/users/:userId/role-modules
+ */
+router.get('/:userId/role-modules', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
+    }
+
+    // Get user with existing module preferences
+    const user = await User.findById(userId).select('ongoingModules completedModules').lean();
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Find all novels where user has any role (pj_user, translator, editor, proofreader)
+    const userNovels = await Novel.find({
+      $or: [
+        { 'active.pj_user': userId },
+        { 'active.translator': userId },
+        { 'active.editor': userId },
+        { 'active.proofreader': userId }
+      ]
+    }).select('_id').lean();
+
+    const novelIds = userNovels.map(novel => novel._id);
+
+    // Get all modules from those novels
+    const roleModules = await mongoose.model('Module').find({
+      novelId: { $in: novelIds }
+    }).populate('novelId', 'title illustration').lean();
+
+    // Get existing module IDs that user has already categorized
+    const existingOngoingIds = user.ongoingModules?.map(item => item.moduleId.toString()) || [];
+    const existingCompletedIds = user.completedModules?.map(item => item.moduleId.toString()) || [];
+    const allExistingIds = [...existingOngoingIds, ...existingCompletedIds];
+
+    // Auto-add new modules to ongoing (modules not yet categorized by user)
+    const newModules = roleModules.filter(module => 
+      !allExistingIds.includes(module._id.toString())
+    );
+
+    // Create ongoing modules list: existing user preferences + new auto-added modules
+    const ongoingModules = [
+      // Existing user ongoing modules (populate with module data)
+      ...(await Promise.all(
+        (user.ongoingModules || []).map(async (item) => {
+          const module = await mongoose.model('Module').findById(item.moduleId)
+            .populate('novelId', 'title illustration').lean();
+          return module ? { moduleId: module, addedAt: item.addedAt } : null;
+        })
+      )).filter(Boolean),
+      
+      // New modules auto-added to ongoing
+      ...newModules.map(module => ({
+        moduleId: module,
+        addedAt: new Date()
+      }))
+    ];
+
+    // Get completed modules (only existing user preferences)
+    const completedModules = await Promise.all(
+      (user.completedModules || []).map(async (item) => {
+        const module = await mongoose.model('Module').findById(item.moduleId)
+          .populate('novelId', 'title illustration').lean();
+        return module ? { moduleId: module, addedAt: item.addedAt } : null;
+      })
+    );
+
+    res.json({
+      ongoingModules: ongoingModules.filter(Boolean),
+      completedModules: completedModules.filter(Boolean)
+    });
+
+  } catch (error) {
+    console.error('Error fetching role-based modules:', error);
+    res.status(500).json({ message: 'Failed to fetch role-based modules' });
+  }
+});
+
+/**
+ * Move module from ongoing to completed
+ * @route POST /api/users/:userId/move-module-to-completed
+ */
+router.post('/:userId/move-module-to-completed', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const { moduleId } = req.body;
+    
+    // Only allow users to manage their own modules or admins
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to manage modules' });
+    }
+
+    await User.findByIdAndUpdate(userId, {
+      $pull: { ongoingModules: { moduleId: moduleId } },
+      $push: { 
+        completedModules: { 
+          moduleId: moduleId, 
+          addedAt: new Date() 
+        } 
+      }
+    });
+
+    res.json({ message: 'Module moved to completed successfully' });
+  } catch (error) {
+    console.error('Error moving module to completed:', error);
+    res.status(500).json({ message: 'Failed to move module to completed' });
+  }
+});
+
+/**
+ * Move module from completed to ongoing
+ * @route POST /api/users/:userId/move-module-to-ongoing
+ */
+router.post('/:userId/move-module-to-ongoing', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const { moduleId } = req.body;
+    
+    // Only allow users to manage their own modules or admins
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to manage modules' });
+    }
+
+    await User.findByIdAndUpdate(userId, {
+      $pull: { completedModules: { moduleId: moduleId } },
+      $push: { 
+        ongoingModules: { 
+          moduleId: moduleId, 
+          addedAt: new Date() 
+        } 
+      }
+    });
+
+    res.json({ message: 'Module moved to ongoing successfully' });
+  } catch (error) {
+    console.error('Error moving module to ongoing:', error);
+    res.status(500).json({ message: 'Failed to move module to ongoing' });
+  }
+});
+
+/**
+ * Reorder ongoing modules
+ * @route PUT /api/users/:userId/reorder-ongoing-modules
+ */
+router.put('/:userId/reorder-ongoing-modules', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const { moduleIds } = req.body;
+    
+    // Only allow users to manage their own modules or admins
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to manage modules' });
+    }
+
+    // Get current user
+    const user = await User.findById(userId);
+    
+    // Reorder based on moduleIds array
+    const reorderedModules = moduleIds.map(moduleId => {
+      const existingModule = user.ongoingModules.find(
+        item => item.moduleId.toString() === moduleId
+      );
+      return existingModule;
+    }).filter(Boolean);
+
+    await User.findByIdAndUpdate(userId, {
+      $set: { ongoingModules: reorderedModules }
+    });
+
+    res.json({ message: 'Ongoing modules reordered successfully' });
+  } catch (error) {
+    console.error('Error reordering ongoing modules:', error);
+    res.status(500).json({ message: 'Failed to reorder ongoing modules' });
+  }
+});
+
+/**
+ * Reorder completed modules
+ * @route PUT /api/users/:userId/reorder-completed-modules
+ */
+router.put('/:userId/reorder-completed-modules', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const { moduleIds } = req.body;
+    
+    // Only allow users to manage their own modules or admins
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to manage modules' });
+    }
+
+    // Get current user
+    const user = await User.findById(userId);
+    
+    // Reorder based on moduleIds array
+    const reorderedModules = moduleIds.map(moduleId => {
+      const existingModule = user.completedModules.find(
+        item => item.moduleId.toString() === moduleId
+      );
+      return existingModule;
+    }).filter(Boolean);
+
+    await User.findByIdAndUpdate(userId, {
+      $set: { completedModules: reorderedModules }
+    });
+
+    res.json({ message: 'Completed modules reordered successfully' });
+  } catch (error) {
+    console.error('Error reordering completed modules:', error);
+    res.status(500).json({ message: 'Failed to reorder completed modules' });
+  }
+});
+
+/**
+ * Remove module from ongoing (updated endpoint)
+ * @route DELETE /api/users/:userId/ongoing-modules/:moduleId
+ */
+router.delete('/:userId/ongoing-modules/:moduleId', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const moduleId = req.params.moduleId;
+    
+    // Only allow users to manage their own modules or admins
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to manage modules' });
+    }
+
+    await User.findByIdAndUpdate(userId, {
+      $pull: { ongoingModules: { moduleId: moduleId } }
+    });
+
+    res.json({ message: 'Module removed from ongoing successfully' });
+  } catch (error) {
+    console.error('Error removing ongoing module:', error);
+    res.status(500).json({ message: 'Failed to remove ongoing module' });
+  }
+});
+
+/**
+ * Remove module from completed (updated endpoint)
+ * @route DELETE /api/users/:userId/completed-modules/:moduleId
+ */
+router.delete('/:userId/completed-modules/:moduleId', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const moduleId = req.params.moduleId;
+    
+    // Only allow users to manage their own modules or admins
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to manage modules' });
+    }
+
+    await User.findByIdAndUpdate(userId, {
+      $pull: { completedModules: { moduleId: moduleId } }
+    });
+
+    res.json({ message: 'Module removed from completed successfully' });
+  } catch (error) {
+    console.error('Error removing completed module:', error);
+    res.status(500).json({ message: 'Failed to remove completed module' });
+  }
+});
+
 // Export cache clearing function for use by other routes
 export { clearUserStatsCache };
 
