@@ -355,6 +355,7 @@ router.get('/count/user/:userId', async (req, res) => {
 });
 
 // Get chapter participation count for a specific user (as translator, editor, or proofreader)
+// Each chapter is counted only ONCE per user, regardless of how many roles they have on that chapter
 router.get('/participation/user/:userId', async (req, res) => {
   try {
     const userId = req.params.userId;
@@ -388,8 +389,9 @@ router.get('/participation/user/:userId', async (req, res) => {
       userConditions.push(user.displayName);
     }
     
-    // Count chapters where the user is involved as translator, editor, or proofreader
-    // Check for any of the possible user identifiers
+    // Count unique chapters where the user participated in any role
+    // Since we're using $or on the same document, each chapter is naturally counted only once
+    // even if the user has multiple roles (translator, editor, proofreader) on the same chapter
     const count = await Chapter.countDocuments({
       $or: [
         { translator: { $in: userConditions } },
