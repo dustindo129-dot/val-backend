@@ -68,6 +68,26 @@ const userSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Novel'
   }],
+  ongoingModules: [{
+    moduleId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Module'
+    },
+    addedAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
+  completedModules: [{
+    moduleId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Module'
+    },
+    addedAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
   createdAt: {
     type: Date,
     default: Date.now

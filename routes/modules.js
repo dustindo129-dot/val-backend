@@ -12,6 +12,252 @@ const router = express.Router();
 // Query deduplication cache to prevent multiple identical requests
 const pendingQueries = new Map();
 
+/**
+ * Search modules with novel information
+ * @route GET /api/modules/search
+ */
+router.get('/search', auth, async (req, res) => {
+  try {
+    const { query, limit = 5 } = req.query;
+    
+    if (!query || query.trim().length < 2) {
+      return res.json([]);
+    }
+    
+    // Split query into individual keywords for flexible matching
+    const keywords = query.trim().toLowerCase().split(/\s+/);
+    
+    // Search modules and populate novel information
+    const modules = await Module.aggregate([
+      {
+        $lookup: {
+          from: 'novels',
+          localField: 'novelId',
+          foreignField: '_id',
+          as: 'novel'
+        }
+      },
+      {
+        $unwind: '$novel'
+      },
+      {
+        $addFields: {
+          // Create search fields
+          novelTitleLower: { $toLower: '$novel.title' },
+          moduleTitleLower: { $toLower: '$title' },
+          combinedText: {
+            $toLower: {
+              $concat: ['$novel.title', ' - ', '$title']
+            }
+          }
+        }
+      },
+      {
+        $match: {
+          // More flexible matching: if the combined text contains all keywords, it's a match
+          $expr: {
+            $allElementsTrue: {
+              $map: {
+                input: keywords,
+                as: 'keyword',
+                in: {
+                  $regexMatch: {
+                    input: '$combinedText',
+                    regex: '$$keyword',
+                    options: 'i'
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        $addFields: {
+          // Calculate relevance score based on keyword matches
+          relevanceScore: {
+            $add: [
+              // Score for novel title matches
+              {
+                $multiply: [
+                  {
+                    $size: {
+                      $filter: {
+                        input: keywords,
+                        as: 'keyword',
+                        cond: {
+                          $regexMatch: {
+                            input: '$novelTitleLower',
+                            regex: '$$keyword',
+                            options: 'i'
+                          }
+                        }
+                      }
+                    }
+                  },
+                  3 // Novel title matches get 3x weight
+                ]
+              },
+              // Score for module title matches
+              {
+                $multiply: [
+                  {
+                    $size: {
+                      $filter: {
+                        input: keywords,
+                        as: 'keyword',
+                        cond: {
+                          $regexMatch: {
+                            input: '$moduleTitleLower',
+                            regex: '$$keyword',
+                            options: 'i'
+                          }
+                        }
+                      }
+                    }
+                  },
+                  2 // Module title matches get 2x weight
+                ]
+              },
+              1 // Base score for any match
+            ]
+          }
+        }
+      },
+      {
+        $project: {
+          _id: 1,
+          title: 1,
+          illustration: 1,
+          order: 1,
+          mode: 1,
+          moduleBalance: 1,
+          novelId: 1,
+          'novel.title': 1,
+          'novel.illustration': 1,
+          relevanceScore: 1
+        }
+      },
+      {
+        $sort: {
+          relevanceScore: -1,
+          'novel.title': 1,
+          order: 1
+        }
+      },
+      {
+        $limit: parseInt(limit)
+      }
+    ]);
+    
+    // If no results from aggregation, try fallback search
+    if (modules.length === 0) {
+      // Get all modules and populate novels
+      const allModulesWithNovels = await Module.find({})
+        .populate('novelId', 'title illustration')
+        .lean()
+        .limit(100); // Limit to prevent memory issues
+      
+      // Filter modules manually with enhanced matching
+      const matchingModules = allModulesWithNovels.filter(module => {
+        if (!module.novelId) return false;
+        
+        const combinedText = `${module.novelId.title} - ${module.title}`.toLowerCase();
+        
+        // Check if all keywords are present in combined text
+        const keywordResults = keywords.map(keyword => {
+          // Normalize the text by replacing various dash types with regular spaces
+          const normalizedText = combinedText
+            .replace(/[–—−]/g, ' ') // Replace em dash, en dash, minus with space
+            .replace(/\s+/g, ' ')   // Replace multiple spaces with single space
+            .trim();
+          
+          // Normalize both text and keyword for Vietnamese characters
+          const normalizeVietnamese = (text) => {
+            return text
+              .normalize('NFD') // Decompose characters
+              .replace(/[\u0300-\u036f]/g, '') // Remove diacritics
+              .normalize('NFC') // Recompose
+              .toLowerCase();
+          };
+          
+          // Try multiple matching strategies
+          const strategies = [
+            // Strategy 1: Direct match
+            () => normalizedText.includes(keyword.toLowerCase()),
+            
+            // Strategy 2: Unicode normalized match
+            () => normalizeVietnamese(normalizedText).includes(normalizeVietnamese(keyword)),
+            
+            // Strategy 3: Vietnamese character tolerant
+            () => {
+              if (keyword.toLowerCase() === 'tập' || keyword.toLowerCase() === 'tap') {
+                return normalizedText.includes('tập') || normalizedText.includes('tap');
+              }
+              return false;
+            }
+          ];
+          
+          return strategies.some(strategy => strategy());
+        });
+        
+        return keywordResults.every(result => result);
+      });
+
+      // Sort by relevance and return top results
+      const sortedModules = matchingModules
+        .map(module => ({
+          _id: module._id,
+          title: module.title,
+          illustration: module.illustration,
+          order: module.order,
+          mode: module.mode,
+          moduleBalance: module.moduleBalance,
+          novelId: module.novelId._id,
+          novel: {
+            title: module.novelId.title,
+            illustration: module.novelId.illustration
+          }
+        }))
+        .slice(0, parseInt(limit));
+
+      // Format the response
+      const formattedModules = sortedModules.map(module => ({
+        _id: module._id,
+        title: module.title,
+        illustration: module.illustration,
+        order: module.order,
+        mode: module.mode,
+        moduleBalance: module.moduleBalance,
+        novelId: module.novelId,
+        novel: module.novel
+      }));
+
+      return res.json(formattedModules);
+    }
+    
+    // Format the response
+    const formattedModules = modules.map(module => ({
+      _id: module._id,
+      title: module.title,
+      illustration: module.illustration,
+      order: module.order,
+      mode: module.mode,
+      moduleBalance: module.moduleBalance,
+      novelId: module.novelId,
+      novel: {
+        title: module.novel.title,
+        illustration: module.novel.illustration
+      }
+    }));
+    
+    res.json(formattedModules);
+  } catch (error) {
+    console.error('Module search error:', error);
+    res.status(500).json({ message: 'Failed to search modules' });
+  }
+});
+
 // Helper function for query deduplication
 const dedupQuery = async (key, queryFn) => {
   // If query is already pending, wait for it

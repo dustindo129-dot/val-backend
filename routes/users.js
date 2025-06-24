@@ -149,10 +149,16 @@ const clearUserStatsCache = (userId = null) => {
  * Update user's avatar
  * @route POST /api/users/:username/avatar
  */
-router.post('/:username/avatar', auth, async (req, res) => {
+router.post('/:displayNameSlug/avatar', auth, async (req, res) => {
   try {
-    // Check if user exists and matches the authenticated user
-    if (req.user.username !== req.params.username) {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
       return res.status(403).json({ message: 'Not authorized to update this profile' });
     }
 
@@ -180,10 +186,16 @@ router.post('/:username/avatar', auth, async (req, res) => {
  * Requires current password verification
  * @route PUT /api/users/:username/email
  */
-router.put('/:username/email', auth, async (req, res) => {
+router.put('/:displayNameSlug/email', auth, async (req, res) => {
   try {
-    // Check if user exists and matches the authenticated user
-    if (req.user.username !== req.params.username) {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
       return res.status(403).json({ message: 'Not authorized to update this profile' });
     }
 
@@ -226,10 +238,16 @@ router.put('/:username/email', auth, async (req, res) => {
  * Can only be changed once per month
  * @route PUT /api/users/:username/display-name
  */
-router.put('/:username/display-name', auth, async (req, res) => {
+router.put('/:displayNameSlug/display-name', auth, async (req, res) => {
   try {
-    // Check if user exists and matches the authenticated user
-    if (req.user.username !== req.params.username) {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
       return res.status(403).json({ message: 'Not authorized to update this profile' });
     }
 
@@ -295,10 +313,16 @@ router.put('/:username/display-name', auth, async (req, res) => {
  * Requires current password verification
  * @route PUT /api/users/:username/password
  */
-router.put('/:username/password', auth, async (req, res) => {
+router.put('/:displayNameSlug/password', auth, async (req, res) => {
   try {
-    // Check if user exists and matches the authenticated user
-    if (req.user.username !== req.params.username) {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
       return res.status(403).json({ message: 'Not authorized to update this profile' });
     }
 
@@ -333,37 +357,42 @@ router.put('/:username/password', auth, async (req, res) => {
  * Get user profile (OPTIMIZED)
  * @route GET /api/users/:username/profile
  */
-router.get('/:username/profile', auth, async (req, res) => {
+router.get('/:displayNameSlug/profile', auth, async (req, res) => {
   try {
-    const username = req.params.username;
+    const displayNameSlug = req.params.displayNameSlug;
     
-    // Use cached lookup
-    const user = await getCachedUserByUsername(username);
+    // Resolve user by display name slug
+    const user = await resolveUserByDisplayName(displayNameSlug);
     
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (user.username !== req.user.username) {
+      return res.status(403).json({ message: 'Not authorized to view this profile' });
     }
 
     // Get user statistics in parallel (optimized with aggregation)
     const [commentsCount, chaptersReadCount, novelsRatedCount] = await Promise.all([
       Comment.aggregate([
-        { $match: { user: user._id, isDeleted: { $ne: true } } },
+        { $match: { user: req.user._id, isDeleted: { $ne: true } } },
         { $count: "total" }
       ]).then(result => result[0]?.total || 0),
       
       UserChapterInteraction.aggregate([
-        { $match: { userId: user._id } },
+        { $match: { userId: req.user._id } },
         { $count: "total" }
       ]).then(result => result[0]?.total || 0),
       
       UserNovelInteraction.aggregate([
-        { $match: { userId: user._id, rating: { $ne: null } } },
+        { $match: { userId: req.user._id, rating: { $ne: null } } },
         { $count: "total" }
       ]).then(result => result[0]?.total || 0)
     ]);
 
     const profile = {
-      ...user,
+      ...req.user,
       stats: {
         commentsCount,
         chaptersReadCount,
@@ -382,10 +411,16 @@ router.get('/:username/profile', auth, async (req, res) => {
  * Check if a novel is bookmarked by user
  * @route GET /api/users/:username/bookmarks/:novelId
  */
-router.get('/:username/bookmarks/:novelId', auth, async (req, res) => {
+router.get('/:displayNameSlug/bookmarks/:novelId', auth, async (req, res) => {
   try {
-    // Check if user exists and matches the authenticated user
-    if (req.user.username !== req.params.username) {
+    // Resolve user by display name slug
+    const user = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== user.username) {
       return res.status(403).json({ message: 'Not authorized to view bookmarks' });
     }
 
@@ -413,10 +448,16 @@ router.get('/:username/bookmarks/:novelId', auth, async (req, res) => {
  * Add/Remove a novel to/from user's bookmarks
  * @route POST /api/users/:username/bookmarks
  */
-router.post('/:username/bookmarks', auth, async (req, res) => {
+router.post('/:displayNameSlug/bookmarks', auth, async (req, res) => {
   try {
-    // Check if user exists and matches the authenticated user
-    if (req.user.username !== req.params.username) {
+    // Resolve user by display name slug
+    const user = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== user.username) {
       return res.status(403).json({ message: 'Not authorized to add bookmarks' });
     }
 
@@ -466,10 +507,16 @@ router.post('/:username/bookmarks', auth, async (req, res) => {
  * Remove a novel from user's bookmarks
  * @route DELETE /api/users/:username/bookmarks/:novelId
  */
-router.delete('/:username/bookmarks/:novelId', auth, async (req, res) => {
+router.delete('/:displayNameSlug/bookmarks/:novelId', auth, async (req, res) => {
   try {
-    // Check if user exists and matches the authenticated user
-    if (req.user.username !== req.params.username) {
+    // Resolve user by display name slug
+    const user = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== user.username) {
       return res.status(403).json({ message: 'Not authorized to remove bookmarks' });
     }
 
@@ -504,10 +551,16 @@ router.delete('/:username/bookmarks/:novelId', auth, async (req, res) => {
  * Get all bookmarked novels for a user with complete novel details
  * @route GET /api/users/:username/bookmarks
  */
-router.get('/:username/bookmarks', auth, async (req, res) => {
+router.get('/:displayNameSlug/bookmarks', auth, async (req, res) => {
   try {
-    // Check if user exists and matches the authenticated user
-    if (req.user.username !== req.params.username) {
+    // Resolve user by display name slug
+    const user = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== user.username) {
       return res.status(403).json({ message: 'Not authorized to view bookmarks' });
     }
 
@@ -750,7 +803,7 @@ router.get('/:username/follows', auth, async (req, res) => {
  * Block a user
  * @route POST /api/users/:username/block
  */
-router.post('/:username/block', auth, async (req, res) => {
+router.post('/:displayNameSlug/block', auth, async (req, res) => {
   try {
     const { userToBlock } = req.body;
     
@@ -793,7 +846,7 @@ router.post('/:username/block', auth, async (req, res) => {
  * Unblock a user
  * @route DELETE /api/users/:username/block/:blockedUsername
  */
-router.delete('/:username/block/:blockedUsername', auth, async (req, res) => {
+router.delete('/:displayNameSlug/block/:blockedUsername', auth, async (req, res) => {
   try {
     const { blockedUsername } = req.params;
     
@@ -823,8 +876,19 @@ router.delete('/:username/block/:blockedUsername', auth, async (req, res) => {
  * Get blocked users list
  * @route GET /api/users/:username/blocked
  */
-router.get('/:username/blocked', auth, async (req, res) => {
+router.get('/:displayNameSlug/blocked', auth, async (req, res) => {
   try {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
+      return res.status(403).json({ message: 'Not authorized to view blocked users' });
+    }
+    
     const user = await User.findById(req.user._id)
       .populate('blockedUsers', 'username displayName avatar');
     
@@ -992,6 +1056,40 @@ router.get('/id/:userId', auth, async (req, res) => {
   }
 });
 
+/**
+ * Get user's public profile (no authentication required)
+ * @route GET /api/users/:displayNameSlug/public-profile
+ */
+router.get('/:displayNameSlug/public-profile', async (req, res) => {
+  try {
+    const displayNameSlug = req.params.displayNameSlug;
+    
+    // Resolve user by display name slug
+    const user = await resolveUserByDisplayName(displayNameSlug);
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Return only public information
+    const publicProfile = {
+      _id: user._id,
+      username: user.username,
+      displayName: user.displayName,
+      avatar: user.avatar,
+      role: user.role,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin,
+      isVerified: user.isVerified || false
+    };
+    
+    res.json(publicProfile);
+  } catch (err) {
+    console.error('Error getting user public profile:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Get user by username
 router.get('/:username', async (req, res) => {
   try {
@@ -1046,6 +1144,26 @@ const escapeRegex = (string) => {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 };
 
+// Helper function to resolve display name slug to user
+const resolveUserByDisplayName = async (displayNameSlug) => {
+  // Convert URL slug back to potential display name variations
+  const potentialDisplayNames = [
+    displayNameSlug,
+    displayNameSlug.replace(/-/g, ' '), // Replace hyphens with spaces
+    displayNameSlug.replace(/-/g, ''),  // Remove hyphens entirely
+  ];
+  
+  for (const displayName of potentialDisplayNames) {
+    const user = await User.findOne({ 
+      displayName: { $regex: new RegExp(`^${escapeRegex(displayName)}$`, 'i') }
+    }).select('-password');
+    
+    if (user) return user;
+  }
+  
+  return null;
+};
+
 // Search users (admin only)
 router.get('/search/:query', [auth, admin], async (req, res) => {
   try {
@@ -1059,6 +1177,409 @@ router.get('/search/:query', [auth, admin], async (req, res) => {
     res.json(users);
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Get user's ongoing modules
+ * @route GET /api/users/:displayNameSlug/ongoing-modules
+ */
+router.get('/:displayNameSlug/ongoing-modules', async (req, res) => {
+  try {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Get user's ongoing modules (publicly viewable)
+    const user = await User.findById(targetUser._id)
+      .populate({
+        path: 'ongoingModules.moduleId',
+        populate: {
+          path: 'novelId',
+          select: 'title illustration'
+        }
+      });
+
+    const ongoingModules = user.ongoingModules || [];
+    res.json(ongoingModules);
+  } catch (error) {
+    console.error('Error fetching ongoing modules:', error);
+    res.status(500).json({ message: 'Failed to fetch ongoing modules' });
+  }
+});
+
+/**
+ * Get user's completed modules
+ * @route GET /api/users/:displayNameSlug/completed-modules
+ */
+router.get('/:displayNameSlug/completed-modules', async (req, res) => {
+  try {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Get user's completed modules (publicly viewable)
+    const user = await User.findById(targetUser._id)
+      .populate({
+        path: 'completedModules.moduleId',
+        populate: {
+          path: 'novelId',
+          select: 'title illustration'
+        }
+      });
+
+    const completedModules = user.completedModules || [];
+    res.json(completedModules);
+  } catch (error) {
+    console.error('Error fetching completed modules:', error);
+    res.status(500).json({ message: 'Failed to fetch completed modules' });
+  }
+});
+
+/**
+ * Add module to ongoing
+ * @route POST /api/users/:displayNameSlug/ongoing-modules
+ */
+router.post('/:displayNameSlug/ongoing-modules', auth, async (req, res) => {
+  try {
+    // Resolve user by display name slug and get user data in one query
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
+      return res.status(403).json({ message: 'Not authorized to add ongoing modules' });
+    }
+
+    const { moduleId } = req.body;
+    
+    // Validate moduleId
+    if (!mongoose.Types.ObjectId.isValid(moduleId)) {
+      return res.status(400).json({ message: 'Invalid module ID' });
+    }
+
+    // Get user with current modules and check if module exists in one aggregation
+    const [userWithModules, moduleExists] = await Promise.all([
+      User.findById(req.user._id).lean(),
+      mongoose.model('Module').exists({ _id: moduleId })
+    ]);
+
+    if (!moduleExists) {
+      return res.status(404).json({ message: 'Module not found' });
+    }
+
+    // Check if module is already in ongoing list
+    const isAlreadyOngoing = userWithModules.ongoingModules?.some(
+      item => item.moduleId.toString() === moduleId
+    );
+
+    if (isAlreadyOngoing) {
+      return res.json({ 
+        message: 'Module is already in ongoing list',
+        alreadyExists: true 
+      });
+    }
+
+    // Add to user's ongoing modules and remove from completed if it exists there
+    await User.findByIdAndUpdate(
+      req.user._id,
+      {
+        $push: {
+          ongoingModules: {
+            moduleId: moduleId,
+            addedAt: new Date()
+          }
+        },
+        // Remove from completed if it exists there
+        $pull: {
+          completedModules: { moduleId: moduleId }
+        }
+      }
+    );
+
+    res.json({ message: 'Module added to ongoing successfully' });
+  } catch (error) {
+    console.error('Error adding ongoing module:', error);
+    res.status(500).json({ message: 'Failed to add ongoing module' });
+  }
+});
+
+/**
+ * Add module to completed
+ * @route POST /api/users/:displayNameSlug/completed-modules
+ */
+router.post('/:displayNameSlug/completed-modules', auth, async (req, res) => {
+  try {
+    // Resolve user by display name slug and get user data in one query
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
+      return res.status(403).json({ message: 'Not authorized to add completed modules' });
+    }
+
+    const { moduleId } = req.body;
+    
+    // Validate moduleId
+    if (!mongoose.Types.ObjectId.isValid(moduleId)) {
+      return res.status(400).json({ message: 'Invalid module ID' });
+    }
+
+    // Get user with current modules and check if module exists in one aggregation
+    const [userWithModules, moduleExists] = await Promise.all([
+      User.findById(req.user._id).lean(),
+      mongoose.model('Module').exists({ _id: moduleId })
+    ]);
+
+    if (!moduleExists) {
+      return res.status(404).json({ message: 'Module not found' });
+    }
+
+    // Check if module is already in completed list
+    const isAlreadyCompleted = userWithModules.completedModules?.some(
+      item => item.moduleId.toString() === moduleId
+    );
+
+    if (isAlreadyCompleted) {
+      return res.json({ 
+        message: 'Module is already in completed list',
+        alreadyExists: true 
+      });
+    }
+
+    // Add to user's completed modules and remove from ongoing if it exists there
+    await User.findByIdAndUpdate(
+      req.user._id,
+      {
+        $push: {
+          completedModules: {
+            moduleId: moduleId,
+            addedAt: new Date()
+          }
+        },
+        // Remove from ongoing if it exists there
+        $pull: {
+          ongoingModules: { moduleId: moduleId }
+        }
+      }
+    );
+
+    res.json({ message: 'Module added to completed successfully' });
+  } catch (error) {
+    console.error('Error adding completed module:', error);
+    res.status(500).json({ message: 'Failed to add completed module' });
+  }
+});
+
+/**
+ * Remove module from ongoing
+ * @route DELETE /api/users/:displayNameSlug/ongoing-modules/:moduleId
+ */
+router.delete('/:displayNameSlug/ongoing-modules/:moduleId', auth, async (req, res) => {
+  try {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
+      return res.status(403).json({ message: 'Not authorized to remove ongoing modules' });
+    }
+
+    const { moduleId } = req.params;
+
+    await User.findByIdAndUpdate(
+      req.user._id,
+      {
+        $pull: {
+          ongoingModules: { moduleId: moduleId }
+        }
+      }
+    );
+
+    res.json({ message: 'Module removed from ongoing successfully' });
+  } catch (error) {
+    console.error('Error removing ongoing module:', error);
+    res.status(500).json({ message: 'Failed to remove ongoing module' });
+  }
+});
+
+/**
+ * Remove module from completed
+ * @route DELETE /api/users/:displayNameSlug/completed-modules/:moduleId
+ */
+router.delete('/:displayNameSlug/completed-modules/:moduleId', auth, async (req, res) => {
+  try {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
+      return res.status(403).json({ message: 'Not authorized to remove completed modules' });
+    }
+
+    const { moduleId } = req.params;
+
+    await User.findByIdAndUpdate(
+      req.user._id,
+      {
+        $pull: {
+          completedModules: { moduleId: moduleId }
+        }
+      }
+    );
+
+    res.json({ message: 'Module removed from completed successfully' });
+  } catch (error) {
+    console.error('Error removing completed module:', error);
+    res.status(500).json({ message: 'Failed to remove completed module' });
+  }
+});
+
+/**
+ * Reorder ongoing modules
+ * @route PUT /api/users/:displayNameSlug/ongoing-modules/reorder
+ */
+router.put('/:displayNameSlug/ongoing-modules/reorder', auth, async (req, res) => {
+  try {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
+      return res.status(403).json({ message: 'Not authorized to reorder ongoing modules' });
+    }
+
+    const { moduleIds } = req.body;
+    
+    if (!Array.isArray(moduleIds)) {
+      return res.status(400).json({ message: 'Module IDs must be an array' });
+    }
+
+    // Get current user with modules
+    const user = await User.findById(req.user._id);
+    
+    // Reorder the ongoing modules based on the new order
+    const reorderedModules = moduleIds.map(moduleId => {
+      const existingModule = user.ongoingModules.find(
+        item => item.moduleId.toString() === moduleId
+      );
+      return existingModule;
+    }).filter(Boolean); // Remove any null/undefined entries
+
+    // Update user's ongoing modules with new order
+    await User.findByIdAndUpdate(
+      req.user._id,
+      {
+        $set: {
+          ongoingModules: reorderedModules
+        }
+      }
+    );
+
+    res.json({ message: 'Ongoing modules reordered successfully' });
+  } catch (error) {
+    console.error('Error reordering ongoing modules:', error);
+    res.status(500).json({ message: 'Failed to reorder ongoing modules' });
+  }
+});
+
+/**
+ * Reorder completed modules
+ * @route PUT /api/users/:displayNameSlug/completed-modules/reorder
+ */
+router.put('/:displayNameSlug/completed-modules/reorder', auth, async (req, res) => {
+  try {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
+      return res.status(403).json({ message: 'Not authorized to reorder completed modules' });
+    }
+
+    const { moduleIds } = req.body;
+    
+    if (!Array.isArray(moduleIds)) {
+      return res.status(400).json({ message: 'Module IDs must be an array' });
+    }
+
+    // Get current user with modules
+    const user = await User.findById(req.user._id);
+    
+    // Reorder the completed modules based on the new order
+    const reorderedModules = moduleIds.map(moduleId => {
+      const existingModule = user.completedModules.find(
+        item => item.moduleId.toString() === moduleId
+      );
+      return existingModule;
+    }).filter(Boolean); // Remove any null/undefined entries
+
+    // Update user's completed modules with new order
+    await User.findByIdAndUpdate(
+      req.user._id,
+      {
+        $set: {
+          completedModules: reorderedModules
+        }
+      }
+    );
+
+    res.json({ message: 'Completed modules reordered successfully' });
+  } catch (error) {
+    console.error('Error reordering completed modules:', error);
+    res.status(500).json({ message: 'Failed to reorder completed modules' });
+  }
+});
+
+/**
+ * Check if user has novel-specific roles (translator, editor, proofreader)
+ * @route GET /api/users/:userId/novel-roles
+ */
+router.get('/:userId/novel-roles', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Only allow users to check their own novel roles or admins
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to view novel roles' });
+    }
+
+    // Check if user has any novel-specific roles
+    const novels = await Novel.find({
+      $or: [
+        { 'active.translator': userId },
+        { 'active.editor': userId },
+        { 'active.proofreader': userId }
+      ]
+    }).select('_id').lean();
+
+    const hasNovelRoles = novels.length > 0;
+    
+    res.json({ hasNovelRoles });
+  } catch (error) {
+    console.error('Error checking novel roles:', error);
+    res.status(500).json({ message: 'Failed to check novel roles' });
   }
 });
 
