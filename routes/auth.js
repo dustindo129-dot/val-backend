@@ -115,6 +115,7 @@ router.post('/signup', async (req, res) => {
         email: user.email, 
         role: user.role,
         avatar: user.avatar,
+        balance: user.balance || 0,
         displayNameLastChanged: user.displayNameLastChanged
       } 
     });
@@ -170,6 +171,7 @@ router.post('/login', async (req, res) => {
         email: user.email,
         role: user.role,
         avatar: user.avatar,
+        balance: user.balance || 0,
         displayNameLastChanged: user.displayNameLastChanged
       } 
     });
