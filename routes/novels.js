@@ -183,7 +183,7 @@ router.get('/sse', async (req, res) => {
   if (token) {
     try {
       const jwt = await import('jsonwebtoken');
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const decoded = jwt.default.verify(token, process.env.JWT_SECRET);
       userId = decoded.userId;
     } catch (error) {
       // Authentication failed - SSE connections should be authenticated

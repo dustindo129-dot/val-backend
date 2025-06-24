@@ -234,6 +234,46 @@ router.put('/:displayNameSlug/email', auth, async (req, res) => {
 });
 
 /**
+ * Update user's introduction
+ * @route PUT /api/users/:username/intro
+ */
+router.put('/:displayNameSlug/intro', auth, async (req, res) => {
+  try {
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(req.params.displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    const { intro } = req.body;
+
+    // Validate intro length
+    if (intro && intro.length > 2000) {
+      return res.status(400).json({ message: 'Introduction cannot exceed 2000 characters' });
+    }
+
+    // Get user
+    const user = await User.findById(req.user._id);
+
+    // Update introduction
+    user.intro = intro || '';
+    await user.save();
+
+    res.json({ 
+      intro: user.intro
+    });
+  } catch (error) {
+    console.error('Introduction update error:', error);
+    res.status(500).json({ message: 'Failed to update introduction' });
+  }
+});
+
+/**
  * Update user's display name
  * Can only be changed once per month
  * @route PUT /api/users/:username/display-name
@@ -1078,12 +1118,27 @@ router.get('/:displayNameSlug/public-profile', async (req, res) => {
       displayName: user.displayName,
       avatar: user.avatar,
       role: user.role,
+      intro: user.intro || '',
       createdAt: user.createdAt,
       lastLogin: user.lastLogin,
-      isVerified: user.isVerified || false
+      isVerified: user.isVerified || false,
+      visitors: user.visitors || { total: 0 }
     };
     
     res.json(publicProfile);
+
+    // Increment visitor count after sending response (non-blocking)
+    // Skip visitor tracking if requested (similar to novel view tracking)
+    if (req.query.skipVisitorTracking !== 'true') {
+      // Find the full document (not lean) and use the model method
+      User.findById(user._id)
+        .then(fullUser => {
+          if (fullUser) {
+            return fullUser.incrementVisitors();
+          }
+        })
+        .catch(err => console.error('Error updating visitor count:', err));
+    }
   } catch (err) {
     console.error('Error getting user public profile:', err);
     res.status(500).json({ message: err.message });

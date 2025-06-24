@@ -68,6 +68,11 @@ const userSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Novel'
   }],
+  intro: {
+    type: String,
+    default: '',
+    maxlength: 2000
+  },
   ongoingModules: [{
     moduleId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -100,6 +105,9 @@ const userSchema = new mongoose.Schema({
   isVerified: {
     type: Boolean,
     default: false
+  },
+  visitors: {
+    total: { type: Number, default: 0 }
   }
 }, {
   timestamps: true
@@ -154,6 +162,15 @@ userSchema.pre('save', async function(next) {
  */
 userSchema.methods.comparePassword = async function(candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
+};
+
+/**
+ * Method to increment visitor count
+ * Tracks total visitors to the user's profile
+ */
+userSchema.methods.incrementVisitors = async function() {
+  this.visitors.total += 1;
+  return this.save();
 };
 
 const User = mongoose.model('User', userSchema);
