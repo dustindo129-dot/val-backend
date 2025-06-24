@@ -279,7 +279,6 @@ router.get('/sse', async (req, res) => {
   
   // Log successful SSE connection
   const totalConnections = sseClients.size;
-  console.log(`SSE Connected - Client: ${clientId}, Tab: ${client.info.tabId}, User: ${userId}, Total Connections: ${totalConnections}`);
   
   // Safely send initial message
   try {
@@ -335,7 +334,6 @@ router.get('/sse', async (req, res) => {
     
     // Log SSE disconnection
     const totalConnections = sseClients.size;
-    console.log(`SSE Disconnected - Client: ${clientId}, Tab: ${client.info.tabId}, User: ${userId}, Reason: ${reason}, Total Connections: ${totalConnections}`);
   };
 
   // Handle client disconnect
