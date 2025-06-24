@@ -369,6 +369,32 @@ router.get('/', async (req, res) => {
 });
 
 /**
+ * Get comment count for a specific user (including replies)
+ * @route GET /api/comments/count/user/:userId
+ */
+router.get('/count/user/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Validate ObjectId format
+    if (!userId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
+    }
+
+    const count = await Comment.countDocuments({ 
+      user: userId,
+      isDeleted: { $ne: true },
+      adminDeleted: { $ne: true }
+    });
+    
+    res.json({ count });
+  } catch (err) {
+    console.error('Error counting user comments:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
  * Get recent comments from across the website (OPTIMIZED)
  * Fetches the latest comments regardless of content type
  * @route GET /api/comments/recent

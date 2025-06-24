@@ -333,6 +333,78 @@ router.get('/novel/:novelId', async (req, res) => {
   }
 });
 
+// Get chapter count for a specific user
+router.get('/count/user/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
+    }
+    
+    const count = await Chapter.countDocuments({ 
+      createdBy: mongoose.Types.ObjectId.createFromHexString(userId) 
+    });
+    
+    res.json({ count });
+  } catch (err) {
+    console.error('Error counting user chapters:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Get chapter participation count for a specific user (as translator, editor, or proofreader)
+router.get('/participation/user/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
+    }
+    
+    // Get user data to check for all possible identifiers
+    const user = await mongoose.model('User').findById(userId).select('username displayName').lean();
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    const userObjectId = mongoose.Types.ObjectId.createFromHexString(userId);
+    const userIdString = userId.toString();
+    
+    // Build query conditions for all possible ways the user could be identified in staff fields
+    const userConditions = [
+      // ObjectId as ObjectId type
+      userObjectId,
+      // ObjectId as string
+      userIdString,
+      // Username
+      user.username
+    ];
+    
+    // Add displayName if it exists and is different from username
+    if (user.displayName && user.displayName !== user.username) {
+      userConditions.push(user.displayName);
+    }
+    
+    // Count chapters where the user is involved as translator, editor, or proofreader
+    // Check for any of the possible user identifiers
+    const count = await Chapter.countDocuments({
+      $or: [
+        { translator: { $in: userConditions } },
+        { editor: { $in: userConditions } },
+        { proofreader: { $in: userConditions } }
+      ]
+    });
+    
+    res.json({ count });
+  } catch (err) {
+    console.error('Error counting user chapter participation:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Get a specific chapter
 router.get('/:id', async (req, res) => {
   try {

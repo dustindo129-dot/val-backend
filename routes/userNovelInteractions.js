@@ -449,6 +449,31 @@ router.post('/bookmark', auth, async (req, res) => {
 });
 
 /**
+ * Get count of novels the user is following
+ * @route GET /api/usernovelinteractions/following/count/:userId
+ */
+router.get('/following/count/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
+    }
+    
+    const count = await UserNovelInteraction.countDocuments({ 
+      userId: mongoose.Types.ObjectId.createFromHexString(userId),
+      followed: true 
+    });
+    
+    res.json({ count });
+  } catch (err) {
+    console.error('Error counting followed novels:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
  * Get all bookmarked novels for the user
  * @route GET /api/usernovelinteractions/bookmarks
  */
