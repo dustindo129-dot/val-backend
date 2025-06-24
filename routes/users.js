@@ -1693,7 +1693,7 @@ router.get('/:userId/role-modules', async (req, res) => {
       // Existing user ongoing modules (use populated data from map)
       ...(user.ongoingModules || []).map(item => {
         const module = moduleMap[item.moduleId.toString()];
-        return module ? { moduleId: module, addedAt: item.addedAt } : null;
+          return module ? { moduleId: module, addedAt: item.addedAt } : null;
       }).filter(Boolean),
       
       // New modules auto-added to ongoing
@@ -1706,7 +1706,7 @@ router.get('/:userId/role-modules', async (req, res) => {
     // Get completed modules (only existing user preferences)
     const completedModules = (user.completedModules || []).map(item => {
       const module = moduleMap[item.moduleId.toString()];
-      return module ? { moduleId: module, addedAt: item.addedAt } : null;
+        return module ? { moduleId: module, addedAt: item.addedAt } : null;
     }).filter(Boolean);
 
     res.json({

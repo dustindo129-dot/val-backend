@@ -277,6 +277,10 @@ router.get('/sse', async (req, res) => {
   // Send initial connection message with client ID  
   const clientId = addClient(client);
   
+  // Log successful SSE connection
+  const totalConnections = sseClients.size;
+  console.log(`SSE Connected - Client: ${clientId}, Tab: ${client.info.tabId}, User: ${userId}, Total Connections: ${totalConnections}`);
+  
   // Safely send initial message
   try {
     res.write(`data: ${JSON.stringify({ 
@@ -299,7 +303,7 @@ router.get('/sse', async (req, res) => {
       clearInterval(pingInterval);
       return;
     }
-   
+    
     try {
       // Check if connection is still writable
       if (res.writableEnded || res.destroyed) {
@@ -328,6 +332,10 @@ router.get('/sse', async (req, res) => {
     
     clearInterval(pingInterval);
     removeClient(client);
+    
+    // Log SSE disconnection
+    const totalConnections = sseClients.size;
+    console.log(`SSE Disconnected - Client: ${clientId}, Tab: ${client.info.tabId}, User: ${userId}, Reason: ${reason}, Total Connections: ${totalConnections}`);
   };
 
   // Handle client disconnect
