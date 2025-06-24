@@ -1662,6 +1662,37 @@ router.get('/:userId/novel-roles', auth, async (req, res) => {
 });
 
 /**
+ * Check if user has novel-specific roles - public endpoint for verification badges
+ * @route GET /api/users/:userId/novel-roles-public
+ */
+router.get('/:userId/novel-roles-public', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
+    }
+
+    // Check if user has any novel-specific roles
+    const novels = await Novel.find({
+      $or: [
+        { 'active.translator': userId },
+        { 'active.editor': userId },
+        { 'active.proofreader': userId }
+      ]
+    }).select('_id').lean();
+
+    const hasNovelRoles = novels.length > 0;
+    
+    res.json({ hasNovelRoles });
+  } catch (error) {
+    console.error('Error checking novel roles:', error);
+    res.status(500).json({ message: 'Failed to check novel roles' });
+  }
+});
+
+/**
  * Get user's role-based modules (auto-populated based on novel roles + user preferences)
  * 
  * PERFORMANCE OPTIMIZATION NOTES:
