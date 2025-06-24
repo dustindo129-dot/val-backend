@@ -259,6 +259,42 @@ export const broadcastEvent = (eventName, data) => {
   failedClients.forEach(client => removeClient(client));
 };
 
+// Send an event to clients belonging to a specific user
+export const broadcastEventToUser = (eventName, data, targetUserId) => {
+  if (!targetUserId) {
+    console.error('broadcastEventToUser called without targetUserId');
+    return;
+  }
+
+  const eventString = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
+  let failedClients = [];
+  let sentCount = 0;
+  
+  sseClients.forEach(client => {
+    // Only send to clients belonging to the target user
+    if (client.info?.userId === targetUserId) {
+      try {
+        client.res.write(eventString);
+        sentCount++;
+      } catch (error) {
+        const clientId = clientIds.get(client) || 'unknown';
+        const tabId = client.info?.tabId || 'unknown';
+        console.error(`Error sending event to client ${clientId} (Tab: ${tabId}, User: ${targetUserId}):`, error);
+        // Mark for removal but don't remove during iteration
+        failedClients.push(client);
+      }
+    }
+  });
+  
+  // Clean up failed clients after iteration
+  failedClients.forEach(client => removeClient(client));
+  
+  // Log successful delivery for debugging
+  if (sentCount > 0) {
+    console.log(`Sent ${eventName} event to ${sentCount} client(s) for user ${targetUserId}`);
+  }
+};
+
 // For backward compatibility - alias broadcastEvent to broadcastMessage
 export const broadcastMessage = broadcastEvent;
 

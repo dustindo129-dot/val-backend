@@ -4,7 +4,7 @@ import Novel from '../models/Novel.js';
 import Chapter from '../models/Chapter.js';
 import Comment from '../models/Comment.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
-import { broadcastEvent } from './sseService.js';
+import { broadcastEvent, broadcastEventToUser } from './sseService.js';
 
 /**
  * Create a notification for report feedback
@@ -67,11 +67,11 @@ export const createReportFeedbackNotification = async (reporterId, reportId, res
     await notification.save();
     console.log(`Report feedback notification created for user ${reporterId}`);
     
-    // Broadcast new notification event
-    broadcastEvent('new_notification', {
+    // Broadcast new notification event to specific user only
+    broadcastEventToUser('new_notification', {
       userId: reporterId,
       notification: notification.toObject()
-    });
+    }, reporterId);
   } catch (error) {
     console.error('Error creating report feedback notification:', error);
   }
@@ -135,11 +135,11 @@ export const createCommentReplyNotification = async (originalCommenterId, replyC
     await notification.save();
     console.log(`Comment reply notification created for user ${originalCommenterId}`);
     
-    // Broadcast new notification event
-    broadcastEvent('new_notification', {
+    // Broadcast new notification event to specific user only
+    broadcastEventToUser('new_notification', {
       userId: originalCommenterId,
       notification: notification.toObject()
-    });
+    }, originalCommenterId);
   } catch (error) {
     console.error('Error creating comment reply notification:', error);
   }
@@ -186,12 +186,12 @@ export const createNewChapterNotifications = async (novelId, chapterId, chapterT
 
     const savedNotifications = await Notification.insertMany(notifications);
     
-    // Broadcast new notification events for each user
+    // Broadcast new notification events to each specific user
     savedNotifications.forEach(notification => {
-      broadcastEvent('new_notification', {
+      broadcastEventToUser('new_notification', {
         userId: notification.userId,
         notification: notification.toObject()
-      });
+      }, notification.userId);
     });
   } catch (error) {
     console.error('Error creating new chapter notifications:', error);
@@ -210,12 +210,12 @@ export const markNotificationAsRead = async (notificationId, userId) => {
       { isRead: true }
     );
     
-    // Broadcast notification read event
-    broadcastEvent('notification_read', {
+    // Broadcast notification read event to specific user only
+    broadcastEventToUser('notification_read', {
       userId,
       notificationId,
       isRead: true
-    });
+    }, userId);
   } catch (error) {
     console.error('Error marking notification as read:', error);
   }
@@ -232,11 +232,11 @@ export const markAllNotificationsAsRead = async (userId) => {
       { isRead: true }
     );
     
-    // Broadcast notifications cleared event
-    broadcastEvent('notifications_cleared', {
+    // Broadcast notifications cleared event to specific user only
+    broadcastEventToUser('notifications_cleared', {
       userId,
       allRead: true
-    });
+    }, userId);
   } catch (error) {
     console.error('Error marking all notifications as read:', error);
   }
@@ -309,12 +309,12 @@ export const createFollowCommentNotifications = async (novelId, commentId, comme
 
     const savedNotifications = await Notification.insertMany(notifications);
     
-    // Broadcast new notification events for each user
+    // Broadcast new notification events to each specific user
     savedNotifications.forEach(notification => {
-      broadcastEvent('new_notification', {
+      broadcastEventToUser('new_notification', {
         userId: notification.userId,
         notification: notification.toObject()
-      });
+      }, notification.userId);
     });
 
     console.log(`Follow comment notifications created for ${savedNotifications.length} users`);
@@ -382,11 +382,11 @@ export const createLikedCommentNotification = async (commentOwnerId, commentId, 
     await notification.save();
     console.log(`Liked comment notification created for user ${commentOwnerId}`);
     
-    // Broadcast new notification event
-    broadcastEvent('new_notification', {
+    // Broadcast new notification event to specific user only
+    broadcastEventToUser('new_notification', {
       userId: commentOwnerId,
       notification: notification.toObject()
-    });
+    }, commentOwnerId);
   } catch (error) {
     console.error('Error creating liked comment notification:', error);
   }

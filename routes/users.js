@@ -1144,6 +1144,11 @@ const escapeRegex = (string) => {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 };
 
+// Helper function to normalize text by removing diacritics/accents
+const normalizeText = (text) => {
+  return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+};
+
 // Helper function to resolve display name slug to user
 const resolveUserByDisplayName = async (displayNameSlug) => {
   // Convert URL slug back to potential display name variations
@@ -1153,12 +1158,30 @@ const resolveUserByDisplayName = async (displayNameSlug) => {
     displayNameSlug.replace(/-/g, ''),  // Remove hyphens entirely
   ];
   
+  // First try exact matches (original behavior)
   for (const displayName of potentialDisplayNames) {
     const user = await User.findOne({ 
       displayName: { $regex: new RegExp(`^${escapeRegex(displayName)}$`, 'i') }
     }).select('-password');
     
     if (user) return user;
+  }
+  
+  // If no exact match, try normalized search (without diacritics)
+  const normalizedSlug = normalizeText(displayNameSlug);
+  
+  // Get all users and check normalized versions of their displayNames
+  const allUsers = await User.find({}).select('username displayName').lean();
+  
+  for (const user of allUsers) {
+    if (user.displayName && normalizeText(user.displayName) === normalizedSlug) {
+      // Return the full user object without password
+      return await User.findById(user._id).select('-password');
+    }
+    if (user.username && normalizeText(user.username) === normalizedSlug) {
+      // Return the full user object without password
+      return await User.findById(user._id).select('-password');
+    }
   }
   
   return null;
@@ -1585,6 +1608,26 @@ router.get('/:userId/novel-roles', auth, async (req, res) => {
 
 /**
  * Get user's role-based modules (auto-populated based on novel roles + user preferences)
+ * 
+ * PERFORMANCE OPTIMIZATION NOTES:
+ * This endpoint queries novels and modules collections heavily. For optimal performance, ensure these indexes exist:
+ * 
+ * Novel collection:
+ * - db.novels.createIndex({ "active.pj_user": 1 })
+ * - db.novels.createIndex({ "active.translator": 1 })
+ * - db.novels.createIndex({ "active.editor": 1 })
+ * - db.novels.createIndex({ "active.proofreader": 1 })
+ * - db.novels.createIndex({ "_id": 1 })
+ * 
+ * Module collection:
+ * - db.modules.createIndex({ "novelId": 1 })
+ * - db.modules.createIndex({ "_id": 1, "novelId": 1 })
+ * 
+ * User collection:
+ * - db.users.createIndex({ "_id": 1 })
+ * - db.users.createIndex({ "ongoingModules.moduleId": 1 })
+ * - db.users.createIndex({ "completedModules.moduleId": 1 })
+ * 
  * @route GET /api/users/:userId/role-modules
  */
 router.get('/:userId/role-modules', async (req, res) => {
@@ -1629,16 +1672,29 @@ router.get('/:userId/role-modules', async (req, res) => {
       !allExistingIds.includes(module._id.toString())
     );
 
+    // Get all existing module IDs from user preferences
+    const existingOngoingModuleIds = (user.ongoingModules || []).map(item => item.moduleId);
+    const existingCompletedModuleIds = (user.completedModules || []).map(item => item.moduleId);
+    const allExistingModuleIds = [...existingOngoingModuleIds, ...existingCompletedModuleIds];
+
+    // Fetch all existing modules in one query (both ongoing and completed)
+    const existingModules = await mongoose.model('Module').find({
+      _id: { $in: allExistingModuleIds }
+    }).populate('novelId', 'title illustration').lean();
+
+    // Create a map for quick lookup
+    const moduleMap = {};
+    existingModules.forEach(module => {
+      moduleMap[module._id.toString()] = module;
+    });
+
     // Create ongoing modules list: existing user preferences + new auto-added modules
     const ongoingModules = [
-      // Existing user ongoing modules (populate with module data)
-      ...(await Promise.all(
-        (user.ongoingModules || []).map(async (item) => {
-          const module = await mongoose.model('Module').findById(item.moduleId)
-            .populate('novelId', 'title illustration').lean();
-          return module ? { moduleId: module, addedAt: item.addedAt } : null;
-        })
-      )).filter(Boolean),
+      // Existing user ongoing modules (use populated data from map)
+      ...(user.ongoingModules || []).map(item => {
+        const module = moduleMap[item.moduleId.toString()];
+        return module ? { moduleId: module, addedAt: item.addedAt } : null;
+      }).filter(Boolean),
       
       // New modules auto-added to ongoing
       ...newModules.map(module => ({
@@ -1648,13 +1704,10 @@ router.get('/:userId/role-modules', async (req, res) => {
     ];
 
     // Get completed modules (only existing user preferences)
-    const completedModules = await Promise.all(
-      (user.completedModules || []).map(async (item) => {
-        const module = await mongoose.model('Module').findById(item.moduleId)
-          .populate('novelId', 'title illustration').lean();
-        return module ? { moduleId: module, addedAt: item.addedAt } : null;
-      })
-    );
+    const completedModules = (user.completedModules || []).map(item => {
+      const module = moduleMap[item.moduleId.toString()];
+      return module ? { moduleId: module, addedAt: item.addedAt } : null;
+    }).filter(Boolean);
 
     res.json({
       ongoingModules: ongoingModules.filter(Boolean),

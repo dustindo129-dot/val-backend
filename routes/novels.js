@@ -176,6 +176,24 @@ router.get('/sse', async (req, res) => {
     return res.status(403).json({ error: 'Origin not allowed' });
   }
 
+  // AUTHENTICATION: Extract and validate JWT token (from URL params since EventSource doesn't support headers)
+  let userId = null;
+  const token = req.query.token;
+  
+  if (token) {
+    try {
+      const jwt = await import('jsonwebtoken');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      userId = decoded.userId;
+    } catch (error) {
+      // Authentication failed - SSE connections should be authenticated
+      return res.status(401).json({ error: 'Authentication required for SSE connection' });
+    }
+  } else {
+    // No authentication provided
+    return res.status(401).json({ error: 'Authentication required for SSE connection' });
+  }
+
   // Pre-check connection limits per IP (prevent abuse)
   const clientIP = req.ip || req.socket.remoteAddress;
   const clientsFromSameIP = Array.from(sseClients).filter(existingClient => 
@@ -217,13 +235,13 @@ router.get('/sse', async (req, res) => {
     return;
   }
 
-  // Create client object with additional info
+  // Create client object with additional info including userId
   const client = {
     res,
     info: {
+      userId: userId, // Associate connection with authenticated user
       tabId: req.query.tabId || 'unknown',
       ip: req.ip,
-      userAgent: req.get('User-Agent'),
       timestamp: Date.now(),
       url: req.originalUrl
     }
@@ -235,6 +253,7 @@ router.get('/sse', async (req, res) => {
     ip: clientIP, // Use the pre-validated IP
     userAgent: req.headers['user-agent'] || client.info.userAgent || 'unknown',
     tabId: tabId, // Use the pre-validated tabId
+    userId: userId, // Ensure userId is set
     timestamp: client.info.timestamp
   };
 
@@ -264,6 +283,7 @@ router.get('/sse', async (req, res) => {
       message: 'Connected to novel updates',
       clientId: clientId,
       tabId: client.info.tabId,
+      userId: userId,
       timestamp: Date.now() 
     })}\n\n`);
   } catch (writeError) {
@@ -279,7 +299,7 @@ router.get('/sse', async (req, res) => {
       clearInterval(pingInterval);
       return;
     }
-    
+   
     try {
       // Check if connection is still writable
       if (res.writableEnded || res.destroyed) {
@@ -288,7 +308,7 @@ router.get('/sse', async (req, res) => {
         return;
       }
       
-      res.write(`: heartbeat ${clientId}:${client.info.tabId} ${Date.now()}\n\n`);
+      res.write(`: heartbeat ${clientId}:${client.info.tabId}:${userId} ${Date.now()}\n\n`);
     } catch (error) {
       console.error('SSE ping error:', error);
       clearInterval(pingInterval);

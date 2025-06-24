@@ -1,7 +1,7 @@
 import express from 'express';
 import Notification from '../models/Notification.js';
 import { auth } from '../middleware/auth.js';
-import { broadcastEvent } from '../services/sseService.js';
+import { broadcastEvent, broadcastEventToUser } from '../services/sseService.js';
 import mongoose from 'mongoose';
 
 const router = express.Router();
@@ -249,11 +249,11 @@ router.put('/read-all', auth, async (req, res) => {
       { isRead: true }
     );
 
-    // Broadcast notifications cleared event
-    broadcastEvent('notifications_cleared', {
+    // Broadcast notifications cleared event to specific user only
+    broadcastEventToUser('notifications_cleared', {
       userId: req.user._id,
       allRead: true
-    });
+    }, req.user._id);
 
     res.json({ message: 'Đã đánh dấu tất cả thông báo đã đọc' });
   } catch (error) {
@@ -269,11 +269,11 @@ router.delete('/delete-all', auth, async (req, res) => {
       userId: req.user._id
     });
 
-    // Broadcast notifications deleted event
-    broadcastEvent('notifications_deleted', {
+    // Broadcast notifications deleted event to specific user only
+    broadcastEventToUser('notifications_deleted', {
       userId: req.user._id,
       allDeleted: true
-    });
+    }, req.user._id);
 
     res.json({ message: 'Đã xóa tất cả thông báo' });
   } catch (error) {
@@ -298,12 +298,12 @@ router.put('/:id/read', auth, async (req, res) => {
       return res.status(404).json({ message: 'Không tìm thấy thông báo' });
     }
 
-    // Broadcast notification read event
-    broadcastEvent('notification_read', {
+    // Broadcast notification read event to specific user only
+    broadcastEventToUser('notification_read', {
       userId: req.user._id,
       notificationId: req.params.id,
       isRead: true
-    });
+    }, req.user._id);
 
     res.json(notification);
   } catch (error) {
@@ -324,11 +324,11 @@ router.delete('/:id', auth, async (req, res) => {
       return res.status(404).json({ message: 'Không tìm thấy thông báo' });
     }
 
-    // Broadcast notification deleted event
-    broadcastEvent('notification_deleted', {
+    // Broadcast notification deleted event to specific user only
+    broadcastEventToUser('notification_deleted', {
       userId: req.user._id,
       notificationId: req.params.id
-    });
+    }, req.user._id);
 
     res.json({ message: 'Đã xóa thông báo' });
   } catch (error) {
