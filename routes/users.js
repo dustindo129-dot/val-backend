@@ -2154,8 +2154,8 @@ router.put('/id/:userId/interests', auth, async (req, res) => {
       if (typeof interest !== 'string' || interest.trim().length === 0) {
         return res.status(400).json({ message: 'Each interest must be a non-empty string' });
       }
-      if (interest.length > 20) {
-        return res.status(400).json({ message: 'Each interest must be 20 characters or less' });
+      if (interest.length > 40) {
+        return res.status(400).json({ message: 'Each interest must be 40 characters or less' });
       }
     }
 
