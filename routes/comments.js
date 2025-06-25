@@ -805,9 +805,9 @@ router.post('/:commentId/pin', auth, async (req, res) => {
       return res.status(404).json({ message: 'Comment not found' });
     }
 
-    // Only allow pinning on novel comments (not chapters or feedback)
-    if (comment.contentType !== 'novels') {
-      return res.status(400).json({ message: 'Comments can only be pinned on novels' });
+    // Only allow pinning on novel and chapter comments (not feedback)
+    if (comment.contentType !== 'novels' && comment.contentType !== 'chapters') {
+      return res.status(400).json({ message: 'Comments can only be pinned on novels or chapters' });
     }
 
     // Check if user has permission to pin comments
@@ -819,11 +819,36 @@ router.post('/:commentId/pin', auth, async (req, res) => {
       try {
         // Import Novel model to check pj_user assignment
         const Novel = (await import('../models/Novel.js')).default;
-        const novel = await Novel.findById(comment.contentId);
-        if (novel && novel.active && novel.active.pj_user) {
-          canPinAsPjUser = novel.active.pj_user.includes(req.user._id) ||
-                          novel.active.pj_user.includes(req.user.username) ||
-                          novel.active.pj_user.includes(req.user.displayName);
+        let novelId = null;
+        
+        if (comment.contentType === 'novels') {
+          novelId = comment.contentId;
+        } else if (comment.contentType === 'chapters') {
+          // For chapters, contentId is in format "novelId-chapterId"
+          const parts = comment.contentId.split('-');
+          if (parts.length === 2) {
+            novelId = parts[0];
+          } else {
+            // Fallback: try to get novelId from the chapter document
+            try {
+              const Chapter = (await import('../models/Chapter.js')).default;
+              const chapterDoc = await Chapter.findById(comment.contentId);
+              if (chapterDoc) {
+                novelId = chapterDoc.novelId.toString();
+              }
+            } catch (err) {
+              console.error('Error getting novelId from chapter:', err);
+            }
+          }
+        }
+        
+        if (novelId) {
+          const novel = await Novel.findById(novelId);
+          if (novel && novel.active && novel.active.pj_user) {
+            canPinAsPjUser = novel.active.pj_user.includes(req.user._id) ||
+                            novel.active.pj_user.includes(req.user.username) ||
+                            novel.active.pj_user.includes(req.user.displayName);
+          }
         }
       } catch (err) {
         console.error('Error checking pj_user assignment:', err);
@@ -847,10 +872,12 @@ router.post('/:commentId/pin', auth, async (req, res) => {
         message: 'Comment unpinned successfully'
       });
     } else {
-      // If comment is not pinned, first unpin any other pinned comments for this novel
+      // If comment is not pinned, first unpin any other pinned comments for the same content
+      // For novels: unpin other novel comments for the same novel
+      // For chapters: unpin other chapter comments for the same chapter
       await Comment.updateMany(
         { 
-          contentType: 'novels', 
+          contentType: comment.contentType, 
           contentId: comment.contentId, 
           isPinned: true,
           _id: { $ne: comment._id } // Exclude current comment

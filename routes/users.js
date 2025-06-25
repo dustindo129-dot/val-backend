@@ -1119,6 +1119,7 @@ router.get('/:displayNameSlug/public-profile', async (req, res) => {
       avatar: user.avatar,
       role: user.role,
       intro: user.intro || '',
+      interests: user.interests || [],
       createdAt: user.createdAt,
       lastLogin: user.lastLogin,
       isVerified: user.isVerified || false,
@@ -1204,8 +1205,56 @@ const normalizeText = (text) => {
   return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 };
 
-// Helper function to resolve display name slug to user
+// User resolution cache to prevent duplicate queries
+const userResolutionCache = new Map();
+const allUsersCache = { data: null, timestamp: 0 };
+const USER_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const ALL_USERS_CACHE_TTL = 2 * 60 * 1000; // 2 minutes for all users query
+
+// Clear expired cache entries
+const clearExpiredUserCache = () => {
+  const now = Date.now();
+  for (const [key, value] of userResolutionCache.entries()) {
+    if (now - value.timestamp > USER_CACHE_TTL) {
+      userResolutionCache.delete(key);
+    }
+  }
+};
+
+// Get all users with caching
+const getAllUsersBasicInfo = async () => {
+  const now = Date.now();
+  
+  // Check if cached data is still valid
+  if (allUsersCache.data && (now - allUsersCache.timestamp) < ALL_USERS_CACHE_TTL) {
+    return allUsersCache.data;
+  }
+  
+  // Fetch fresh data
+  const users = await User.find({}).select('username displayName').lean();
+  
+  // Update cache
+  allUsersCache.data = users;
+  allUsersCache.timestamp = now;
+  
+  return users;
+};
+
+// Helper function to resolve display name slug to user with caching
 const resolveUserByDisplayName = async (displayNameSlug) => {
+  // Check cache first
+  const cacheKey = `user_${displayNameSlug.toLowerCase()}`;
+  const cached = userResolutionCache.get(cacheKey);
+  
+  if (cached && (Date.now() - cached.timestamp) < USER_CACHE_TTL) {
+    return cached.user;
+  }
+
+  // Clear expired entries periodically
+  if (userResolutionCache.size > 100) {
+    clearExpiredUserCache();
+  }
+
   // Convert URL slug back to potential display name variations
   const potentialDisplayNames = [
     displayNameSlug,
@@ -1219,25 +1268,50 @@ const resolveUserByDisplayName = async (displayNameSlug) => {
       displayName: { $regex: new RegExp(`^${escapeRegex(displayName)}$`, 'i') }
     }).select('-password');
     
-    if (user) return user;
+    if (user) {
+      // Cache the result
+      userResolutionCache.set(cacheKey, {
+        user,
+        timestamp: Date.now()
+      });
+      return user;
+    }
   }
   
   // If no exact match, try normalized search (without diacritics)
   const normalizedSlug = normalizeText(displayNameSlug);
   
-  // Get all users and check normalized versions of their displayNames
-  const allUsers = await User.find({}).select('username displayName').lean();
+  // Get all users and check normalized versions of their displayNames (using cached version)
+  const allUsers = await getAllUsersBasicInfo();
   
   for (const user of allUsers) {
     if (user.displayName && normalizeText(user.displayName) === normalizedSlug) {
       // Return the full user object without password
-      return await User.findById(user._id).select('-password');
+      const fullUser = await User.findById(user._id).select('-password');
+      // Cache the result
+      userResolutionCache.set(cacheKey, {
+        user: fullUser,
+        timestamp: Date.now()
+      });
+      return fullUser;
     }
     if (user.username && normalizeText(user.username) === normalizedSlug) {
       // Return the full user object without password
-      return await User.findById(user._id).select('-password');
+      const fullUser = await User.findById(user._id).select('-password');
+      // Cache the result
+      userResolutionCache.set(cacheKey, {
+        user: fullUser,
+        timestamp: Date.now()
+      });
+      return fullUser;
     }
   }
+  
+  // Cache null result to prevent repeated lookups
+  userResolutionCache.set(cacheKey, {
+    user: null,
+    timestamp: Date.now()
+  });
   
   return null;
 };
@@ -1476,6 +1550,9 @@ router.delete('/id/:userId/ongoing-modules/:moduleId', auth, async (req, res) =>
       $pull: { ongoingModules: { moduleId: moduleId } }
     });
 
+    // Clear user stats cache since module data changed
+    clearUserStatsCache(userId);
+
     res.json({ message: 'Module removed from ongoing successfully' });
   } catch (error) {
     console.error('Error removing ongoing module:', error);
@@ -1500,6 +1577,9 @@ router.delete('/id/:userId/completed-modules/:moduleId', auth, async (req, res) 
     await User.findByIdAndUpdate(userId, {
       $pull: { completedModules: { moduleId: moduleId } }
     });
+
+    // Clear user stats cache since module data changed
+    clearUserStatsCache(userId);
 
     res.json({ message: 'Module removed from completed successfully' });
   } catch (error) {
@@ -1540,7 +1620,7 @@ router.put('/:displayNameSlug/ongoing-modules/reorder', auth, async (req, res) =
         item => item.moduleId.toString() === moduleId
       );
       return existingModule;
-    }).filter(Boolean); // Remove any null/undefined entries
+    }).filter(Boolean);
 
     // Update user's ongoing modules with new order
     await User.findByIdAndUpdate(
@@ -1591,7 +1671,7 @@ router.put('/:displayNameSlug/completed-modules/reorder', auth, async (req, res)
         item => item.moduleId.toString() === moduleId
       );
       return existingModule;
-    }).filter(Boolean); // Remove any null/undefined entries
+    }).filter(Boolean);
 
     // Update user's completed modules with new order
     await User.findByIdAndUpdate(
@@ -1676,18 +1756,17 @@ router.get('/id/:userId/novel-roles-public', async (req, res) => {
  * Get user's role-based modules (auto-populated based on novel roles + user preferences)
  * 
  * PERFORMANCE OPTIMIZATION NOTES:
- * This endpoint queries novels and modules collections heavily. For optimal performance, ensure these indexes exist:
+ * This endpoint uses a single aggregation pipeline to minimize database queries.
+ * Ensure these indexes exist for optimal performance:
  * 
  * Novel collection:
  * - db.novels.createIndex({ "active.pj_user": 1 })
  * - db.novels.createIndex({ "active.translator": 1 })
  * - db.novels.createIndex({ "active.editor": 1 })
  * - db.novels.createIndex({ "active.proofreader": 1 })
- * - db.novels.createIndex({ "_id": 1 })
  * 
  * Module collection:
  * - db.modules.createIndex({ "novelId": 1 })
- * - db.modules.createIndex({ "_id": 1, "novelId": 1 })
  * 
  * User collection:
  * - db.users.createIndex({ "_id": 1 })
@@ -1705,79 +1784,194 @@ router.get('/id/:userId/role-modules', async (req, res) => {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
 
-    // Get user with existing module preferences
-    const user = await User.findById(userId).select('ongoingModules completedModules').lean();
-    if (!user) {
+    // Use aggregation pipeline to get all data in one query
+    const result = await User.aggregate([
+      // Match the specific user
+      { $match: { _id: new mongoose.Types.ObjectId(userId) } },
+      
+      // Add a field to perform the novel lookup
+      { $addFields: { userId: { $toString: "$_id" } } },
+      
+      // Lookup novels where user has roles
+      {
+        $lookup: {
+          from: 'novels',
+          let: { userId: '$userId' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $or: [
+                    { $in: ['$$userId', '$active.pj_user'] },
+                    { $in: ['$$userId', '$active.translator'] },
+                    { $in: ['$$userId', '$active.editor'] },
+                    { $in: ['$$userId', '$active.proofreader'] }
+                  ]
+                }
+              }
+            },
+            { $project: { _id: 1 } }
+          ],
+          as: 'userNovels'
+        }
+      },
+      
+      // Lookup all modules from user's novels
+      {
+        $lookup: {
+          from: 'modules',
+          let: { novelIds: '$userNovels._id' },
+          pipeline: [
+            { $match: { $expr: { $in: ['$novelId', '$$novelIds'] } } },
+            {
+              $lookup: {
+                from: 'novels',
+                localField: 'novelId',
+                foreignField: '_id',
+                as: 'novelId',
+                pipeline: [{ $project: { title: 1, illustration: 1 } }]
+              }
+            },
+            { $unwind: '$novelId' }
+          ],
+          as: 'roleModules'
+        }
+      },
+      
+      // Lookup existing ongoing modules with novel data
+      {
+        $lookup: {
+          from: 'modules',
+          let: { moduleIds: '$ongoingModules.moduleId' },
+          pipeline: [
+            { $match: { $expr: { $in: ['$_id', '$$moduleIds'] } } },
+            {
+              $lookup: {
+                from: 'novels',
+                localField: 'novelId',
+                foreignField: '_id',
+                as: 'novelId',
+                pipeline: [{ $project: { title: 1, illustration: 1 } }]
+              }
+            },
+            { $unwind: '$novelId' }
+          ],
+          as: 'existingOngoingModules'
+        }
+      },
+      
+      // Lookup existing completed modules with novel data
+      {
+        $lookup: {
+          from: 'modules',
+          let: { moduleIds: '$completedModules.moduleId' },
+          pipeline: [
+            { $match: { $expr: { $in: ['$_id', '$$moduleIds'] } } },
+            {
+              $lookup: {
+                from: 'novels',
+                localField: 'novelId',
+                foreignField: '_id',
+                as: 'novelId',
+                pipeline: [{ $project: { title: 1, illustration: 1 } }]
+              }
+            },
+            { $unwind: '$novelId' }
+          ],
+          as: 'existingCompletedModules'
+        }
+      },
+      
+      // Project final result
+      {
+        $project: {
+          _id: 1,
+          ongoingModules: {
+            $map: {
+              input: '$ongoingModules',
+              as: 'ongoing',
+              in: {
+                moduleId: {
+                  $arrayElemAt: [
+                    {
+                      $filter: {
+                        input: '$existingOngoingModules',
+                        cond: { $eq: ['$$this._id', '$$ongoing.moduleId'] }
+                      }
+                    },
+                    0
+                  ]
+                },
+                addedAt: '$$ongoing.addedAt'
+              }
+            }
+          },
+          completedModules: {
+            $map: {
+              input: '$completedModules',
+              as: 'completed',
+              in: {
+                moduleId: {
+                  $arrayElemAt: [
+                    {
+                      $filter: {
+                        input: '$existingCompletedModules',
+                        cond: { $eq: ['$$this._id', '$$completed.moduleId'] }
+                      }
+                    },
+                    0
+                  ]
+                },
+                addedAt: '$$completed.addedAt'
+              }
+            }
+          },
+          newModules: {
+            $filter: {
+              input: '$roleModules',
+              cond: {
+                $not: {
+                  $in: [
+                    '$$this._id',
+                    {
+                      $concatArrays: [
+                        { $ifNull: ['$ongoingModules.moduleId', []] },
+                        { $ifNull: ['$completedModules.moduleId', []] }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    ]);
+
+    if (!result || result.length === 0) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Find all novels where user has any role (pj_user, translator, editor, proofreader)
-    const userNovels = await Novel.find({
-      $or: [
-        { 'active.pj_user': userId },
-        { 'active.translator': userId },
-        { 'active.editor': userId },
-        { 'active.proofreader': userId }
-      ]
-    }).select('_id').lean();
-
-    const novelIds = userNovels.map(novel => novel._id);
-
-    // Get all modules from those novels
-    const roleModules = await mongoose.model('Module').find({
-      novelId: { $in: novelIds }
-    }).populate('novelId', 'title illustration').lean();
-
-    // Get existing module IDs that user has already categorized
-    const existingOngoingIds = user.ongoingModules?.map(item => item.moduleId.toString()) || [];
-    const existingCompletedIds = user.completedModules?.map(item => item.moduleId.toString()) || [];
-    const allExistingIds = [...existingOngoingIds, ...existingCompletedIds];
-
-    // Auto-add new modules to ongoing (modules not yet categorized by user)
-    const newModules = roleModules.filter(module => 
-      !allExistingIds.includes(module._id.toString())
-    );
-
-    // Get all existing module IDs from user preferences
-    const existingOngoingModuleIds = (user.ongoingModules || []).map(item => item.moduleId);
-    const existingCompletedModuleIds = (user.completedModules || []).map(item => item.moduleId);
-    const allExistingModuleIds = [...existingOngoingModuleIds, ...existingCompletedModuleIds];
-
-    // Fetch all existing modules in one query (both ongoing and completed)
-    const existingModules = await mongoose.model('Module').find({
-      _id: { $in: allExistingModuleIds }
-    }).populate('novelId', 'title illustration').lean();
-
-    // Create a map for quick lookup
-    const moduleMap = {};
-    existingModules.forEach(module => {
-      moduleMap[module._id.toString()] = module;
-    });
-
-    // Create ongoing modules list: existing user preferences + new auto-added modules
+    const userData = result[0];
+    
+    // Filter out null modules and add new modules to ongoing
     const ongoingModules = [
-      // Existing user ongoing modules (use populated data from map)
-      ...(user.ongoingModules || []).map(item => {
-        const module = moduleMap[item.moduleId.toString()];
-          return module ? { moduleId: module, addedAt: item.addedAt } : null;
-      }).filter(Boolean),
+      // Existing user ongoing modules (filter out null results)
+      ...userData.ongoingModules.filter(item => item.moduleId),
       
       // New modules auto-added to ongoing
-      ...newModules.map(module => ({
+      ...userData.newModules.map(module => ({
         moduleId: module,
         addedAt: new Date()
       }))
     ];
 
-    // Get completed modules (only existing user preferences)
-    const completedModules = (user.completedModules || []).map(item => {
-      const module = moduleMap[item.moduleId.toString()];
-        return module ? { moduleId: module, addedAt: item.addedAt } : null;
-    }).filter(Boolean);
+    // Filter out null modules from completed
+    const completedModules = userData.completedModules.filter(item => item.moduleId);
 
     res.json({
-      ongoingModules: ongoingModules.filter(Boolean),
-      completedModules: completedModules.filter(Boolean)
+      ongoingModules,
+      completedModules
     });
 
   } catch (error) {
@@ -1810,6 +2004,9 @@ router.post('/id/:userId/move-module-to-completed', auth, async (req, res) => {
       }
     });
 
+    // Clear user stats cache since module data changed
+    clearUserStatsCache(userId);
+
     res.json({ message: 'Module moved to completed successfully' });
   } catch (error) {
     console.error('Error moving module to completed:', error);
@@ -1840,6 +2037,9 @@ router.post('/id/:userId/move-module-to-ongoing', auth, async (req, res) => {
         } 
       }
     });
+
+    // Clear user stats cache since module data changed
+    clearUserStatsCache(userId);
 
     res.json({ message: 'Module moved to ongoing successfully' });
   } catch (error) {
@@ -1877,6 +2077,9 @@ router.put('/id/:userId/reorder-ongoing-modules', auth, async (req, res) => {
       $set: { ongoingModules: reorderedModules }
     });
 
+    // Clear user stats cache since module order changed
+    clearUserStatsCache(userId);
+
     res.json({ message: 'Ongoing modules reordered successfully' });
   } catch (error) {
     console.error('Error reordering ongoing modules:', error);
@@ -1913,6 +2116,9 @@ router.put('/id/:userId/reorder-completed-modules', auth, async (req, res) => {
       $set: { completedModules: reorderedModules }
     });
 
+    // Clear user stats cache since module order changed
+    clearUserStatsCache(userId);
+
     res.json({ message: 'Completed modules reordered successfully' });
   } catch (error) {
     console.error('Error reordering completed modules:', error);
@@ -1920,7 +2126,79 @@ router.put('/id/:userId/reorder-completed-modules', auth, async (req, res) => {
   }
 });
 
+/**
+ * Update user interests
+ * @route PUT /api/users/id/:userId/interests
+ */
+router.put('/id/:userId/interests', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const { interests } = req.body;
+    
+    // Only allow users to update their own interests or admins
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to update interests' });
+    }
+
+    // Validate interests array
+    if (!Array.isArray(interests)) {
+      return res.status(400).json({ message: 'Interests must be an array' });
+    }
+
+    if (interests.length > 20) {
+      return res.status(400).json({ message: 'Cannot have more than 20 interests' });
+    }
+
+    // Validate each interest
+    for (const interest of interests) {
+      if (typeof interest !== 'string' || interest.trim().length === 0) {
+        return res.status(400).json({ message: 'Each interest must be a non-empty string' });
+      }
+      if (interest.length > 20) {
+        return res.status(400).json({ message: 'Each interest must be 20 characters or less' });
+      }
+    }
+
+    // Remove duplicates and trim whitespace
+    const cleanedInterests = [...new Set(interests.map(interest => interest.trim()))];
+
+    await User.findByIdAndUpdate(userId, {
+      interests: cleanedInterests
+    });
+
+    // Clear user resolution cache since user data changed
+    clearUserResolutionCache(userId);
+
+    res.json({ 
+      message: 'Interests updated successfully',
+      interests: cleanedInterests
+    });
+  } catch (error) {
+    console.error('Error updating interests:', error);
+    res.status(500).json({ message: 'Failed to update interests' });
+  }
+});
+
+// Clear user resolution cache when user data changes
+const clearUserResolutionCache = (userId = null) => {
+  if (userId) {
+    // Clear specific user entries - we need to iterate since cache keys are by displayName/username
+    for (const [key, value] of userResolutionCache.entries()) {
+      if (value.user && value.user._id.toString() === userId.toString()) {
+        userResolutionCache.delete(key);
+      }
+    }
+  } else {
+    // Clear all entries
+    userResolutionCache.clear();
+  }
+  
+  // Also clear the all users cache since user data changed
+  allUsersCache.data = null;
+  allUsersCache.timestamp = 0;
+};
+
 // Export cache clearing function for use by other routes
-export { clearUserStatsCache };
+export { clearUserStatsCache, clearUserResolutionCache };
 
 export default router; 

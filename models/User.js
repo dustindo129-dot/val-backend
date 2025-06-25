@@ -108,6 +108,16 @@ const userSchema = new mongoose.Schema({
   },
   visitors: {
     total: { type: Number, default: 0 }
+  },
+  interests: {
+    type: [String],
+    default: [],
+    validate: {
+      validator: function(interests) {
+        return interests.length <= 20; // Limit to 20 interests
+      },
+      message: 'Cannot have more than 20 interests'
+    }
   }
 }, {
   timestamps: true
