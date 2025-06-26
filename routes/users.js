@@ -182,8 +182,8 @@ router.post('/:displayNameSlug/avatar', auth, async (req, res) => {
 });
 
 /**
- * Update user's email
- * Requires current password verification
+ * Request email change
+ * Sends confirmation email to current email address
  * @route PUT /api/users/:username/email
  */
 router.put('/:displayNameSlug/email', auth, async (req, res) => {
@@ -207,6 +207,17 @@ router.put('/:displayNameSlug/email', auth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid email format' });
     }
 
+    // Check if new email is the same as current email
+    if (email.toLowerCase() === req.user.email.toLowerCase()) {
+      return res.status(400).json({ message: 'New email must be different from current email' });
+    }
+
+    // Check if email is already in use BEFORE password verification
+    const emailExists = await User.findOne({ email, _id: { $ne: req.user._id } });
+    if (emailExists) {
+      return res.status(400).json({ message: 'Email is already in use' });
+    }
+
     // Get user with password
     const user = await User.findById(req.user._id);
 
@@ -216,20 +227,88 @@ router.put('/:displayNameSlug/email', auth, async (req, res) => {
       return res.status(401).json({ message: 'Current password is incorrect' });
     }
 
-    // Check if email is already in use
-    const emailExists = await User.findOne({ email, _id: { $ne: user._id } });
-    if (emailExists) {
-      return res.status(400).json({ message: 'Email is already in use' });
-    }
+    // Generate confirmation token
+    const crypto = await import('crypto');
+    const confirmationToken = crypto.randomBytes(32).toString('hex');
+    const expires = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
 
-    // Update email
-    user.email = email;
+    // Store pending email change
+    user.pendingEmailChange = {
+      newEmail: email,
+      token: confirmationToken,
+      expires: expires
+    };
     await user.save();
 
-    res.json({ email: user.email });
+    // Send confirmation email to current email
+    const { sendEmailChangeConfirmation } = await import('../services/emailService.js');
+    await sendEmailChangeConfirmation(user.email, email, confirmationToken);
+
+    res.json({ 
+      message: 'Email change confirmation sent to your current email address',
+      requiresConfirmation: true
+    });
   } catch (error) {
-    console.error('Email update error:', error);
-    res.status(500).json({ message: 'Failed to update email' });
+    console.error('Email change request error:', error);
+    res.status(500).json({ message: 'Failed to send email change confirmation' });
+  }
+});
+
+/**
+ * Confirm email change
+ * Processes the email change after user clicks confirmation link
+ * @route POST /api/users/confirm-email-change/:token
+ */
+router.post('/confirm-email-change/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    if (!token) {
+      return res.status(400).json({ message: 'Confirmation token is required' });
+    }
+
+    // Find user with pending email change token
+    const user = await User.findOne({
+      'pendingEmailChange.token': token,
+      'pendingEmailChange.expires': { $gt: new Date() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ 
+        message: 'Invalid or expired confirmation token',
+        expired: true
+      });
+    }
+
+    // Check if the new email is still available
+    const emailExists = await User.findOne({ 
+      email: user.pendingEmailChange.newEmail, 
+      _id: { $ne: user._id } 
+    });
+    
+    if (emailExists) {
+      // Clear the pending change
+      user.pendingEmailChange = undefined;
+      await user.save();
+      
+      return res.status(400).json({ 
+        message: 'Email is no longer available. Please try with a different email.',
+        emailTaken: true
+      });
+    }
+
+    // Update email and clear pending change
+    user.email = user.pendingEmailChange.newEmail;
+    user.pendingEmailChange = undefined;
+    await user.save();
+
+    res.json({ 
+      message: 'Email successfully updated',
+      newEmail: user.email
+    });
+  } catch (error) {
+    console.error('Email confirmation error:', error);
+    res.status(500).json({ message: 'Failed to confirm email change' });
   }
 });
 
@@ -444,6 +523,57 @@ router.get('/:displayNameSlug/profile', auth, async (req, res) => {
   } catch (err) {
     console.error('Error getting user profile:', err);
     res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Get display name change eligibility (LIGHTWEIGHT)
+ * @route GET /api/users/:username/display-name-eligibility
+ */
+router.get('/:displayNameSlug/display-name-eligibility', auth, async (req, res) => {
+  try {
+    const displayNameSlug = req.params.displayNameSlug;
+    
+    // Resolve user by display name slug
+    const targetUser = await resolveUserByDisplayName(displayNameSlug);
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the resolved user matches the authenticated user
+    if (req.user.username !== targetUser.username) {
+      return res.status(403).json({ message: 'Not authorized to view this information' });
+    }
+
+    // Get user with only the fields we need for display name eligibility
+    const user = await User.findById(req.user._id)
+      .select('displayNameLastChanged')
+      .lean();
+
+    // Calculate eligibility
+    let canChangeDisplayName = true;
+    let nextDisplayNameChange = null;
+
+    if (user.displayNameLastChanged) {
+      const oneMonthAgo = new Date();
+      oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+      
+      if (user.displayNameLastChanged > oneMonthAgo) {
+        canChangeDisplayName = false;
+        const nextChangeDate = new Date(user.displayNameLastChanged);
+        nextChangeDate.setMonth(nextChangeDate.getMonth() + 1);
+        nextDisplayNameChange = nextChangeDate;
+      }
+    }
+
+    res.json({
+      canChangeDisplayName,
+      nextDisplayNameChange,
+      displayNameLastChanged: user.displayNameLastChanged
+    });
+  } catch (error) {
+    console.error('Display name eligibility check error:', error);
+    res.status(500).json({ message: 'Failed to check display name eligibility' });
   }
 });
 

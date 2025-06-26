@@ -81,4 +81,60 @@ export const sendPasswordResetEmail = async (to, resetToken) => {
     console.error('Failed to send password reset email:', error);
     throw new Error('Failed to send password reset email: ' + error.message);
   }
+};
+
+/**
+ * Send email change confirmation email
+ * @param {string} to - Current email address
+ * @param {string} newEmail - New email address to change to
+ * @param {string} confirmationToken - Email change confirmation token
+ * @returns {Promise} Nodemailer send mail promise
+ */
+export const sendEmailChangeConfirmation = async (to, newEmail, confirmationToken) => {
+  try {
+    console.log('Attempting to send email change confirmation to:', to);
+    
+    // Create confirmation URL
+    const confirmationUrl = `${process.env.FRONTEND_URL}/xac-nhan-email/${confirmationToken}`;
+    console.log('Email change confirmation URL:', confirmationUrl);
+
+    // Email content
+    const mailOptions = {
+      from: process.env.SMTP_FROM,
+      to,
+      subject: 'Xác nhận thay đổi địa chỉ email - Valvrareteam',
+      html: `
+        <h1>Xác nhận thay đổi địa chỉ email</h1>
+        <p>Bạn đã yêu cầu thay đổi địa chỉ email từ <strong>${to}</strong> sang <strong>${newEmail}</strong>.</p>
+        <p>Để xác nhận thay đổi này, vui lòng nhấp vào liên kết bên dưới:</p>
+        <a href="${confirmationUrl}" style="
+          display: inline-block;
+          padding: 12px 24px;
+          background-color: #0099ff;
+          color: white;
+          text-decoration: none;
+          border-radius: 5px;
+          margin: 20px 0;
+          font-weight: bold;
+        ">Xác nhận thay đổi email</a>
+        <p><strong>Lưu ý quan trọng:</strong></p>
+        <ul>
+          <li>Nếu bạn không yêu cầu thay đổi này, vui lòng bỏ qua email này và thay đổi mật khẩu của bạn ngay lập tức.</li>
+          <li>Liên kết này sẽ hết hạn sau 30 phút.</li>
+          <li>Sau khi xác nhận, địa chỉ email cũ sẽ không thể được sử dụng để đăng nhập.</li>
+        </ul>
+        <p>Đây là email tự động. Vui lòng không trả lời email này.</p>
+        <hr>
+        <p><small>Email này được gửi từ Valvrareteam - Website đọc truyện hàng đầu Việt Nam</small></p>
+      `,
+    };
+
+    // Send email
+    const info = await transporter.sendMail(mailOptions);
+    console.log('Email change confirmation sent successfully:', info.messageId);
+    return info;
+  } catch (error) {
+    console.error('Failed to send email change confirmation:', error);
+    throw new Error('Failed to send email change confirmation: ' + error.message);
+  }
 }; 
