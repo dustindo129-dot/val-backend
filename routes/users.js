@@ -1774,10 +1774,12 @@ router.get('/id/:userId/novel-roles-public', async (req, res) => {
  * - db.users.createIndex({ "completedModules.moduleId": 1 })
  * 
  * @route GET /api/users/id/:userId/role-modules
+ * @query {boolean} autoAddNew - Whether to auto-add new modules to ongoing (default: false)
  */
 router.get('/id/:userId/role-modules', async (req, res) => {
   try {
     const userId = req.params.userId;
+    const autoAddNew = req.query.autoAddNew === 'true';
     
     // Validate ObjectId format
     if (!mongoose.Types.ObjectId.isValid(userId)) {
@@ -1954,25 +1956,44 @@ router.get('/id/:userId/role-modules', async (req, res) => {
 
     const userData = result[0];
     
-    // Filter out null modules and add new modules to ongoing
-    const ongoingModules = [
-      // Existing user ongoing modules (filter out null results)
-      ...userData.ongoingModules.filter(item => item.moduleId),
-      
-      // New modules auto-added to ongoing
-      ...userData.newModules.map(module => ({
-        moduleId: module,
+    // Filter out null modules from existing lists
+    const existingOngoingModules = userData.ongoingModules.filter(item => item.moduleId);
+    const existingCompletedModules = userData.completedModules.filter(item => item.moduleId);
+
+    // If autoAddNew is true, we need to persist the new modules to the database
+    if (autoAddNew && userData.newModules.length > 0) {
+      const newModulesToAdd = userData.newModules.map(module => ({
+        moduleId: module._id,
         addedAt: new Date()
-      }))
-    ];
+      }));
 
-    // Filter out null modules from completed
-    const completedModules = userData.completedModules.filter(item => item.moduleId);
+      // Add new modules to the user's ongoing modules in the database
+      await User.findByIdAndUpdate(userId, {
+        $push: {
+          ongoingModules: { $each: newModulesToAdd }
+        }
+      });
 
-    res.json({
-      ongoingModules,
-      completedModules
-    });
+      // Return the combined list including the newly added modules
+      res.json({
+        ongoingModules: [
+          ...existingOngoingModules,
+          ...newModulesToAdd.map(item => ({
+            moduleId: userData.newModules.find(m => m._id.toString() === item.moduleId.toString()),
+            addedAt: item.addedAt
+          }))
+        ],
+        completedModules: existingCompletedModules,
+        newModulesCount: userData.newModules.length
+      });
+    } else {
+      // Normal case - just return existing modules without adding new ones
+      res.json({
+        ongoingModules: existingOngoingModules,
+        completedModules: existingCompletedModules,
+        newModulesCount: userData.newModules.length // Include count for refresh button
+      });
+    }
 
   } catch (error) {
     console.error('Error fetching role-based modules:', error);
