@@ -73,6 +73,13 @@ const chapterSchema = new mongoose.Schema({
       type: Number,
       required: true
     },
+    name: {
+      type: String,
+      required: false, // Optional for backward compatibility
+      default: function() {
+        return `note${this.id}`;
+      }
+    },
     content: {
       type: String,
       required: true
