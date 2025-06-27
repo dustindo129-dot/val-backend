@@ -77,7 +77,7 @@ const chapterSchema = new mongoose.Schema({
       type: String,
       required: false, // Optional for backward compatibility
       default: function() {
-        return `note${this.id}`;
+        return this.id.toString();
       }
     },
     content: {
