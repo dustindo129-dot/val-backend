@@ -124,58 +124,12 @@ router.get('/debug/problematic-tab', async (req, res) => {
 
 // Handle CORS preflight for SSE endpoint
 router.options('/sse', (req, res) => {
-  const origin = req.headers.origin;
-  
-  const allowedOrigins = [
-    'https://valvrareteam.net',
-    'https://www.valvrareteam.net', 
-    'https://valvrareteam.netlify.app', 
-    'https://val-bh6h9.ondigitalocean.app',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173'
-  ];
-  
-  const corsHeaders = {
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Cache-Control, Pragma',
-    'Access-Control-Max-Age': '86400', // 24 hours
-    'Vary': 'Origin'
-  };
-  
-  // Set CORS origin header to match the requesting domain
-  if (origin && allowedOrigins.includes(origin)) {
-    corsHeaders['Access-Control-Allow-Origin'] = origin;
-    corsHeaders['Access-Control-Allow-Credentials'] = 'true';
-  } else if (!origin) {
-    // Allow requests with no origin
-    corsHeaders['Access-Control-Allow-Origin'] = '*';
-  }
-  
-  res.set(corsHeaders).status(200).send(); // Changed from 204 to 200 for better compatibility
+  // Main CORS middleware handles most of this, just send success response
+  res.status(200).end();
 });
 
 // Server-Sent Events endpoint for real-time updates
 router.get('/sse', async (req, res) => {
-  // Get the origin from the request
-  const origin = req.headers.origin;
-  
-  // Define allowed origins
-  const allowedOrigins = [
-    'http://localhost:3000',
-    'http://localhost:5173', // Vite dev server
-    'http://127.0.0.1:5173',
-    'https://valvrareteam.net',
-    'https://www.valvrareteam.net',
-    'https://valvrareteam.netlify.app',
-    'https://val-bh6h9.ondigitalocean.app' // Add DigitalOcean domain
-  ];
-
-  // PRE-VALIDATION: All validation checks BEFORE setting SSE headers
-  // Check if origin is allowed
-  if (!allowedOrigins.includes(origin)) {
-    return res.status(403).json({ error: 'Origin not allowed' });
-  }
-
   // AUTHENTICATION: Extract and validate JWT token (from URL params since EventSource doesn't support headers)
   let userId = null;
   const token = req.query.token;
@@ -216,14 +170,11 @@ router.get('/sse', async (req, res) => {
     }
   }
 
-  // Set SSE headers with CORS
+  // Set SSE headers (CORS is handled by main middleware)
   const headers = {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Credentials': 'true',
-    'Access-Control-Allow-Headers': 'Cache-Control',
     'Pragma': 'no-cache',
     'Expires': '0'
   };
