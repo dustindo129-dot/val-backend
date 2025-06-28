@@ -95,20 +95,7 @@ export const addClient = (client) => {
   clientIds.set(client, clientId);
   sseClients.add(client);
   
-  const tabInfo = client.info?.tabId ? ` (Tab: ${client.info.tabId})` : '';
-  console.log(`✅ [SSE Server] Client ${clientId}${tabInfo} connected. Total clients: ${sseClients.size}`);
-  
-  // Enhanced connection logging
-  console.info(`🔍 [SSE Server] Connection details for client ${clientId}:`, {
-    tabId: client.info?.tabId || 'unknown',
-    sessionId: client.info?.sessionId || 'unknown',
-    userId: client.info?.userId || 'unknown',
-    ip: client.info?.ip || 'unknown',
-    userAgent: client.info?.userAgent?.substring(0, 100) + '...' || 'unknown',
-    origin: client.info?.origin || 'unknown',
-    timestamp: new Date(client.info?.timestamp || Date.now()).toISOString(),
-    totalConnections: sseClients.size
-  });
+
   
   // Track the connection
   if (client.info?.tabId) {
@@ -146,11 +133,7 @@ export const removeClient = (client) => {
   const wasInSet = sseClients.delete(client);
   const wasInMap = clientIds.delete(client);
   
-  // Only log if client was actually removed
-  if (wasInSet || wasInMap) {
-    const tabInfo = client.info?.tabId ? ` (Tab: ${client.info.tabId})` : '';
-    console.log(`Client ${clientId}${tabInfo} disconnected. Total clients: ${sseClients.size}`);
-  }
+
   
   // Return true only if client was actually found and removed
   return wasInSet || wasInMap;
@@ -223,7 +206,7 @@ export const cleanupStaleConnections = () => {
   let removedCount = 0;
   const staleClients = [];
   
-  console.debug(`🧹 [SSE Server] Checking for stale connections among ${sseClients.size} clients...`);
+
   
   // First pass: identify stale connections
   sseClients.forEach(client => {
@@ -242,10 +225,7 @@ export const cleanupStaleConnections = () => {
       // Connection is dead, mark for removal
       const clientId = clientIds.get(client) || 'unknown';
       const tabId = client.info?.tabId || 'unknown';
-      console.warn(`⚠️ [SSE Server] Stale connection detected for client ${clientId} (Tab: ${tabId}):`, {
-        error: error.message,
-        errorType: error.constructor.name
-      });
+
       staleClients.push(client);
     }
   });
@@ -257,13 +237,8 @@ export const cleanupStaleConnections = () => {
     
     if (removeClient(client)) {
       removedCount++;
-      console.info(`🧹 [SSE Server] Removed stale client ${clientId} (Tab: ${tabId})`);
     }
   });
-  
-  if (removedCount > 0) {
-    console.info(`🧹 [SSE Server] Cleanup complete: removed ${removedCount} stale connections`);
-  }
   
   return removedCount;
 };
@@ -274,7 +249,7 @@ export const broadcastEvent = (eventName, data) => {
   let failedClients = [];
   let successCount = 0;
   
-  console.info(`📡 [SSE Server] Broadcasting event '${eventName}' to ${sseClients.size} clients`);
+
   
   sseClients.forEach(client => {
     try {
@@ -284,14 +259,7 @@ export const broadcastEvent = (eventName, data) => {
       const clientId = clientIds.get(client) || 'unknown';
       const tabId = client.info?.tabId || 'unknown';
       
-      console.error(`❌ [SSE Server] Error sending event to client ${clientId} (Tab: ${tabId}):`, {
-        error: error.message,
-        errorType: error.constructor.name,
-        readyState: client.res?.writableEnded ? 'WRITABLE_ENDED' : 'UNKNOWN',
-        destroyed: client.res?.destroyed || false,
-        headersSent: client.res?.headersSent || false,
-        statusCode: client.res?.statusCode || 'unknown'
-      });
+
       
       // Mark for removal but don't remove during iteration
       failedClients.push(client);
@@ -302,11 +270,11 @@ export const broadcastEvent = (eventName, data) => {
   failedClients.forEach(client => {
     const clientId = clientIds.get(client) || 'unknown';
     const tabId = client.info?.tabId || 'unknown';
-    console.warn(`🧹 [SSE Server] Removing failed client ${clientId} (Tab: ${tabId})`);
+
     removeClient(client);
   });
   
-  console.info(`📊 [SSE Server] Broadcast complete: ${successCount} successful, ${failedClients.length} failed`);
+
 };
 
 // Send an event to clients belonging to a specific user
@@ -339,10 +307,7 @@ export const broadcastEventToUser = (eventName, data, targetUserId) => {
   // Clean up failed clients after iteration
   failedClients.forEach(client => removeClient(client));
   
-  // Log successful delivery for debugging
-  if (sentCount > 0) {
-    console.log(`Sent ${eventName} event to ${sentCount} client(s) for user ${targetUserId}`);
-  }
+
 };
 
 // For backward compatibility - alias broadcastEvent to broadcastMessage
@@ -379,7 +344,7 @@ const trackIgnoredDuplicate = (tabId) => {
   const record = ignoringDuplicateTabs.get(tabId);
   record.count++;
   
-  console.warn(`⚠️ [SSE Server] Tab ${tabId} ignored duplicate event (count: ${record.count}/${maxIgnoredDuplicates})`);
+
   
   if (record.count >= maxIgnoredDuplicates) {
     const blockUntil = Date.now() + blockDuration;
@@ -387,10 +352,7 @@ const trackIgnoredDuplicate = (tabId) => {
     record.lastBlocked = Date.now();
     record.count = 0; // Reset counter
     
-    console.error(`🚫 [SSE Server] Tab ${tabId} BLOCKED for ${blockDuration/1000} seconds (ignored too many duplicates)`, {
-      blockUntil: new Date(blockUntil).toISOString(),
-      reason: 'ignored_duplicate_events'
-    });
+
     
     // Track the blocking
     trackTabConnection(tabId, 'blocked', null, {
@@ -412,16 +374,13 @@ const isTabBlocked = (tabId) => {
   
   if (now < record.blockUntil) {
     const remainingTime = Math.ceil((record.blockUntil - now) / 1000);
-    console.warn(`🚫 [SSE Server] Tab ${tabId} connection BLOCKED (${remainingTime} seconds remaining)`, {
-      blockUntil: new Date(record.blockUntil).toISOString(),
-      remainingSeconds: remainingTime
-    });
+
     return true;
   }
   
   // Block expired, clean up
   if (record.blockUntil > 0) {
-    console.info(`🔓 [SSE Server] Tab ${tabId} block expired - connections allowed again`);
+
     ignoringDuplicateTabs.delete(tabId);
   }
   
@@ -430,7 +389,7 @@ const isTabBlocked = (tabId) => {
 
 // Comprehensive health check that combines cleanup and duplicate detection
 export const performHealthCheck = () => {
-  console.info(`🏥 [SSE Server] Starting health check...`);
+
   
   // Clean up stale connections first
   const removedCount = cleanupStaleConnections();
@@ -440,7 +399,6 @@ export const performHealthCheck = () => {
   let duplicatesClosed = 0;
   
   if (duplicateTabs.length > 0) {
-    console.warn(`🔍 [SSE Server] Found ${duplicateTabs.length} tabs with duplicate connections:`, duplicateTabs);
     // Close duplicate connections
     duplicatesClosed = closeDuplicateConnections();
   }
@@ -456,7 +414,7 @@ export const performHealthCheck = () => {
     analysis: connectionAnalysis
   };
   
-  console.info(`📊 [SSE Server] Health check complete:`, healthReport);
+
   
   return healthReport;
 };
@@ -525,14 +483,14 @@ export const closeDuplicateConnections = () => {
   // For each tab with multiple connections, close all but the newest
   tabConnections.forEach((connections, tabId) => {
     if (connections.length > 1) {
-      console.warn(`🔍 [SSE Server] Found ${connections.length} duplicate connections for tab ${tabId}`);
+
       
       // Check if tab recently had rapid reconnections (indicates ignoring duplicates)
       const history = getTabConnectionHistory(tabId);
       const hasRapidReconnections = history.stats?.connectionFrequency.some(interval => interval < 5000);
       
       if (hasRapidReconnections) {
-        console.warn(`⚡ [SSE Server] Tab ${tabId} has rapid reconnections - checking for ignored duplicates`);
+
         
         // Check if this tab reconnected quickly after last duplicate event
         const recentEvents = history.history.slice(-5);
@@ -542,7 +500,7 @@ export const closeDuplicateConnections = () => {
         if (lastDuplicateEvent && lastConnection && 
             lastConnection.timestamp > lastDuplicateEvent.timestamp &&
             (lastConnection.timestamp - lastDuplicateEvent.timestamp) < 10000) {
-          console.warn(`🚨 [SSE Server] Tab ${tabId} ignored duplicate event and reconnected quickly - tracking violation`);
+
           trackIgnoredDuplicate(tabId);
         }
       }
@@ -550,7 +508,7 @@ export const closeDuplicateConnections = () => {
       // Sort by timestamp (newest first)
       connections.sort((a, b) => b.timestamp - a.timestamp);
       
-      console.info(`🔧 [SSE Server] Closing ${connections.length - 1} older connections for tab ${tabId}, keeping newest`);
+      
       
       // Close all but the first (newest) connection
       for (let i = 1; i < connections.length; i++) {
