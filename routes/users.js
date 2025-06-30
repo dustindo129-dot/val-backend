@@ -1574,8 +1574,11 @@ router.post('/:displayNameSlug/ongoing-modules', auth, async (req, res) => {
       {
         $push: {
           ongoingModules: {
-            moduleId: moduleId,
-            addedAt: new Date()
+            $each: [{
+              moduleId: moduleId,
+              addedAt: new Date()
+            }],
+            $position: 0
           }
         },
         // Remove from completed if it exists there
@@ -1644,8 +1647,11 @@ router.post('/:displayNameSlug/completed-modules', auth, async (req, res) => {
       {
         $push: {
           completedModules: {
-            moduleId: moduleId,
-            addedAt: new Date()
+            $each: [{
+              moduleId: moduleId,
+              addedAt: new Date()
+            }],
+            $position: 0
           }
         },
         // Remove from ongoing if it exists there
@@ -2100,7 +2106,10 @@ router.get('/id/:userId/role-modules', async (req, res) => {
       // Add new modules to the user's ongoing modules in the database
       await User.findByIdAndUpdate(userId, {
         $push: {
-          ongoingModules: { $each: newModulesToAdd }
+          ongoingModules: { 
+            $each: newModulesToAdd,
+            $position: 0
+          }
         }
       });
 
@@ -2149,8 +2158,11 @@ router.post('/id/:userId/move-module-to-completed', auth, async (req, res) => {
       $pull: { ongoingModules: { moduleId: moduleId } },
       $push: { 
         completedModules: { 
-          moduleId: moduleId, 
-          addedAt: new Date() 
+          $each: [{ 
+            moduleId: moduleId, 
+            addedAt: new Date() 
+          }],
+          $position: 0
         } 
       }
     });
@@ -2183,8 +2195,11 @@ router.post('/id/:userId/move-module-to-ongoing', auth, async (req, res) => {
       $pull: { completedModules: { moduleId: moduleId } },
       $push: { 
         ongoingModules: { 
-          moduleId: moduleId, 
-          addedAt: new Date() 
+          $each: [{ 
+            moduleId: moduleId, 
+            addedAt: new Date() 
+          }],
+          $position: 0
         } 
       }
     });
