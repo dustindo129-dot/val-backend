@@ -100,6 +100,10 @@ const userSchema = new mongoose.Schema({
   lastLogin: {
     type: Date
   },
+  currentSessionId: {
+    type: String,
+    default: null
+  },
   resetPasswordToken: String,
   resetPasswordExpires: Date,
   pendingEmailChange: {

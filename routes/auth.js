@@ -1,6 +1,6 @@
 import express from 'express';
 import User from '../models/User.js';
-import { generateToken } from '../middleware/auth.js';
+import { generateToken, auth } from '../middleware/auth.js';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -41,14 +41,40 @@ router.post('/register-admin', async (req, res) => {
 
     await user.save();
 
+    // Generate a unique session ID for single-device authentication
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    user.currentSessionId = sessionId;
+    await user.save();
+
     // Create token
     const token = jwt.sign(
-      { userId: user._id, username: user.username, role: user.role },
+      { userId: user._id, username: user.username, role: user.role, sessionId: sessionId },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
 
-    res.status(201).json({ token, user: { id: user._id, username: user.username, displayName: user.displayName, email: user.email, role: user.role, displayNameLastChanged: user.displayNameLastChanged } });
+    // Generate refresh token
+    const refreshToken = jwt.sign(
+      { 
+        userId: user._id, 
+        sessionId: sessionId
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.status(201).json({ 
+      token, 
+      refreshToken,
+      user: { 
+        id: user._id, 
+        username: user.username, 
+        displayName: user.displayName, 
+        email: user.email, 
+        role: user.role, 
+        displayNameLastChanged: user.displayNameLastChanged 
+      } 
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -98,16 +124,32 @@ router.post('/signup', async (req, res) => {
     const savedUser = await user.save();
     console.log('User saved successfully. ID:', savedUser._id);
 
+    // Generate a unique session ID for single-device authentication
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    savedUser.currentSessionId = sessionId;
+    await savedUser.save();
+
     const token = jwt.sign(
-      { userId: user._id, username: user.username, role: user.role },
+      { userId: user._id, username: user.username, role: user.role, sessionId: sessionId },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
+    );
+
+    // Generate refresh token
+    const refreshToken = jwt.sign(
+      { 
+        userId: user._id, 
+        sessionId: sessionId
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
     );
     console.log('JWT token generated');
 
     console.log('Sending success response...');
     res.status(201).json({ 
-      token, 
+      token,
+      refreshToken,
       user: { 
         id: user._id, 
         username: user.username,
@@ -147,23 +189,39 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid username or password' });
     }
 
-    // Update last login
+    // Generate a unique session ID for single-device authentication
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    
+    // Update last login and set current session ID (this invalidates other devices)
     user.lastLogin = new Date();
+    user.currentSessionId = sessionId;
     await user.save();
 
-    // Create token with both userId and username
+    // Create token with both userId, username, and sessionId
     const token = jwt.sign(
       { 
         userId: user._id, 
         username: user.username, 
-        role: user.role 
+        role: user.role,
+        sessionId: sessionId
       },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
 
+    // Generate refresh token
+    const refreshToken = jwt.sign(
+      { 
+        userId: user._id, 
+        sessionId: sessionId
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
     res.json({ 
-      token, 
+      token,
+      refreshToken,
       user: { 
         id: user._id, 
         username: user.username,
@@ -182,15 +240,166 @@ router.post('/login', async (req, res) => {
 });
 
 /**
- * Sign out user by clearing the token cookie
+ * Sign out user by clearing the token cookie and session ID
  * @route POST /api/auth/logout
  */
-router.post('/logout', (req, res) => {
-  res.cookie('token', '', {
-    httpOnly: true,
-    expires: new Date(0)
-  });
-  res.json({ message: 'Logged out successfully' });
+router.post('/logout', auth, async (req, res) => {
+  try {
+    // Clear the current session ID from the user
+    const user = await User.findById(req.user.id);
+    if (user) {
+      user.currentSessionId = null;
+      await user.save();
+    }
+
+    res.cookie('token', '', {
+      httpOnly: true,
+      expires: new Date(0)
+    });
+    res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ message: 'An error occurred during logout' });
+  }
+});
+
+/**
+ * Check if current session is valid
+ * @route GET /api/auth/check-session
+ */
+router.get('/check-session', auth, async (req, res) => {
+  try {
+    // If we reach here, the session is valid (auth middleware passed)
+    res.json({ 
+      valid: true, 
+      user: {
+        id: req.user._id,
+        username: req.user.username,
+        displayName: req.user.displayName,
+        role: req.user.role
+      }
+    });
+  } catch (error) {
+    console.error('Session check error:', error);
+    res.status(500).json({ message: 'Error checking session' });
+  }
+});
+
+/**
+ * Refresh JWT token using refresh token with session validation
+ * @route POST /api/auth/refresh
+ */
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    
+    if (!refreshToken) {
+      return res.status(400).json({ message: 'Refresh token required' });
+    }
+
+    // For now, we'll treat refresh tokens the same as access tokens
+    // In a production system, you'd want separate refresh token validation
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, process.env.JWT_SECRET);
+    } catch (tokenError) {
+      return res.status(401).json({ message: 'Invalid refresh token' });
+    }
+
+    // Get user and validate session
+    const user = await User.findById(decoded.userId);
+    if (!user) {
+      return res.status(401).json({ message: 'User not found' });
+    }
+
+    // Check if session is still valid
+    if (decoded.sessionId && user.currentSessionId !== decoded.sessionId) {
+      return res.status(401).json({ 
+        message: 'Session invalidated - logged in from another device',
+        code: 'SESSION_INVALIDATED'
+      });
+    }
+
+    // Generate new token with same session ID
+    const token = jwt.sign(
+      { 
+        userId: user._id, 
+        username: user.username, 
+        role: user.role,
+        sessionId: user.currentSessionId
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Generate new refresh token
+    const newRefreshToken = jwt.sign(
+      { 
+        userId: user._id, 
+        sessionId: user.currentSessionId
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({ 
+      token,
+      refreshToken: newRefreshToken,
+      user: {
+        id: user._id,
+        username: user.username,
+        displayName: user.displayName,
+        email: user.email,
+        role: user.role,
+        avatar: user.avatar,
+        balance: user.balance || 0,
+        displayNameLastChanged: user.displayNameLastChanged
+      }
+    });
+  } catch (error) {
+    console.error('Token refresh error:', error);
+    res.status(500).json({ message: 'Error refreshing token' });
+  }
+});
+
+/**
+ * Refresh JWT token with session validation
+ * @route POST /api/auth/refresh-token
+ */
+router.post('/refresh-token', auth, async (req, res) => {
+  try {
+    // If we reach here, the session is valid (auth middleware passed)
+    const user = req.user;
+    
+    // Generate new token with same session ID
+    const token = jwt.sign(
+      { 
+        userId: user._id, 
+        username: user.username, 
+        role: user.role,
+        sessionId: user.currentSessionId
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.json({ 
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        displayName: user.displayName,
+        email: user.email,
+        role: user.role,
+        avatar: user.avatar,
+        balance: user.balance || 0,
+        displayNameLastChanged: user.displayNameLastChanged
+      }
+    });
+  } catch (error) {
+    console.error('Token refresh error:', error);
+    res.status(500).json({ message: 'Error refreshing token' });
+  }
 });
 
 /**

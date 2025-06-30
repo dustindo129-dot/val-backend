@@ -45,6 +45,14 @@ export const auth = async (req, res, next) => {
         return res.status(401).json({ message: 'User not found' });
       }
 
+      // Check if session is valid (single-device authentication)
+      if (decoded.sessionId && user.currentSessionId !== decoded.sessionId) {
+        return res.status(401).json({ 
+          message: 'Session invalidated - logged in from another device',
+          code: 'SESSION_INVALIDATED'
+        });
+      }
+
       // Attach user to request object
       req.user = user;
       next();
@@ -145,6 +153,12 @@ export const optionalAuth = async (req, res, next) => {
       
       if (!user) {
         console.warn(`User ${decoded.userId} not found in database (token valid but user deleted)`);
+        req.user = null;
+        return next();
+      }
+
+      // Check if session is valid (single-device authentication) - for optional auth, just set user to null if invalid
+      if (decoded.sessionId && user.currentSessionId !== decoded.sessionId) {
         req.user = null;
         return next();
       }
