@@ -1241,6 +1241,15 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
     // Clear novel caches
     clearNovelCaches();
 
+    // Check for auto-unlock since rental increases novelBudget
+    try {
+      const { checkAndUnlockContent } = await import('./novels.js');
+      await checkAndUnlockContent(novel._id);
+    } catch (unlockError) {
+      console.error('Error checking auto-unlock after rental:', unlockError);
+      // Don't fail the rental if auto-unlock check fails
+    }
+
     res.json({
       message: 'Module rented successfully',
       rental: {
