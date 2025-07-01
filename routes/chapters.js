@@ -584,10 +584,10 @@ router.get('/:id', optionalAuth, async (req, res) => {
           }
         },
         
-        // Remove the siblings field from the output and ensure moduleId is included
+        // Include only the fields we need (excluding siblingChapters)
         {
           $project: {
-            siblingChapters: 0,
+            _id: 1,
             moduleId: 1, // Explicitly include moduleId
             novelId: 1,  // Explicitly include novelId for safety
             title: 1,
