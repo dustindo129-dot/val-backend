@@ -50,7 +50,12 @@ const app = express();
 // Enable CORS for cross-origin requests
 app.use(
   cors({
-    origin: ["https://valvrareteam.netlify.app", "https://valvrareteam.net", "http://localhost:5173"],
+    origin: [
+      "https://valvrareteam.netlify.app", 
+      "https://valvrareteam.net", 
+      "http://localhost:5173",
+      "https://val-bh6h9.ondigitalocean.app" // Add backend domain for SSE
+    ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"],
