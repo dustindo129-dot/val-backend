@@ -10,6 +10,82 @@ import ModuleRental from '../models/ModuleRental.js';
 import ContributionHistory from '../models/ContributionHistory.js';
 import User from '../models/User.js';
 
+/**
+ * Calculate and update rentBalance for a module
+ * rentBalance = (sum of all chapterBalance of paid chapters within that module) / 10
+ * @param {string} moduleId - The module ID
+ * @param {object} session - MongoDB session (optional)
+ * @returns {Promise<number>} The calculated rentBalance
+ */
+const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => {
+  try {
+    // Validate moduleId
+    if (!moduleId || !mongoose.Types.ObjectId.isValid(moduleId)) {
+      throw new Error(`Invalid module ID: ${moduleId}`);
+    }
+
+    // Check if module exists
+    const moduleExists = await Module.exists({ _id: moduleId }).session(session);
+    if (!moduleExists) {
+      console.warn(`Module ${moduleId} not found, skipping rentBalance calculation`);
+      return 0;
+    }
+
+    // Get all paid chapters in this module using aggregation for better performance
+    const paidChaptersResult = await Chapter.aggregate([
+      {
+        $match: {
+          moduleId: mongoose.Types.ObjectId.createFromHexString(moduleId),
+          mode: 'paid',
+          chapterBalance: { $gt: 0 }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalBalance: { $sum: '$chapterBalance' },
+          chapterCount: { $sum: 1 }
+        }
+      }
+    ]).session(session);
+
+    // Calculate total chapterBalance
+    const totalChapterBalance = paidChaptersResult.length > 0 ? 
+      (paidChaptersResult[0].totalBalance || 0) : 0;
+    const chapterCount = paidChaptersResult.length > 0 ? 
+      (paidChaptersResult[0].chapterCount || 0) : 0;
+
+    // Calculate rentBalance = totalChapterBalance / 10 (rounded down)
+    const calculatedRentBalance = Math.max(0, Math.floor(totalChapterBalance / 10));
+
+    // Update the module's rentBalance
+    const updatedModule = await Module.findByIdAndUpdate(
+      moduleId,
+      { 
+        rentBalance: calculatedRentBalance,
+        updatedAt: new Date()
+      },
+      { new: true, session }
+    );
+
+    if (!updatedModule) {
+      throw new Error(`Failed to update module ${moduleId}`);
+    }
+
+    console.log(`Updated module ${moduleId} rentBalance: ${calculatedRentBalance} 🌾 (from ${chapterCount} paid chapters totaling ${totalChapterBalance} 🌾)`);
+    
+    return calculatedRentBalance;
+  } catch (error) {
+    console.error(`Error calculating module rentBalance for ${moduleId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Export the function so it can be used by other route files
+ */
+export { calculateAndUpdateModuleRentBalance };
+
 const router = express.Router();
 
 // Query deduplication cache to prevent multiple identical requests
@@ -605,7 +681,7 @@ router.post('/:novelId/modules', auth, async (req, res) => {
       chapters: [],
       mode: req.body.mode || 'published',
       moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0,
-      rentBalance: parseInt(req.body.rentBalance) || 0
+      rentBalance: 0 // Will be calculated automatically based on paid chapters
     });
 
     // Save the module
@@ -689,7 +765,7 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
       illustration: req.body.illustration,
       mode: req.body.mode || 'published',
       moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0,
-      rentBalance: parseInt(req.body.rentBalance) || 0,
+      // rentBalance is calculated automatically, not set manually
       updatedAt: new Date()
     };
 
@@ -823,10 +899,25 @@ router.post('/:novelId/modules/:moduleId/chapters/:chapterId', auth, async (req,
       await module.save();
     }
 
+    // Get chapter info to check if it's paid
+    const chapter = await Chapter.findById(req.params.chapterId);
+    const oldModuleId = chapter ? chapter.moduleId : null;
+
     // Update chapter's moduleId
     await Chapter.findByIdAndUpdate(req.params.chapterId, {
       moduleId: req.params.moduleId
     });
+
+    // Recalculate rent balance for both modules if chapter is paid
+    if (chapter && chapter.mode === 'paid' && chapter.chapterBalance > 0) {
+      await Promise.all([
+        // Recalculate for new module
+        calculateAndUpdateModuleRentBalance(req.params.moduleId),
+        // Recalculate for old module if it exists and is different
+        oldModuleId && oldModuleId.toString() !== req.params.moduleId ? 
+          calculateAndUpdateModuleRentBalance(oldModuleId) : Promise.resolve()
+      ]);
+    }
 
     const updatedModule = await Module.findById(req.params.moduleId)
       .populate({
@@ -856,10 +947,19 @@ router.delete('/:novelId/modules/:moduleId/chapters/:chapterId', auth, async (re
       return res.status(404).json({ message: 'Module not found' });
     }
 
+    // Get chapter info to check if it's paid before removing
+    const chapter = await Chapter.findById(req.params.chapterId);
+    const wasPaidChapter = chapter && chapter.mode === 'paid' && chapter.chapterBalance > 0;
+
     module.chapters = module.chapters.filter(
       chapter => chapter.toString() !== req.params.chapterId
     );
     const updatedModule = await module.save();
+    
+    // Recalculate rent balance if removed chapter was paid
+    if (wasPaidChapter) {
+      await calculateAndUpdateModuleRentBalance(req.params.moduleId);
+    }
     
     // Clear novel caches to ensure fresh data on next request
     clearNovelCaches();
@@ -1326,6 +1426,51 @@ router.post('/rentals/cleanup', auth, admin, async (req, res) => {
     });
   } catch (err) {
     console.error('Error cleaning up expired rentals:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Recalculate rent balance for all modules (Admin utility endpoint)
+ * @route POST /api/modules/recalculate-rent-balance
+ */
+router.post('/recalculate-rent-balance', auth, admin, async (req, res) => {
+  try {
+    // Get all modules
+    const modules = await Module.find({}).select('_id title');
+    
+    let updatedCount = 0;
+    const errors = [];
+    
+    // Process modules in batches to avoid overwhelming the database
+    const batchSize = 10;
+    for (let i = 0; i < modules.length; i += batchSize) {
+      const batch = modules.slice(i, i + batchSize);
+      
+      await Promise.all(batch.map(async (module) => {
+        try {
+          await calculateAndUpdateModuleRentBalance(module._id);
+          updatedCount++;
+        } catch (error) {
+          console.error(`Error updating module ${module._id}:`, error);
+          errors.push({
+            moduleId: module._id,
+            title: module.title,
+            error: error.message
+          });
+        }
+      }));
+    }
+    
+    res.json({
+      message: 'Rent balance recalculation completed',
+      totalModules: modules.length,
+      updatedCount: updatedCount,
+      errorCount: errors.length,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (err) {
+    console.error('Error recalculating all module rent balances:', err);
     res.status(500).json({ message: err.message });
   }
 });

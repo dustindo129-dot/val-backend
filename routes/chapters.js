@@ -28,6 +28,7 @@ import Novel from '../models/Novel.js';
 import mongoose from 'mongoose';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import ModuleRental from '../models/ModuleRental.js';
+import { calculateAndUpdateModuleRentBalance } from './modules.js';
 
 // Import the novel cache clearing function
 import { clearNovelCaches, clearChapterCaches, notifyAllClients } from '../utils/cacheUtils.js';
@@ -859,6 +860,9 @@ router.post('/', auth, async (req, res) => {
       // Recalculate novel word count with the new chapter (has built-in retry logic)
       recalculateNovelWordCount(novelId),
       
+      // Recalculate module rent balance if this is a paid chapter
+      mode === 'paid' && chapterBalance > 0 ? calculateAndUpdateModuleRentBalance(moduleId) : Promise.resolve(),
+      
       // Clear novel caches
       clearNovelCaches()
     ]);
@@ -1155,6 +1159,10 @@ router.put('/:id', auth, async (req, res) => {
       // Check if chapterBalance changed and trigger auto-unlock if needed
       const chapterBalanceChanged = req.user.role === 'admin' && 
         finalChapterBalance !== existingChapter.chapterBalance;
+        
+      // Check if we need to recalculate module rent balance
+      const modeChanged = mode && mode !== existingChapter.mode;
+      const shouldRecalculateRentBalance = modeChanged || chapterBalanceChanged;
       
       if (chapterBalanceChanged) {
         try {
@@ -1181,6 +1189,16 @@ router.put('/:id', auth, async (req, res) => {
         } catch (unlockError) {
           console.error('Error during auto-unlock after chapterBalance change:', unlockError);
           // Don't fail the chapter update if auto-unlock fails
+        }
+      }
+      
+      // Recalculate module rent balance if mode or balance changed
+      if (shouldRecalculateRentBalance) {
+        try {
+          await calculateAndUpdateModuleRentBalance(existingChapter.moduleId);
+        } catch (rentBalanceError) {
+          console.error('Error recalculating module rent balance:', rentBalanceError);
+          // Don't fail the chapter update if rent balance calculation fails
         }
       }
 
@@ -1262,6 +1280,7 @@ router.delete('/:id', auth, async (req, res) => {
 
       // Store IDs for cleanup operations
       const { novelId, moduleId } = chapter;
+      const wasPaidChapter = chapter.mode === 'paid' && chapter.chapterBalance > 0;
 
       // Delete the chapter
       await Chapter.findByIdAndDelete(chapterId).session(session);
@@ -1284,6 +1303,11 @@ router.delete('/:id', auth, async (req, res) => {
 
       // Recalculate novel word count with retry logic
       await recalculateNovelWordCount(novelId, session);
+      
+      // Recalculate module rent balance if this was a paid chapter
+      if (wasPaidChapter) {
+        await calculateAndUpdateModuleRentBalance(moduleId, session);
+      }
 
       // Don't update novel's timestamp when deleting chapters
       // Chapter deletion is a management action, not new content
