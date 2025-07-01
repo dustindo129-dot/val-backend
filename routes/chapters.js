@@ -444,7 +444,7 @@ router.get('/participation/user/:userId', async (req, res) => {
 });
 
 // Get a specific chapter
-router.get('/:id', async (req, res) => {
+router.get('/:id', optionalAuth, async (req, res) => {
   try {
     console.log(`Fetching chapter with ID: ${req.params.id}`);
     
@@ -622,8 +622,6 @@ router.get('/:id', async (req, res) => {
 
     console.log(`Found chapter: ${chapterData.title}`);
     console.log(`Navigation: prev=${chapterData.prevChapter?._id}, next=${chapterData.nextChapter?._id}`);
-    console.log(`🔧 [DEBUG] Available fields in chapterData:`, Object.keys(chapterData));
-    console.log(`🔧 [DEBUG] moduleId value:`, chapterData.moduleId);
 
     // Check if user can access this chapter content
     const user = req.user; // Will be undefined if not authenticated
@@ -664,24 +662,11 @@ router.get('/:id', async (req, res) => {
         case 'paid':
           // Check if user has active rental for this module
           if (user && chapterData.moduleId) {
-            console.log(`🔍 [DEBUG] Paid chapter - Checking rental for user ${user._id}, module ${chapterData.moduleId}`);
-            
             const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapterData.moduleId);
-            
-            console.log(`🎫 [DEBUG] Paid chapter rental found:`, activeRental ? {
-              _id: activeRental._id,
-              userId: activeRental.userId?.toString(),
-              moduleId: activeRental.moduleId?.toString(),
-              isActive: activeRental.isActive,
-              startTime: activeRental.startTime,
-              endTime: activeRental.endTime,
-              isValid: activeRental.isValid()
-            } : 'None');
             
             if (activeRental && activeRental.isValid()) {
               hasAccess = true;
               accessReason = 'rental';
-              console.log(`✅ [DEBUG] Paid chapter rental access granted`);
               
               // Add rental information to the response
               chapterData.rentalInfo = {
@@ -689,8 +674,6 @@ router.get('/:id', async (req, res) => {
                 endTime: activeRental.endTime,
                 timeRemaining: Math.max(0, activeRental.endTime - new Date())
               };
-            } else {
-              console.log(`❌ [DEBUG] No valid paid chapter rental found`);
             }
           }
           break;
@@ -699,25 +682,11 @@ router.get('/:id', async (req, res) => {
     
     // Check if module is paid and user has rental access
     if (!hasAccess && chapterData.module?.mode === 'paid' && user && chapterData.moduleId) {
-      console.log(`🔍 [DEBUG] Checking module rental for user ${user._id}, module ${chapterData.moduleId}`);
-      console.log(`📊 [DEBUG] Module mode: ${chapterData.module?.mode}, hasAccess: ${hasAccess}`);
-      
       const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapterData.moduleId);
-      
-      console.log(`🎫 [DEBUG] Module rental found:`, activeRental ? {
-        _id: activeRental._id,
-        userId: activeRental.userId?.toString(),
-        moduleId: activeRental.moduleId?.toString(),
-        isActive: activeRental.isActive,
-        startTime: activeRental.startTime,
-        endTime: activeRental.endTime,
-        isValid: activeRental.isValid()
-      } : 'None');
       
       if (activeRental && activeRental.isValid()) {
         hasAccess = true;
         accessReason = 'module-rental';
-        console.log(`✅ [DEBUG] Module rental access granted`);
         
         // Add rental information to the response
         chapterData.rentalInfo = {
@@ -725,18 +694,11 @@ router.get('/:id', async (req, res) => {
           endTime: activeRental.endTime,
           timeRemaining: Math.max(0, activeRental.endTime - new Date())
         };
-      } else {
-        console.log(`❌ [DEBUG] No valid module rental found`);
       }
     }
 
     // If user doesn't have access, return limited chapter info
     if (!hasAccess) {
-      console.log(`❌ [DEBUG] Access denied for chapter ${chapterData.title}`);
-      console.log(`📋 [DEBUG] Chapter mode: ${chapterData.mode}, Module mode: ${chapterData.module?.mode}`);
-      console.log(`👤 [DEBUG] User: ${user ? user._id : 'not authenticated'}, Role: ${user?.role || 'none'}`);
-      console.log(`🏷️ [DEBUG] Access reason: ${accessReason || 'none'}`);
-      
       // Populate staff ObjectIds with user display names for metadata
       const populatedChapter = await populateStaffNames(chapterData);
       
@@ -751,11 +713,6 @@ router.get('/:id', async (req, res) => {
         }
       });
     }
-
-    console.log(`✅ [DEBUG] Access granted for chapter ${chapterData.title}`);
-    console.log(`📋 [DEBUG] Chapter mode: ${chapterData.mode}, Module mode: ${chapterData.module?.mode}`);
-    console.log(`👤 [DEBUG] User: ${user ? user._id : 'not authenticated'}, Role: ${user?.role || 'none'}`);
-    console.log(`🏷️ [DEBUG] Access reason: ${accessReason}`);
 
     // Populate staff ObjectIds with user display names
     const populatedChapter = await populateStaffNames(chapterData);
