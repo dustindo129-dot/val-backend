@@ -789,6 +789,17 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
       await checkAndUnlockContent(req.params.novelId);
     }
     
+    // Recalculate rent balance if module was changed to rent mode
+    if (req.body.mode === 'rent' && currentModule.mode !== 'rent') {
+      try {
+        await calculateAndUpdateModuleRentBalance(req.params.moduleId);
+        console.log(`Recalculated rent balance for module ${req.params.moduleId} after switching to rent mode`);
+      } catch (rentBalanceError) {
+        console.error('Error recalculating module rent balance after mode change to rent:', rentBalanceError);
+        // Don't fail the module update if rent balance calculation fails
+      }
+    }
+    
     res.json(updatedModule);
   } catch (err) {
     res.status(400).json({ message: err.message });
