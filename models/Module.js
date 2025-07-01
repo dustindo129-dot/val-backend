@@ -24,7 +24,7 @@ const moduleSchema = new mongoose.Schema({
   },
   mode: {
     type: String,
-    enum: ['published', 'paid'],
+    enum: ['published', 'paid', 'rent'],
     default: 'published'
   },
   moduleBalance: {

@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 /**
  * ModuleRental Schema
- * Tracks user module rentals with 24-hour access periods
+ * Tracks user module rentals with 52-hour access periods
  */
 const moduleRentalSchema = new mongoose.Schema({
   userId: {
@@ -67,11 +67,11 @@ moduleRentalSchema.index({ userId: 1, isActive: 1 });
 // 5. Index for module-based queries
 moduleRentalSchema.index({ moduleId: 1, isActive: 1 });
 
-// Pre-save hook to set endTime (24 hours from startTime)
+// Pre-save hook to set endTime (52 hours from startTime)
 moduleRentalSchema.pre('save', function(next) {
   if (this.isNew && !this.endTime) {
-    // Set endTime to 24 hours (24 * 60 * 60 * 1000 milliseconds) from startTime
-    this.endTime = new Date(this.startTime.getTime() + (24 * 60 * 60 * 1000));
+    // Set endTime to 52 hours (52 * 60 * 60 * 1000 milliseconds) from startTime
+    this.endTime = new Date(this.startTime.getTime() + (52 * 60 * 60 * 1000));
   }
   next();
 });

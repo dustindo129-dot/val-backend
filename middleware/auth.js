@@ -82,8 +82,18 @@ export const auth = async (req, res, next) => {
             });
           }
           
-          // Allow the request but log for monitoring
-          console.log(`Allowing same-device session mismatch for user ${user.username} from ${req.ip}`);
+          // Allow the request but only log once per user per session to reduce noise
+          const logKey = `session_mismatch_${user._id}_${decoded.sessionId}`;
+          if (!global.sessionMismatchLogs) {
+            global.sessionMismatchLogs = new Map();
+          }
+          
+          const lastLogged = global.sessionMismatchLogs.get(logKey);
+          // Only log once every 5 minutes per user per session
+          if (!lastLogged || (now - lastLogged) > 5 * 60 * 1000) {
+            console.log(`Allowing same-device session mismatch for user ${user.username} from ${req.ip}`);
+            global.sessionMismatchLogs.set(logKey, now);
+          }
         }
       }
 
@@ -213,8 +223,8 @@ export const optionalAuth = async (req, res, next) => {
         // If same device but different session, check age for optional auth
         if (isSameDevice && user.currentSessionId !== decoded.sessionId) {
           const tokenIssueTime = decoded.iat * 1000;
-          const now = Date.now();
-          const sessionAge = now - tokenIssueTime;
+          const currentTime = Date.now();
+          const sessionAge = currentTime - tokenIssueTime;
           const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
           
           if (sessionAge > maxSessionAge) {
