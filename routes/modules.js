@@ -6,6 +6,9 @@ import Chapter from '../models/Chapter.js';
 import { clearNovelCaches } from '../utils/cacheUtils.js';
 import Novel from '../models/Novel.js';
 import mongoose from 'mongoose';
+import ModuleRental from '../models/ModuleRental.js';
+import ContributionHistory from '../models/ContributionHistory.js';
+import User from '../models/User.js';
 
 const router = express.Router();
 
@@ -601,7 +604,8 @@ router.post('/:novelId/modules', auth, async (req, res) => {
       order: nextOrder,
       chapters: [],
       mode: req.body.mode || 'published',
-      moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0
+      moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0,
+      rentBalance: parseInt(req.body.rentBalance) || 0
     });
 
     // Save the module
@@ -685,6 +689,7 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
       illustration: req.body.illustration,
       mode: req.body.mode || 'published',
       moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0,
+      rentBalance: parseInt(req.body.rentBalance) || 0,
       updatedAt: new Date()
     };
 
@@ -980,6 +985,348 @@ router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, asyn
     res.status(400).json({ message: err.message });
   } finally {
     session.endSession();
+  }
+});
+
+/**
+ * Update module rent balance (Admin only)
+ * @route PATCH /api/modules/:moduleId/rent-balance
+ */
+router.patch('/:moduleId/rent-balance', auth, admin, async (req, res) => {
+  try {
+    const { moduleId } = req.params;
+    const { rentBalance } = req.body;
+
+    // Validate rent balance
+    if (typeof rentBalance !== 'number' || rentBalance < 0) {
+      return res.status(400).json({ message: 'Giá thuê phải là số không âm' });
+    }
+
+    const module = await Module.findByIdAndUpdate(
+      moduleId,
+      { rentBalance },
+      { new: true, runValidators: true }
+    );
+
+    if (!module) {
+      return res.status(404).json({ message: 'Module not found' });
+    }
+
+    // Clear novel caches
+    clearNovelCaches();
+
+    res.json({ 
+      message: 'Rent balance updated successfully',
+      module: {
+        _id: module._id,
+        rentBalance: module.rentBalance
+      }
+    });
+  } catch (err) {
+    console.error('Error updating module rent balance:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Rent a module for 24 hours
+ * @route POST /api/modules/:moduleId/rent
+ */
+router.post('/:moduleId/rent', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { moduleId } = req.params;
+    const userId = req.user._id;
+
+    // Get module with novel information
+    const module = await Module.findById(moduleId)
+      .populate('novelId', 'availableForRent novelBalance novelBudget')
+      .session(session);
+
+    if (!module) {
+      return res.status(404).json({ message: 'Module not found' });
+    }
+
+    // Check if novel is available for rent
+    if (!module.novelId.availableForRent) {
+      return res.status(400).json({ message: 'Novel is not available for rent' });
+    }
+
+    // Check if module has paid content (either paid mode or has paid chapters)
+    const hasPaidChapters = await Chapter.exists({
+      moduleId: moduleId,
+      mode: 'paid',
+      chapterBalance: { $gt: 0 }
+    }).session(session);
+
+    const isPaidModule = module.mode === 'paid' && module.moduleBalance > 0;
+
+    if (!isPaidModule && !hasPaidChapters) {
+      return res.status(400).json({ message: 'Module does not have paid content available for rent' });
+    }
+
+    // Check if module has rent balance set
+    if (!module.rentBalance || module.rentBalance <= 0) {
+      return res.status(400).json({ message: 'Module rent price not set' });
+    }
+
+    // Check if user already has an active rental for this module
+    const existingRental = await ModuleRental.findActiveRentalForUserModule(userId, moduleId);
+    if (existingRental) {
+      return res.status(400).json({ 
+        message: 'Bạn đã thuê module này rồi',
+        rental: {
+          endTime: existingRental.endTime,
+          timeRemaining: Math.max(0, existingRental.endTime - new Date())
+        }
+      });
+    }
+
+    // Get user and check balance
+    const user = await User.findById(userId).session(session);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (user.balance < module.rentBalance) {
+      return res.status(400).json({ 
+        message: `Số dư không đủ. Cần ${module.rentBalance} 🌾, bạn có ${user.balance} 🌾` 
+      });
+    }
+
+    // Deduct from user balance
+    user.balance -= module.rentBalance;
+    await user.save({ session });
+
+    // Add to novel balance and budget
+    const novel = module.novelId;
+    novel.novelBalance += module.rentBalance;
+    novel.novelBudget += module.rentBalance;
+    await novel.save({ session });
+
+    // Create rental record with explicit endTime (24 hours from now)
+    const startTime = new Date();
+    const endTime = new Date(startTime.getTime() + (24 * 60 * 60 * 1000)); // 24 hours from start
+    
+    const rental = new ModuleRental({
+      userId: userId,
+      moduleId: moduleId,
+      novelId: novel._id,
+      amountPaid: module.rentBalance,
+      startTime: startTime,
+      endTime: endTime
+    });
+    await rental.save({ session });
+
+    // Create contribution history record
+    const contributionHistory = new ContributionHistory({
+      novelId: novel._id,
+      userId: userId,
+      amount: module.rentBalance,
+      note: `Thuê ${module.title} trong 24h`,
+      budgetAfter: novel.novelBudget,
+      balanceAfter: novel.novelBalance,
+      type: 'user'
+    });
+    await contributionHistory.save({ session });
+
+    // Link contribution history to rental
+    rental.contributionHistoryId = contributionHistory._id;
+    await rental.save({ session });
+
+    await session.commitTransaction();
+
+    // Clear novel caches
+    clearNovelCaches();
+
+    res.json({
+      message: 'Module rented successfully',
+      rental: {
+        _id: rental._id,
+        moduleId: rental.moduleId,
+        amountPaid: rental.amountPaid,
+        startTime: rental.startTime,
+        endTime: rental.endTime,
+        timeRemaining: rental.endTime - new Date()
+      },
+      userBalance: user.balance
+    });
+
+  } catch (err) {
+    await session.abortTransaction();
+    console.error('Error renting module:', err);
+    
+    if (err.code === 11000) {
+      return res.status(400).json({ message: 'Bạn đã thuê module này rồi' });
+    }
+    
+    res.status(500).json({ message: err.message });
+  } finally {
+    session.endSession();
+  }
+});
+
+/**
+ * Get user's active rentals
+ * @route GET /api/modules/rentals/active
+ */
+router.get('/rentals/active', auth, async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    // Cleanup expired rentals first
+    await ModuleRental.cleanupExpiredRentals();
+
+    const rentals = await ModuleRental.findActiveRentalsForUser(userId)
+      .populate('moduleId', 'title illustration rentBalance')
+      .populate('novelId', 'title')
+      .sort({ startTime: -1 });
+
+    // Calculate time remaining for each rental
+    const rentalsWithTimeRemaining = rentals.map(rental => ({
+      _id: rental._id,
+      module: rental.moduleId,
+      novel: rental.novelId,
+      amountPaid: rental.amountPaid,
+      startTime: rental.startTime,
+      endTime: rental.endTime,
+      timeRemaining: Math.max(0, rental.endTime - new Date()),
+      isValid: rental.isValid()
+    }));
+
+    res.json(rentalsWithTimeRemaining);
+  } catch (err) {
+    console.error('Error getting user rentals:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Check if user has active rental for a specific module
+ * @route GET /api/modules/:moduleId/rental-status
+ */
+router.get('/:moduleId/rental-status', auth, async (req, res) => {
+  try {
+    const { moduleId } = req.params;
+    const userId = req.user._id;
+
+    const rental = await ModuleRental.findActiveRentalForUserModule(userId, moduleId);
+
+    if (!rental) {
+      return res.json({ hasActiveRental: false });
+    }
+
+    // Check if rental is still valid
+    if (!rental.isValid()) {
+      // Expire the rental
+      await rental.expire();
+      return res.json({ hasActiveRental: false });
+    }
+
+    res.json({
+      hasActiveRental: true,
+      rental: {
+        _id: rental._id,
+        startTime: rental.startTime,
+        endTime: rental.endTime,
+        timeRemaining: Math.max(0, rental.endTime - new Date()),
+        amountPaid: rental.amountPaid
+      }
+    });
+  } catch (err) {
+    console.error('Error checking rental status:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Get active rental counts for modules in a novel (Admin/Moderator/PJ_User only)
+ * @route GET /api/modules/:novelId/rental-counts
+ */
+router.get('/:novelId/rental-counts', auth, async (req, res) => {
+  try {
+    const { novelId } = req.params;
+
+    // Check if user has permission (admin, moderator, or pj_user managing this novel)
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      if (req.user.role === 'pj_user') {
+        const novel = await Novel.findById(novelId).lean();
+        if (!novel) {
+          return res.status(404).json({ message: 'Novel not found' });
+        }
+        
+        // Check if user is in the novel's active pj_user array
+        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                            novel.active?.pj_user?.includes(req.user.username);
+        
+        if (!isAuthorized) {
+          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
+        }
+      } else {
+        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
+      }
+    }
+
+    // Cleanup expired rentals first
+    await ModuleRental.cleanupExpiredRentals();
+
+    // Get all modules for this novel
+    const modules = await Module.find({ novelId }).select('_id').lean();
+    const moduleIds = modules.map(m => m._id);
+
+    // Get active rental counts for each module
+    const rentalCounts = await ModuleRental.aggregate([
+      {
+        $match: {
+          moduleId: { $in: moduleIds },
+          isActive: true,
+          endTime: { $gt: new Date() }
+        }
+      },
+      {
+        $group: {
+          _id: '$moduleId',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    // Create a map of moduleId to count
+    const countsMap = rentalCounts.reduce((acc, item) => {
+      acc[item._id.toString()] = item.count;
+      return acc;
+    }, {});
+
+    // Return counts for all modules (including 0 for modules with no active rentals)
+    const result = {};
+    moduleIds.forEach(moduleId => {
+      result[moduleId.toString()] = countsMap[moduleId.toString()] || 0;
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error('Error getting module rental counts:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Cleanup expired rentals (utility endpoint, can be called by cron jobs)
+ * @route POST /api/modules/rentals/cleanup
+ */
+router.post('/rentals/cleanup', auth, admin, async (req, res) => {
+  try {
+    const result = await ModuleRental.cleanupExpiredRentals();
+    
+    res.json({
+      message: 'Expired rentals cleaned up successfully',
+      modifiedCount: result.modifiedCount
+    });
+  } catch (err) {
+    console.error('Error cleaning up expired rentals:', err);
+    res.status(500).json({ message: err.message });
   }
 });
 

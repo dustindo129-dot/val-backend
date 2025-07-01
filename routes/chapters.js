@@ -21,12 +21,13 @@
 
 import express from 'express';
 import Chapter from '../models/Chapter.js';
-import { auth } from '../middleware/auth.js';
+import { auth, optionalAuth } from '../middleware/auth.js';
 import admin from '../middleware/admin.js';
 import Module from '../models/Module.js';
 import Novel from '../models/Novel.js';
 import mongoose from 'mongoose';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
+import ModuleRental from '../models/ModuleRental.js';
 
 // Import the novel cache clearing function
 import { clearNovelCaches, clearChapterCaches, notifyAllClients } from '../utils/cacheUtils.js';
@@ -133,6 +134,41 @@ const dedupQuery = async (key, queryFn) => {
     // Clean up pending query
     pendingQueries.delete(key);
   }
+};
+
+/**
+ * Get appropriate access message for denied chapter access
+ * @param {Object} chapterData - Chapter data with mode and module info
+ * @param {Object} user - Current user object (can be null)
+ * @returns {string} Access denial message
+ */
+const getAccessMessage = (chapterData, user) => {
+  if (!user) {
+    if (chapterData.mode === 'protected') {
+      return 'Vui lòng đăng nhập để đọc chương này.';
+    }
+    if (chapterData.mode === 'paid') {
+      return `Chương này yêu cầu thanh toán ${chapterData.chapterBalance || 0} 🌾 để truy cập hoặc bạn có thể thuê tập.`;
+    }
+    if (chapterData.module?.mode === 'paid') {
+      return `Module này yêu cầu thanh toán ${chapterData.module.moduleBalance || 0} 🌾 để truy cập hoặc bạn có thể thuê tập với giá ${chapterData.module.rentBalance || 0} 🌾.`;
+    }
+    return 'Vui lòng đăng nhập để truy cập nội dung này.';
+  }
+
+  if (chapterData.mode === 'draft') {
+    return 'Chương này đang ở chế độ nháp và không khả dụng cho người dùng.';
+  }
+  
+  if (chapterData.mode === 'paid') {
+    return `Chương này yêu cầu thanh toán ${chapterData.chapterBalance || 0} 🌾 để truy cập hoặc bạn có thể thuê tập.`;
+  }
+  
+  if (chapterData.module?.mode === 'paid') {
+    return `Module này yêu cầu thanh toán ${chapterData.module.moduleBalance || 0} 🌾 để truy cập hoặc bạn có thể thuê tập với giá ${chapterData.module.rentBalance || 0} 🌾.`;
+  }
+  
+  return 'Bạn không có quyền truy cập nội dung này.';
 };
 
 /**
@@ -421,16 +457,42 @@ router.get('/:id', async (req, res) => {
           $match: { _id: mongoose.Types.ObjectId.createFromHexString(req.params.id) }
         },
         
-        // Next, lookup the novel info (just the title)
+        // Lookup the module information
+        {
+          $lookup: {
+            from: 'modules',
+            localField: 'moduleId',
+            foreignField: '_id',
+            pipeline: [
+              { $project: { mode: 1, moduleBalance: 1, rentBalance: 1 } }
+            ],
+            as: 'module'
+          }
+        },
+        
+        // Next, lookup the novel info (including active staff for permissions)
         {
           $lookup: {
             from: 'novels',
             localField: 'novelId',
             foreignField: '_id',
             pipeline: [
-              { $project: { title: 1 } }
+              { $project: { title: 1, active: 1 } }
             ],
             as: 'novel'
+          }
+        },
+        
+        // Lookup the module for this chapter
+        {
+          $lookup: {
+            from: 'modules',
+            localField: 'moduleId',
+            foreignField: '_id',
+            pipeline: [
+              { $project: { title: 1, mode: 1, moduleBalance: 1, rentBalance: 1 } }
+            ],
+            as: 'module'
           }
         },
         
@@ -474,10 +536,11 @@ router.get('/:id', async (req, res) => {
           }
         },
         
-        // Add fields for novel, createdByUser, prevChapter, and nextChapter
+        // Add fields for novel, module, createdByUser, prevChapter, and nextChapter
         {
           $addFields: {
             novel: { $arrayElemAt: ['$novel', 0] },
+            module: { $arrayElemAt: ['$module', 0] },
             createdByUser: { $arrayElemAt: ['$createdByUser', 0] },
             prevChapter: {
               $let: {
@@ -520,10 +583,31 @@ router.get('/:id', async (req, res) => {
           }
         },
         
-        // Remove the siblings field from the output
+        // Remove the siblings field from the output and ensure moduleId is included
         {
           $project: {
-            siblingChapters: 0
+            siblingChapters: 0,
+            moduleId: 1, // Explicitly include moduleId
+            novelId: 1,  // Explicitly include novelId for safety
+            title: 1,
+            content: 1,
+            order: 1,
+            mode: 1,
+            chapterBalance: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            translator: 1,
+            editor: 1,
+            proofreader: 1,
+            createdBy: 1,
+            footnotes: 1,
+            wordCount: 1,
+            views: 1,
+            novel: 1,
+            module: 1,
+            createdByUser: 1,
+            prevChapter: 1,
+            nextChapter: 1
           }
         }
       ]);
@@ -538,6 +622,140 @@ router.get('/:id', async (req, res) => {
 
     console.log(`Found chapter: ${chapterData.title}`);
     console.log(`Navigation: prev=${chapterData.prevChapter?._id}, next=${chapterData.nextChapter?._id}`);
+    console.log(`🔧 [DEBUG] Available fields in chapterData:`, Object.keys(chapterData));
+    console.log(`🔧 [DEBUG] moduleId value:`, chapterData.moduleId);
+
+    // Check if user can access this chapter content
+    const user = req.user; // Will be undefined if not authenticated
+    let hasAccess = false;
+    let accessReason = '';
+
+    // Admin, moderator always have access
+    if (user && (user.role === 'admin' || user.role === 'moderator')) {
+      hasAccess = true;
+      accessReason = 'admin/moderator';
+    }
+    // PJ_user for their assigned novels
+    else if (user && user.role === 'pj_user' && chapterData.novel?.active?.pj_user) {
+      const isAuthorized = chapterData.novel.active.pj_user.includes(user._id.toString()) || 
+                          chapterData.novel.active.pj_user.includes(user.username);
+      if (isAuthorized) {
+        hasAccess = true;
+        accessReason = 'pj_user';
+      }
+    }
+    
+    // Check mode-based access for regular users
+    if (!hasAccess) {
+      switch (chapterData.mode) {
+        case 'published':
+          hasAccess = true;
+          accessReason = 'published';
+          break;
+        case 'protected':
+          if (user) {
+            hasAccess = true;
+            accessReason = 'protected-authenticated';
+          }
+          break;
+        case 'draft':
+          // Draft is only accessible to admin/mod/assigned pj_user (already checked above)
+          break;
+        case 'paid':
+          // Check if user has active rental for this module
+          if (user && chapterData.moduleId) {
+            console.log(`🔍 [DEBUG] Paid chapter - Checking rental for user ${user._id}, module ${chapterData.moduleId}`);
+            
+            const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapterData.moduleId);
+            
+            console.log(`🎫 [DEBUG] Paid chapter rental found:`, activeRental ? {
+              _id: activeRental._id,
+              userId: activeRental.userId?.toString(),
+              moduleId: activeRental.moduleId?.toString(),
+              isActive: activeRental.isActive,
+              startTime: activeRental.startTime,
+              endTime: activeRental.endTime,
+              isValid: activeRental.isValid()
+            } : 'None');
+            
+            if (activeRental && activeRental.isValid()) {
+              hasAccess = true;
+              accessReason = 'rental';
+              console.log(`✅ [DEBUG] Paid chapter rental access granted`);
+              
+              // Add rental information to the response
+              chapterData.rentalInfo = {
+                hasActiveRental: true,
+                endTime: activeRental.endTime,
+                timeRemaining: Math.max(0, activeRental.endTime - new Date())
+              };
+            } else {
+              console.log(`❌ [DEBUG] No valid paid chapter rental found`);
+            }
+          }
+          break;
+      }
+    }
+    
+    // Check if module is paid and user has rental access
+    if (!hasAccess && chapterData.module?.mode === 'paid' && user && chapterData.moduleId) {
+      console.log(`🔍 [DEBUG] Checking module rental for user ${user._id}, module ${chapterData.moduleId}`);
+      console.log(`📊 [DEBUG] Module mode: ${chapterData.module?.mode}, hasAccess: ${hasAccess}`);
+      
+      const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapterData.moduleId);
+      
+      console.log(`🎫 [DEBUG] Module rental found:`, activeRental ? {
+        _id: activeRental._id,
+        userId: activeRental.userId?.toString(),
+        moduleId: activeRental.moduleId?.toString(),
+        isActive: activeRental.isActive,
+        startTime: activeRental.startTime,
+        endTime: activeRental.endTime,
+        isValid: activeRental.isValid()
+      } : 'None');
+      
+      if (activeRental && activeRental.isValid()) {
+        hasAccess = true;
+        accessReason = 'module-rental';
+        console.log(`✅ [DEBUG] Module rental access granted`);
+        
+        // Add rental information to the response
+        chapterData.rentalInfo = {
+          hasActiveRental: true,
+          endTime: activeRental.endTime,
+          timeRemaining: Math.max(0, activeRental.endTime - new Date())
+        };
+      } else {
+        console.log(`❌ [DEBUG] No valid module rental found`);
+      }
+    }
+
+    // If user doesn't have access, return limited chapter info
+    if (!hasAccess) {
+      console.log(`❌ [DEBUG] Access denied for chapter ${chapterData.title}`);
+      console.log(`📋 [DEBUG] Chapter mode: ${chapterData.mode}, Module mode: ${chapterData.module?.mode}`);
+      console.log(`👤 [DEBUG] User: ${user ? user._id : 'not authenticated'}, Role: ${user?.role || 'none'}`);
+      console.log(`🏷️ [DEBUG] Access reason: ${accessReason || 'none'}`);
+      
+      // Populate staff ObjectIds with user display names for metadata
+      const populatedChapter = await populateStaffNames(chapterData);
+      
+      // Return chapter without content
+      const { content, ...chapterWithoutContent } = populatedChapter;
+      
+      return res.json({ 
+        chapter: {
+          ...chapterWithoutContent,
+          accessDenied: true,
+          accessMessage: getAccessMessage(chapterData, user)
+        }
+      });
+    }
+
+    console.log(`✅ [DEBUG] Access granted for chapter ${chapterData.title}`);
+    console.log(`📋 [DEBUG] Chapter mode: ${chapterData.mode}, Module mode: ${chapterData.module?.mode}`);
+    console.log(`👤 [DEBUG] User: ${user ? user._id : 'not authenticated'}, Role: ${user?.role || 'none'}`);
+    console.log(`🏷️ [DEBUG] Access reason: ${accessReason}`);
 
     // Populate staff ObjectIds with user display names
     const populatedChapter = await populateStaffNames(chapterData);
@@ -1168,14 +1386,14 @@ router.delete('/:id', auth, async (req, res) => {
  * Get full chapter data with all related information
  * @route GET /api/chapters/:id/full
  */
-router.get('/:id/full', async (req, res) => {
+router.get('/:id/full', optionalAuth, async (req, res) => {
   try {
     const chapterId = req.params.id;
     const userId = req.user ? req.user._id : null;
     
     // Execute all queries in parallel for better performance
     const [chapterResult, interactionStats, userInteraction] = await Promise.all([
-      // Fetch chapter with novel info and navigation data (existing aggregation)
+      // Fetch chapter with novel info, module info, and navigation data
       Chapter.aggregate([
         { '$match': { _id: mongoose.Types.ObjectId.createFromHexString(chapterId) } },
         { '$lookup': { 
@@ -1184,6 +1402,14 @@ router.get('/:id/full', async (req, res) => {
             foreignField: '_id', 
             pipeline: [ { '$project': { title: 1, illustration: 1, active: 1 } } ], 
             as: 'novel' 
+        }},
+        // CRITICAL: Add module lookup for rental access checks
+        { '$lookup': { 
+            from: 'modules', 
+            localField: 'moduleId', 
+            foreignField: '_id', 
+            pipeline: [ { '$project': { title: 1, mode: 1, moduleBalance: 1, rentBalance: 1 } } ], 
+            as: 'module' 
         }},
         { '$lookup': { 
             from: 'users', 
@@ -1209,6 +1435,7 @@ router.get('/:id/full', async (req, res) => {
         }},
         { '$addFields': { 
             novel: { '$arrayElemAt': [ '$novel', 0 ] },
+            module: { '$arrayElemAt': [ '$module', 0 ] },
             createdByUser: { '$arrayElemAt': [ '$createdByUser', 0 ] },
             prevChapter: { 
               '$let': { 
@@ -1270,9 +1497,107 @@ router.get('/:id/full', async (req, res) => {
 
     const chapter = chapterResult[0];
     const stats = interactionStats[0];
+    
+    // CRITICAL: Add access control logic for rental system
+    const user = req.user;
+    let hasAccess = false;
+    let accessReason = '';
+
+    // Admin, moderator always have access
+    if (user && (user.role === 'admin' || user.role === 'moderator')) {
+      hasAccess = true;
+      accessReason = 'admin/moderator';
+    }
+    // PJ_user for their assigned novels
+    else if (user && user.role === 'pj_user' && chapter.novel?.active?.pj_user) {
+      const isAuthorized = chapter.novel.active.pj_user.includes(user._id.toString()) || 
+                          chapter.novel.active.pj_user.includes(user.username);
+      if (isAuthorized) {
+        hasAccess = true;
+        accessReason = 'pj_user';
+      }
+    }
+    
+    // Check mode-based access for regular users
+    if (!hasAccess) {
+      switch (chapter.mode) {
+        case 'published':
+          hasAccess = true;
+          accessReason = 'published';
+          break;
+        case 'protected':
+          if (user) {
+            hasAccess = true;
+            accessReason = 'protected-authenticated';
+          }
+          break;
+        case 'draft':
+          // Draft is only accessible to admin/mod/assigned pj_user (already checked above)
+          break;
+        case 'paid':
+          // Check if user has active rental for this module
+          if (user && chapter.moduleId) {
+            const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapter.moduleId);
+            if (activeRental && activeRental.isValid()) {
+              hasAccess = true;
+              accessReason = 'rental';
+              
+              // Add rental information to the response
+              chapter.rentalInfo = {
+                hasActiveRental: true,
+                endTime: activeRental.endTime,
+                timeRemaining: Math.max(0, activeRental.endTime - new Date())
+              };
+            }
+          }
+          break;
+      }
+    }
+    
+    // Check if module is paid and user has rental access
+    if (!hasAccess && chapter.module?.mode === 'paid' && user && chapter.moduleId) {
+      const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapter.moduleId);
+      if (activeRental && activeRental.isValid()) {
+        hasAccess = true;
+        accessReason = 'module-rental';
+        
+        // Add rental information to the response
+        chapter.rentalInfo = {
+          hasActiveRental: true,
+          endTime: activeRental.endTime,
+          timeRemaining: Math.max(0, activeRental.endTime - new Date())
+        };
+      }
+    }
 
     // Populate staff ObjectIds with user display names
     const populatedChapter = await populateStaffNames(chapter);
+
+    // If user doesn't have access, return limited chapter info
+    if (!hasAccess) {
+      // Return chapter without content
+      const { content, ...chapterWithoutContent } = populatedChapter;
+      
+      // Build interaction response
+      const interactions = {
+        totalLikes: stats?.totalLikes || 0,
+        userInteraction: {
+          liked: userInteraction?.liked || false,
+          bookmarked: userInteraction?.bookmarked || false
+        }
+      };
+      
+      return res.json({
+        chapter: {
+          ...chapterWithoutContent,
+          accessDenied: true,
+          accessMessage: getAccessMessage(chapter, user)
+        },
+        interactions
+      });
+    }
+
+    console.log(`Access granted for chapter ${chapter.title}: reason=${accessReason}`);
 
     // Build interaction response
     const interactions = {

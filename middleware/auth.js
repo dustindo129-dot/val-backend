@@ -45,12 +45,45 @@ export const auth = async (req, res, next) => {
         return res.status(401).json({ message: 'User not found' });
       }
 
-      // Check if session is valid (single-device authentication)
-      if (decoded.sessionId && user.currentSessionId !== decoded.sessionId) {
-        return res.status(401).json({ 
-          message: 'Session invalidated - logged in from another device',
-          code: 'SESSION_INVALIDATED'
-        });
+      // Enhanced session validation with device fingerprinting
+      if (decoded.sessionId && user.currentSessionId) {
+        // Extract device fingerprint from current request
+        const currentDeviceFingerprint = require('crypto')
+          .createHash('sha256')
+          .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+          .digest('hex')
+          .substring(0, 16);
+        
+        // Check if this is the same device
+        const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
+        const isSameDevice = tokenDeviceFingerprint === currentDeviceFingerprint;
+        
+        // If it's not the same device, do strict session validation
+        if (!isSameDevice && user.currentSessionId !== decoded.sessionId) {
+          return res.status(401).json({ 
+            message: 'Session invalidated - logged in from another device',
+            code: 'SESSION_INVALIDATED'
+          });
+        }
+        
+        // If it's the same device but different session, be more lenient
+        if (isSameDevice && user.currentSessionId !== decoded.sessionId) {
+          // Check if the session is reasonably recent (within last 24 hours)
+          const tokenIssueTime = decoded.iat * 1000; // Convert to milliseconds
+          const now = Date.now();
+          const sessionAge = now - tokenIssueTime;
+          const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
+          
+          if (sessionAge > maxSessionAge) {
+            return res.status(401).json({ 
+              message: 'Session expired - please login again',
+              code: 'SESSION_EXPIRED'
+            });
+          }
+          
+          // Allow the request but log for monitoring
+          console.log(`Allowing same-device session mismatch for user ${user.username} from ${req.ip}`);
+        }
       }
 
       // Attach user to request object
@@ -157,10 +190,37 @@ export const optionalAuth = async (req, res, next) => {
         return next();
       }
 
-      // Check if session is valid (single-device authentication) - for optional auth, just set user to null if invalid
-      if (decoded.sessionId && user.currentSessionId !== decoded.sessionId) {
-        req.user = null;
-        return next();
+      // Enhanced session validation for optional auth - more lenient
+      if (decoded.sessionId && user.currentSessionId) {
+        // Extract device fingerprint from current request
+        const currentDeviceFingerprint = require('crypto')
+          .createHash('sha256')
+          .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+          .digest('hex')
+          .substring(0, 16);
+        
+        // Check if this is the same device
+        const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
+        const isSameDevice = tokenDeviceFingerprint === currentDeviceFingerprint;
+        
+        // For optional auth, only invalidate if it's a different device AND session mismatch
+        if (!isSameDevice && user.currentSessionId !== decoded.sessionId) {
+          req.user = null;
+          return next();
+        }
+        
+        // If same device but different session, check age for optional auth
+        if (isSameDevice && user.currentSessionId !== decoded.sessionId) {
+          const tokenIssueTime = decoded.iat * 1000;
+          const now = Date.now();
+          const sessionAge = now - tokenIssueTime;
+          const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
+          
+          if (sessionAge > maxSessionAge) {
+            req.user = null;
+            return next();
+          }
+        }
       }
 
       // Check if user is banned

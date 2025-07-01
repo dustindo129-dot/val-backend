@@ -41,14 +41,22 @@ router.post('/register-admin', async (req, res) => {
 
     await user.save();
 
-    // Generate a unique session ID for single-device authentication
-    const sessionId = crypto.randomBytes(32).toString('hex');
+    // Create device fingerprint and session ID for single-device authentication
+    const deviceFingerprint = crypto
+      .createHash('sha256')
+      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .digest('hex')
+      .substring(0, 16);
+    
+    const baseSessionId = crypto.randomBytes(16).toString('hex');
+    const sessionId = `${deviceFingerprint}-${baseSessionId}`;
+    
     user.currentSessionId = sessionId;
     await user.save();
 
     // Create token
     const token = jwt.sign(
-      { userId: user._id, username: user.username, role: user.role, sessionId: sessionId },
+      { userId: user._id, username: user.username, role: user.role, sessionId: sessionId, deviceFingerprint: deviceFingerprint },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -57,7 +65,8 @@ router.post('/register-admin', async (req, res) => {
     const refreshToken = jwt.sign(
       { 
         userId: user._id, 
-        sessionId: sessionId
+        sessionId: sessionId,
+        deviceFingerprint: deviceFingerprint
       },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
@@ -124,13 +133,21 @@ router.post('/signup', async (req, res) => {
     const savedUser = await user.save();
     console.log('User saved successfully. ID:', savedUser._id);
 
-    // Generate a unique session ID for single-device authentication
-    const sessionId = crypto.randomBytes(32).toString('hex');
+    // Create device fingerprint and session ID for single-device authentication
+    const deviceFingerprint = crypto
+      .createHash('sha256')
+      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .digest('hex')
+      .substring(0, 16);
+    
+    const baseSessionId = crypto.randomBytes(16).toString('hex');
+    const sessionId = `${deviceFingerprint}-${baseSessionId}`;
+    
     savedUser.currentSessionId = sessionId;
     await savedUser.save();
 
     const token = jwt.sign(
-      { userId: user._id, username: user.username, role: user.role, sessionId: sessionId },
+      { userId: user._id, username: user.username, role: user.role, sessionId: sessionId, deviceFingerprint: deviceFingerprint },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -139,7 +156,8 @@ router.post('/signup', async (req, res) => {
     const refreshToken = jwt.sign(
       { 
         userId: user._id, 
-        sessionId: sessionId
+        sessionId: sessionId,
+        deviceFingerprint: deviceFingerprint
       },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
@@ -189,12 +207,36 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid username or password' });
     }
 
-    // Generate a unique session ID for single-device authentication
-    const sessionId = crypto.randomBytes(32).toString('hex');
+    // Create device fingerprint based on IP and User-Agent
+    const deviceFingerprint = crypto
+      .createHash('sha256')
+      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .digest('hex')
+      .substring(0, 16);
+
+    // Generate session ID that includes device fingerprint
+    const baseSessionId = crypto.randomBytes(16).toString('hex');
+    const sessionId = `${deviceFingerprint}-${baseSessionId}`;
     
-    // Update last login and set current session ID (this invalidates other devices)
+    // Check if user already has a session from this device
+    const existingSessionFromDevice = user.currentSessionId && 
+      user.currentSessionId.startsWith(deviceFingerprint);
+    
+    // Update last login and set current session ID
     user.lastLogin = new Date();
     user.currentSessionId = sessionId;
+    
+    // Store device info for session management
+    if (!user.deviceSessions) {
+      user.deviceSessions = new Map();
+    }
+    user.deviceSessions.set(deviceFingerprint, {
+      sessionId: sessionId,
+      lastAccess: new Date(),
+      userAgent: req.headers['user-agent'] || 'unknown',
+      ip: req.ip || 'unknown'
+    });
+    
     await user.save();
 
     // Create token with both userId, username, and sessionId
@@ -203,7 +245,8 @@ router.post('/login', async (req, res) => {
         userId: user._id, 
         username: user.username, 
         role: user.role,
-        sessionId: sessionId
+        sessionId: sessionId,
+        deviceFingerprint: deviceFingerprint
       },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
@@ -213,7 +256,8 @@ router.post('/login', async (req, res) => {
     const refreshToken = jwt.sign(
       { 
         userId: user._id, 
-        sessionId: sessionId
+        sessionId: sessionId,
+        deviceFingerprint: deviceFingerprint
       },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
@@ -312,21 +356,50 @@ router.post('/refresh', async (req, res) => {
       return res.status(401).json({ message: 'User not found' });
     }
 
-    // Check if session is still valid
-    if (decoded.sessionId && user.currentSessionId !== decoded.sessionId) {
-      return res.status(401).json({ 
-        message: 'Session invalidated - logged in from another device',
-        code: 'SESSION_INVALIDATED'
-      });
+    // Create device fingerprint for refresh request
+    const deviceFingerprint = crypto
+      .createHash('sha256')
+      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .digest('hex')
+      .substring(0, 16);
+
+    // Enhanced session validation with device fingerprinting for refresh
+    if (decoded.sessionId && user.currentSessionId) {
+      const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
+      const isSameDevice = tokenDeviceFingerprint === deviceFingerprint;
+      
+      // If not same device, do strict validation
+      if (!isSameDevice && user.currentSessionId !== decoded.sessionId) {
+        return res.status(401).json({ 
+          message: 'Session invalidated - logged in from another device',
+          code: 'SESSION_INVALIDATED'
+        });
+      }
+      
+      // If same device but different session, check age
+      if (isSameDevice && user.currentSessionId !== decoded.sessionId) {
+        const tokenIssueTime = decoded.iat * 1000;
+        const now = Date.now();
+        const sessionAge = now - tokenIssueTime;
+        const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
+        
+        if (sessionAge > maxSessionAge) {
+          return res.status(401).json({ 
+            message: 'Session expired - please login again',
+            code: 'SESSION_EXPIRED'
+          });
+        }
+      }
     }
 
-    // Generate new token with same session ID
+    // Generate new token with device fingerprint
     const token = jwt.sign(
       { 
         userId: user._id, 
         username: user.username, 
         role: user.role,
-        sessionId: user.currentSessionId
+        sessionId: user.currentSessionId,
+        deviceFingerprint: deviceFingerprint
       },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
@@ -336,7 +409,8 @@ router.post('/refresh', async (req, res) => {
     const newRefreshToken = jwt.sign(
       { 
         userId: user._id, 
-        sessionId: user.currentSessionId
+        sessionId: user.currentSessionId,
+        deviceFingerprint: deviceFingerprint
       },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
@@ -371,13 +445,21 @@ router.post('/refresh-token', auth, async (req, res) => {
     // If we reach here, the session is valid (auth middleware passed)
     const user = req.user;
     
-    // Generate new token with same session ID
+    // Create device fingerprint for refresh-token request
+    const deviceFingerprint = crypto
+      .createHash('sha256')
+      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .digest('hex')
+      .substring(0, 16);
+
+    // Generate new token with same session ID and device fingerprint
     const token = jwt.sign(
       { 
         userId: user._id, 
         username: user.username, 
         role: user.role,
-        sessionId: user.currentSessionId
+        sessionId: user.currentSessionId,
+        deviceFingerprint: deviceFingerprint
       },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }

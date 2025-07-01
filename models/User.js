@@ -104,6 +104,16 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  deviceSessions: {
+    type: Map,
+    of: {
+      sessionId: String,
+      lastAccess: Date,
+      userAgent: String,
+      ip: String
+    },
+    default: new Map()
+  },
   resetPasswordToken: String,
   resetPasswordExpires: Date,
   pendingEmailChange: {

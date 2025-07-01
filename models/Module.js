@@ -40,6 +40,17 @@ const moduleSchema = new mongoose.Schema({
       },
       message: 'Số lượng lúa cần để mở tập phải tối thiểu là 1 🌾'
     }
+  },
+  rentBalance: {
+    type: Number,
+    default: 0,
+    min: 0,
+    validate: {
+      validator: function(value) {
+        return value >= 0;
+      },
+      message: 'Giá thuê tập phải là số không âm'
+    }
   }
 }, {
   timestamps: true
