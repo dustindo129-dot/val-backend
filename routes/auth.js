@@ -41,10 +41,10 @@ router.post('/register-admin', async (req, res) => {
 
     await user.save();
 
-    // Create device fingerprint and session ID for single-device authentication
+    // Create device fingerprint and session ID for single-device authentication (IP only)
     const deviceFingerprint = crypto
       .createHash('sha256')
-      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .update(`${req.ip || 'unknown'}`)
       .digest('hex')
       .substring(0, 16);
     
@@ -133,10 +133,10 @@ router.post('/signup', async (req, res) => {
     const savedUser = await user.save();
     console.log('User saved successfully. ID:', savedUser._id);
 
-    // Create device fingerprint and session ID for single-device authentication
+    // Create device fingerprint and session ID for single-device authentication (IP only)
     const deviceFingerprint = crypto
       .createHash('sha256')
-      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .update(`${req.ip || 'unknown'}`)
       .digest('hex')
       .substring(0, 16);
     
@@ -207,10 +207,10 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid username or password' });
     }
 
-    // Create device fingerprint based on IP and User-Agent
+    // Create device fingerprint based on IP only (allows multiple browsers on same device)
     const deviceFingerprint = crypto
       .createHash('sha256')
-      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .update(`${req.ip || 'unknown'}`)
       .digest('hex')
       .substring(0, 16);
 
@@ -356,10 +356,10 @@ router.post('/refresh', async (req, res) => {
       return res.status(401).json({ message: 'User not found' });
     }
 
-    // Create device fingerprint for refresh request
+    // Create device fingerprint for refresh request (IP only)
     const deviceFingerprint = crypto
       .createHash('sha256')
-      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .update(`${req.ip || 'unknown'}`)
       .digest('hex')
       .substring(0, 16);
 
@@ -448,7 +448,7 @@ router.post('/refresh-token', auth, async (req, res) => {
     // Create device fingerprint for refresh-token request
     const deviceFingerprint = crypto
       .createHash('sha256')
-      .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+      .update(`${req.ip || 'unknown'}`)
       .digest('hex')
       .substring(0, 16);
 

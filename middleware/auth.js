@@ -50,15 +50,15 @@ export const auth = async (req, res, next) => {
         // Extract device fingerprint from current request
         const currentDeviceFingerprint = require('crypto')
           .createHash('sha256')
-          .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+          .update(`${req.ip || 'unknown'}`)
           .digest('hex')
           .substring(0, 16);
         
-        // Check if this is the same device
+        // Check if this is the same device (now based on IP only)
         const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
         const isSameDevice = tokenDeviceFingerprint === currentDeviceFingerprint;
         
-        // If it's not the same device, do strict session validation
+        // If it's not the same device (different IP), do strict session validation
         if (!isSameDevice && user.currentSessionId !== decoded.sessionId) {
           return res.status(401).json({ 
             message: 'Session invalidated - logged in from another device',
@@ -66,7 +66,8 @@ export const auth = async (req, res, next) => {
           });
         }
         
-        // If it's the same device but different session, be more lenient
+        // If it's the same device (same IP) but different session, be more lenient
+        // This allows multiple browsers on the same device
         if (isSameDevice && user.currentSessionId !== decoded.sessionId) {
           // Check if the session is reasonably recent (within last 24 hours)
           const tokenIssueTime = decoded.iat * 1000; // Convert to milliseconds
@@ -195,7 +196,7 @@ export const optionalAuth = async (req, res, next) => {
         // Extract device fingerprint from current request
         const currentDeviceFingerprint = require('crypto')
           .createHash('sha256')
-          .update(`${req.ip || 'unknown'}-${req.headers['user-agent'] || 'unknown'}`)
+          .update(`${req.ip || 'unknown'}`)
           .digest('hex')
           .substring(0, 16);
         
