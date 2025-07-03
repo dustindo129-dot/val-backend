@@ -1140,7 +1140,7 @@ router.patch('/:moduleId/rent-balance', auth, admin, async (req, res) => {
 });
 
 /**
- * Rent a module for 24 hours
+ * Rent a module for 52 hours
  * @route POST /api/modules/:moduleId/rent
  */
 router.post('/:moduleId/rent', auth, async (req, res) => {
@@ -1153,16 +1153,16 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
 
     // Get module with novel information
     const module = await Module.findById(moduleId)
-      .populate('novelId', 'availableForRent novelBalance novelBudget')
+      .populate('novelId', 'novelBalance novelBudget')
       .session(session);
 
     if (!module) {
       return res.status(404).json({ message: 'Module not found' });
     }
 
-    // Check if novel is available for rent
-    if (!module.novelId.availableForRent) {
-      return res.status(400).json({ message: 'Novel is not available for rent' });
+    // Check if module is in rent mode (module-level rental control)
+    if (module.mode !== 'rent') {
+      return res.status(400).json({ message: 'Module is not available for rent' });
     }
 
     // Check if module has paid content (either paid mode or has paid chapters)
@@ -1217,9 +1217,9 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
     novel.novelBudget += module.rentBalance;
     await novel.save({ session });
 
-    // Create rental record with explicit endTime (24 hours from now)
+    // Create rental record with explicit endTime (52 hours from now)
     const startTime = new Date();
-    const endTime = new Date(startTime.getTime() + (24 * 60 * 60 * 1000)); // 24 hours from start
+    const endTime = new Date(startTime.getTime() + (52 * 60 * 60 * 1000)); // 52 hours from start
     
     const rental = new ModuleRental({
       userId: userId,
@@ -1236,7 +1236,7 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
       novelId: novel._id,
       userId: userId,
       amount: module.rentBalance,
-      note: `Thuê ${module.title} trong 24h`,
+      note: `Thuê ${module.title} trong 52h`,
       budgetAfter: novel.novelBudget,
       balanceAfter: novel.novelBalance,
       type: 'user'
