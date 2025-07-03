@@ -91,6 +91,21 @@ const router = express.Router();
 // Query deduplication cache to prevent multiple identical requests
 const pendingQueries = new Map();
 
+// Cache for cleanup operations to avoid running them too frequently
+let lastCleanupTime = 0;
+const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Runs cleanup if enough time has passed since last cleanup
+ */
+const runCleanupIfNeeded = async () => {
+  const now = Date.now();
+  if (now - lastCleanupTime > CLEANUP_INTERVAL) {
+    await ModuleRental.cleanupExpiredRentals();
+    lastCleanupTime = now;
+  }
+};
+
 /**
  * Search modules with novel information
  * @route GET /api/modules/search
@@ -1296,8 +1311,8 @@ router.get('/rentals/active', auth, async (req, res) => {
   try {
     const userId = req.user._id;
 
-    // Cleanup expired rentals first
-    await ModuleRental.cleanupExpiredRentals();
+    // Cleanup expired rentals if needed (cached to avoid frequent calls)
+    await runCleanupIfNeeded();
 
     const rentals = await ModuleRental.findActiveRentalsForUser(userId)
       .populate('moduleId', 'title illustration rentBalance')
@@ -1389,8 +1404,8 @@ router.get('/:novelId/rental-counts', auth, async (req, res) => {
       }
     }
 
-    // Cleanup expired rentals first
-    await ModuleRental.cleanupExpiredRentals();
+    // Cleanup expired rentals if needed (cached to avoid frequent calls)
+    await runCleanupIfNeeded();
 
     // Get all modules for this novel
     const modules = await Module.find({ novelId }).select('_id').lean();

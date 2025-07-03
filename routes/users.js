@@ -343,6 +343,9 @@ router.put('/:displayNameSlug/intro', auth, async (req, res) => {
     user.intro = intro || '';
     await user.save();
 
+    // Clear user resolution cache since user data changed
+    clearUserResolutionCache(req.user._id);
+
     res.json({ 
       intro: user.intro
     });
