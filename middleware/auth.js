@@ -58,41 +58,34 @@ export const auth = async (req, res, next) => {
         const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
         const isSameDevice = tokenDeviceFingerprint === currentDeviceFingerprint;
         
-        // If it's not the same device (different IP), do strict session validation
-        if (!isSameDevice && user.currentSessionId !== decoded.sessionId) {
+        // MODIFIED: Allow multiple device logins - only check session age, not device matching
+        // This allows users to be logged in from multiple devices simultaneously
+        
+        // Check if the session is reasonably recent (within last 24 hours)
+        const tokenIssueTime = decoded.iat * 1000; // Convert to milliseconds
+        const now = Date.now();
+        const sessionAge = now - tokenIssueTime;
+        const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
+        
+        if (sessionAge > maxSessionAge) {
           return res.status(401).json({ 
-            message: 'Session invalidated - logged in from another device',
-            code: 'SESSION_INVALIDATED'
+            message: 'Session expired - please login again',
+            code: 'SESSION_EXPIRED'
           });
         }
         
-        // If it's the same device (same IP) but different session, be more lenient
-        // This allows multiple browsers on the same device
-        if (isSameDevice && user.currentSessionId !== decoded.sessionId) {
-          // Check if the session is reasonably recent (within last 24 hours)
-          const tokenIssueTime = decoded.iat * 1000; // Convert to milliseconds
-          const now = Date.now();
-          const sessionAge = now - tokenIssueTime;
-          const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
-          
-          if (sessionAge > maxSessionAge) {
-            return res.status(401).json({ 
-              message: 'Session expired - please login again',
-              code: 'SESSION_EXPIRED'
-            });
+        // Optional: Log multi-device usage for monitoring (but don't block)
+        if (!isSameDevice) {
+          const logKey = `multi_device_${user._id}_${decoded.sessionId}`;
+          if (!global.multiDeviceLogs) {
+            global.multiDeviceLogs = new Map();
           }
           
-          // Allow the request but only log once per user per session to reduce noise
-          const logKey = `session_mismatch_${user._id}_${decoded.sessionId}`;
-          if (!global.sessionMismatchLogs) {
-            global.sessionMismatchLogs = new Map();
-          }
-          
-          const lastLogged = global.sessionMismatchLogs.get(logKey);
+          const lastLogged = global.multiDeviceLogs.get(logKey);
           // Only log once every 5 minutes per user per session
           if (!lastLogged || (now - lastLogged) > 5 * 60 * 1000) {
-            console.log(`Allowing same-device session mismatch for user ${user.username} from ${req.ip}`);
-            global.sessionMismatchLogs.set(logKey, now);
+            console.log(`Multi-device login: user ${user.username} from ${req.ip} (different from registered device)`);
+            global.multiDeviceLogs.set(logKey, now);
           }
         }
       }

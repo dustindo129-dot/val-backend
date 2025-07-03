@@ -368,27 +368,25 @@ router.post('/refresh', async (req, res) => {
       const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
       const isSameDevice = tokenDeviceFingerprint === deviceFingerprint;
       
-      // If not same device, do strict validation
-      if (!isSameDevice && user.currentSessionId !== decoded.sessionId) {
+      // MODIFIED: Allow multiple device logins - only check session age, not device matching
+      // This allows users to refresh tokens from multiple devices simultaneously
+      
+      // Check if the session is reasonably recent (within last 24 hours)
+      const tokenIssueTime = decoded.iat * 1000;
+      const now = Date.now();
+      const sessionAge = now - tokenIssueTime;
+      const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
+      
+      if (sessionAge > maxSessionAge) {
         return res.status(401).json({ 
-          message: 'Session invalidated - logged in from another device',
-          code: 'SESSION_INVALIDATED'
+          message: 'Session expired - please login again',
+          code: 'SESSION_EXPIRED'
         });
       }
       
-      // If same device but different session, check age
-      if (isSameDevice && user.currentSessionId !== decoded.sessionId) {
-        const tokenIssueTime = decoded.iat * 1000;
-        const now = Date.now();
-        const sessionAge = now - tokenIssueTime;
-        const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
-        
-        if (sessionAge > maxSessionAge) {
-          return res.status(401).json({ 
-            message: 'Session expired - please login again',
-            code: 'SESSION_EXPIRED'
-          });
-        }
+      // Optional: Log multi-device token refresh for monitoring (but don't block)
+      if (!isSameDevice) {
+        console.log(`Multi-device token refresh: user ${user.username} from ${req.ip} (different from registered device)`);
       }
     }
 
