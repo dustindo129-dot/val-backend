@@ -2294,7 +2294,7 @@ router.patch("/:id/rental", auth, async (req, res) => {
     clearNovelCaches();
     
     res.json({ 
-      message: availableForRent ? 'Đã bật chế độ cho thuê' : 'Đã tắt chế độ cho thuê',
+              message: availableForRent ? 'Đã bật chế độ mở tạm thời' : 'Đã tắt chế độ mở tạm thời',
       availableForRent: novel.availableForRent 
     });
   } catch (err) {

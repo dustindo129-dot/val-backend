@@ -1124,7 +1124,7 @@ router.patch('/:moduleId/rent-balance', auth, admin, async (req, res) => {
 
     // Validate rent balance
     if (typeof rentBalance !== 'number' || rentBalance < 0) {
-      return res.status(400).json({ message: 'Giá thuê phải là số không âm' });
+      return res.status(400).json({ message: 'Giá mở tạm thời phải là số không âm' });
     }
 
     const module = await Module.findByIdAndUpdate(
@@ -1154,7 +1154,7 @@ router.patch('/:moduleId/rent-balance', auth, admin, async (req, res) => {
 });
 
 /**
- * Rent a module for 52 hours
+ * Rent a module for 1 week
  * @route POST /api/modules/:moduleId/rent
  */
 router.post('/:moduleId/rent', auth, async (req, res) => {
@@ -1201,7 +1201,7 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
     const existingRental = await ModuleRental.findActiveRentalForUserModule(userId, moduleId);
     if (existingRental) {
       return res.status(400).json({ 
-        message: 'Bạn đã thuê module này rồi',
+        message: 'Bạn đã mở tạm thời tập này rồi',
         rental: {
           endTime: existingRental.endTime,
           timeRemaining: Math.max(0, existingRental.endTime - new Date())
@@ -1231,9 +1231,9 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
     novel.novelBudget += module.rentBalance;
     await novel.save({ session });
 
-    // Create rental record with explicit endTime (52 hours from now)
+    // Create rental record with explicit endTime (1 week from now)
     const startTime = new Date();
-    const endTime = new Date(startTime.getTime() + (52 * 60 * 60 * 1000)); // 52 hours from start
+    const endTime = new Date(startTime.getTime() + (7 * 24 * 60 * 60 * 1000)); // 1 week from start
     
     const rental = new ModuleRental({
       userId: userId,
@@ -1250,7 +1250,7 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
       novelId: novel._id,
       userId: userId,
       amount: module.rentBalance,
-      note: `Thuê ${module.title} trong 52h`,
+      note: `Mở tạm thời ${module.title} trong 1 tuần`,
       budgetAfter: novel.novelBudget,
       balanceAfter: novel.novelBalance,
       type: 'user'
@@ -1293,7 +1293,7 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
     console.error('Error renting module:', err);
     
     if (err.code === 11000) {
-      return res.status(400).json({ message: 'Bạn đã thuê module này rồi' });
+      return res.status(400).json({ message: 'Bạn đã mở tạm thời tập này rồi' });
     }
     
     res.status(500).json({ message: err.message });
