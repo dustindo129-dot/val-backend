@@ -1917,12 +1917,8 @@ router.put("/:id", [auth, admin], async (req, res) => {
           stillManagingNovels.forEach(otherNovel => {
             if (otherNovel.active?.pj_user) {
               otherNovel.active.pj_user.forEach(userId => {
-                // Convert both to strings for comparison
-                const userIdStr = userId.toString();
-                const isRemoved = removedFromActivePjUsers.some(removedId => removedId === userIdStr);
-                if (isRemoved) {
-                  stillManagingUserIds.add(userIdStr);
-                }
+                // Add all users who are still active pj_users in other novels
+                stillManagingUserIds.add(userId.toString());
               });
             }
           });
@@ -2127,10 +2123,8 @@ router.delete("/:id", auth, async (req, res) => {
           stillManagingNovels.forEach(otherNovel => {
             if (otherNovel.active?.pj_user) {
               otherNovel.active.pj_user.forEach(userId => {
-                const userIdStr = userId.toString();
-                if (pjUsersInDeletedNovel.includes(userIdStr)) {
-                  stillManagingUserIds.add(userIdStr);
-                }
+                // Add all users who are still active pj_users in other novels
+                stillManagingUserIds.add(userId.toString());
               });
             }
           });
