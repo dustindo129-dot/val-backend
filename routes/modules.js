@@ -702,11 +702,10 @@ router.post('/:novelId/modules', auth, async (req, res) => {
     // Save the module
     const newModule = await module.save();
     
-    // Update the novel's timestamp and view count in one operation
+    // Only increment view count, don't update timestamp to avoid affecting latest updates
     await Novel.findByIdAndUpdate(
       req.params.novelId,
       { 
-        updatedAt: new Date(),
         $inc: { 'views.total': 1 }
       }
     );
