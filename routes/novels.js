@@ -2072,6 +2072,10 @@ router.delete("/:id", auth, async (req, res) => {
     // Delete all contribution history for this novel
     await ContributionHistory.deleteMany({ novelId: novelId }).session(session);
 
+    // Delete all module rentals for this novel
+    const ModuleRental = mongoose.model('ModuleRental');
+    await ModuleRental.deleteMany({ novelId: novelId }).session(session);
+
     // Delete all novel transactions for this novel
     const NovelTransaction = mongoose.model('NovelTransaction');
     await NovelTransaction.deleteMany({ novel: novelId }).session(session);
