@@ -99,21 +99,15 @@ router.get('/transactions', auth, async (req, res) => {
       return res.status(403).json({ message: 'Chỉ admin mới có thể xem tất cả giao dịch' });
     }
     
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const skip = (page - 1) * limit;
+    // Optional pagination - only apply if page/limit are specified
+    const page = parseInt(req.query.page);
+    const limit = parseInt(req.query.limit);
+    const usePagination = page && limit;
     
-    // Use aggregation pipeline for better performance
-    const transactions = await TopUpAdmin.aggregate([
-      {
-        $sort: { createdAt: -1 }
-      },
-      {
-        $skip: skip
-      },
-      {
-        $limit: limit
-      },
+    // Build aggregation pipeline
+    const pipeline = [
+      { $sort: { createdAt: -1 } },
+      ...(usePagination ? [{ $skip: (page - 1) * limit }, { $limit: limit }] : []),
       {
         $lookup: {
           from: 'users',
@@ -141,32 +135,34 @@ router.get('/transactions', auth, async (req, res) => {
           pipeline: [{ $project: { username: 1, displayName: 1 } }]
         }
       },
-      {
-        $unwind: '$user'
-      },
-      {
-        $unwind: '$admin'
-      },
+      { $unwind: '$user' },
+      { $unwind: '$admin' },
       {
         $unwind: {
           path: '$revokedBy',
           preserveNullAndEmptyArrays: true
         }
       }
-    ]);
+    ];
     
-    // Get total count for pagination
-    const total = await TopUpAdmin.countDocuments();
+    // Execute aggregation
+    const transactions = await TopUpAdmin.aggregate(pipeline);
     
-    res.json({
-      transactions,
-      pagination: {
-        page,
-        limit,
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    });
+    // Return with or without pagination info
+    if (usePagination) {
+      const total = await TopUpAdmin.countDocuments();
+      res.json({
+        transactions,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      });
+    } else {
+      res.json(transactions);
+    }
   } catch (error) {
     console.error('Failed to fetch transactions:', error);
     res.status(500).json({ message: 'Lỗi khi tải lại giao dịch' });
@@ -335,26 +331,20 @@ router.get('/completed-requests', auth, async (req, res) => {
       return res.status(403).json({ message: 'Truy cập bị từ chối' });
     }
     
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const skip = (page - 1) * limit;
+    // Optional pagination - only apply if page/limit are specified
+    const page = parseInt(req.query.page);
+    const limit = parseInt(req.query.limit);
+    const usePagination = page && limit;
     
-    // Use aggregation pipeline for better performance
-    const completedRequests = await TopUpRequest.aggregate([
+    // Build aggregation pipeline
+    const pipeline = [
       {
         $match: { 
           status: { $in: ['Completed', 'Failed'] } 
         }
       },
-      {
-        $sort: { completedAt: -1 }
-      },
-      {
-        $skip: skip
-      },
-      {
-        $limit: limit
-      },
+      { $sort: { completedAt: -1 } },
+      ...(usePagination ? [{ $skip: (page - 1) * limit }, { $limit: limit }] : []),
       {
         $lookup: {
           from: 'users',
@@ -373,16 +363,17 @@ router.get('/completed-requests', auth, async (req, res) => {
           pipeline: [{ $project: { username: 1, displayName: 1 } }]
         }
       },
-      {
-        $unwind: '$user'
-      },
+      { $unwind: '$user' },
       {
         $unwind: {
           path: '$adminId',
           preserveNullAndEmptyArrays: true
         }
       }
-    ]);
+    ];
+    
+    // Execute aggregation
+    const completedRequests = await TopUpRequest.aggregate(pipeline);
     
     res.json(completedRequests);
   } catch (error) {
@@ -452,7 +443,97 @@ router.get('/dashboard-data', auth, async (req, res) => {
       return res.status(403).json({ message: 'Chỉ admin mới có thể xem dashboard' });
     }
     
-    const recentTransactionsLimit = parseInt(req.query.recentLimit) || 20;
+    // Allow fetching all records if limit is 0 or 'all'
+    const recentTransactionsLimit = req.query.recentLimit === 'all' || parseInt(req.query.recentLimit) === 0 
+      ? null 
+      : parseInt(req.query.recentLimit) || 100; // Default to 100 instead of 20
+    
+    // Build aggregation pipeline for admin transactions
+    const adminTransactionsPipeline = [
+      { $sort: { createdAt: -1 } },
+      ...(recentTransactionsLimit ? [{ $limit: recentTransactionsLimit }] : []),
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user',
+          foreignField: '_id',
+          as: 'user',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'admin',
+          foreignField: '_id',
+          as: 'admin',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'revokedBy',
+          foreignField: '_id',
+          as: 'revokedBy',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      { $unwind: '$user' },
+      { $unwind: '$admin' },
+      {
+        $unwind: {
+          path: '$revokedBy',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      {
+        $addFields: {
+          transactionType: 'admin'
+        }
+      }
+    ];
+    
+    // Build aggregation pipeline for completed requests
+    const completedRequestsPipeline = [
+      {
+        $match: { 
+          status: { $in: ['Completed', 'Failed'] } 
+        }
+      },
+      { $sort: { completedAt: -1 } },
+      ...(recentTransactionsLimit ? [{ $limit: recentTransactionsLimit }] : []),
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user',
+          foreignField: '_id',
+          as: 'user',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'adminId',
+          foreignField: '_id',
+          as: 'adminId',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      { $unwind: '$user' },
+      {
+        $unwind: {
+          path: '$adminId',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      {
+        $addFields: {
+          transactionType: 'user'
+        }
+      }
+    ];
     
     // Execute all queries in parallel for better performance
     const [
@@ -460,94 +541,8 @@ router.get('/dashboard-data', auth, async (req, res) => {
       recentCompletedRequests,
       pendingRequests
     ] = await Promise.all([
-      // Recent admin transactions (limited)
-      TopUpAdmin.aggregate([
-        { $sort: { createdAt: -1 } },
-        { $limit: recentTransactionsLimit },
-        {
-          $lookup: {
-            from: 'users',
-            localField: 'user',
-            foreignField: '_id',
-            as: 'user',
-            pipeline: [{ $project: { username: 1, displayName: 1 } }]
-          }
-        },
-        {
-          $lookup: {
-            from: 'users',
-            localField: 'admin',
-            foreignField: '_id',
-            as: 'admin',
-            pipeline: [{ $project: { username: 1, displayName: 1 } }]
-          }
-        },
-        {
-          $lookup: {
-            from: 'users',
-            localField: 'revokedBy',
-            foreignField: '_id',
-            as: 'revokedBy',
-            pipeline: [{ $project: { username: 1, displayName: 1 } }]
-          }
-        },
-        { $unwind: '$user' },
-        { $unwind: '$admin' },
-        {
-          $unwind: {
-            path: '$revokedBy',
-            preserveNullAndEmptyArrays: true
-          }
-        },
-        {
-          $addFields: {
-            transactionType: 'admin'
-          }
-        }
-      ]),
-      
-      // Recent completed requests (limited)
-      TopUpRequest.aggregate([
-        {
-          $match: { 
-            status: { $in: ['Completed', 'Failed'] } 
-          }
-        },
-        { $sort: { completedAt: -1 } },
-        { $limit: recentTransactionsLimit },
-        {
-          $lookup: {
-            from: 'users',
-            localField: 'user',
-            foreignField: '_id',
-            as: 'user',
-            pipeline: [{ $project: { username: 1, displayName: 1 } }]
-          }
-        },
-        {
-          $lookup: {
-            from: 'users',
-            localField: 'adminId',
-            foreignField: '_id',
-            as: 'adminId',
-            pipeline: [{ $project: { username: 1, displayName: 1 } }]
-          }
-        },
-        { $unwind: '$user' },
-        {
-          $unwind: {
-            path: '$adminId',
-            preserveNullAndEmptyArrays: true
-          }
-        },
-        {
-          $addFields: {
-            transactionType: 'user'
-          }
-        }
-      ]),
-      
-      // Pending requests
+      TopUpAdmin.aggregate(adminTransactionsPipeline),
+      TopUpRequest.aggregate(completedRequestsPipeline),
       TopUpRequest.aggregate([
         {
           $match: { status: 'Pending' }
@@ -573,7 +568,7 @@ router.get('/dashboard-data', auth, async (req, res) => {
     ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     
     res.json({
-      recentTransactions: allRecentTransactions.slice(0, recentTransactionsLimit),
+      recentTransactions: allRecentTransactions,
       pendingRequests: pendingRequests,
       stats: {
         totalAdminTransactions: recentAdminTransactions.length,
