@@ -89,7 +89,7 @@ router.post('/', auth, async (req, res) => {
 });
 
 /**
- * Get all top-up transactions (Admin only)
+ * Get all top-up transactions (Admin only) - OPTIMIZED
  * @route GET /api/topup-admin/transactions
  */
 router.get('/transactions', auth, async (req, res) => {
@@ -99,12 +99,74 @@ router.get('/transactions', auth, async (req, res) => {
       return res.status(403).json({ message: 'Chỉ admin mới có thể xem tất cả giao dịch' });
     }
     
-    const transactions = await TopUpAdmin.find()
-      .populate('user', 'username displayName')
-      .populate('admin', 'username displayName')
-      .sort({ createdAt: -1 });
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
     
-    res.json(transactions);
+    // Use aggregation pipeline for better performance
+    const transactions = await TopUpAdmin.aggregate([
+      {
+        $sort: { createdAt: -1 }
+      },
+      {
+        $skip: skip
+      },
+      {
+        $limit: limit
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user',
+          foreignField: '_id',
+          as: 'user',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'admin',
+          foreignField: '_id',
+          as: 'admin',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'revokedBy',
+          foreignField: '_id',
+          as: 'revokedBy',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      {
+        $unwind: '$user'
+      },
+      {
+        $unwind: '$admin'
+      },
+      {
+        $unwind: {
+          path: '$revokedBy',
+          preserveNullAndEmptyArrays: true
+        }
+      }
+    ]);
+    
+    // Get total count for pagination
+    const total = await TopUpAdmin.countDocuments();
+    
+    res.json({
+      transactions,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     console.error('Failed to fetch transactions:', error);
     res.status(500).json({ message: 'Lỗi khi tải lại giao dịch' });
@@ -263,7 +325,7 @@ router.post('/process-request/:requestId', auth, async (req, res) => {
 });
 
 /**
- * Get all completed/failed top-up requests (Admin only)
+ * Get all completed/failed top-up requests (Admin only) - OPTIMIZED
  * @route GET /api/topup-admin/completed-requests
  */
 router.get('/completed-requests', auth, async (req, res) => {
@@ -273,12 +335,54 @@ router.get('/completed-requests', auth, async (req, res) => {
       return res.status(403).json({ message: 'Truy cập bị từ chối' });
     }
     
-    const completedRequests = await TopUpRequest.find({ 
-      status: { $in: ['Completed', 'Failed'] } 
-    })
-      .populate('user', 'username displayName')
-      .populate('adminId', 'username displayName')
-      .sort({ completedAt: -1 });
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+    
+    // Use aggregation pipeline for better performance
+    const completedRequests = await TopUpRequest.aggregate([
+      {
+        $match: { 
+          status: { $in: ['Completed', 'Failed'] } 
+        }
+      },
+      {
+        $sort: { completedAt: -1 }
+      },
+      {
+        $skip: skip
+      },
+      {
+        $limit: limit
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user',
+          foreignField: '_id',
+          as: 'user',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'adminId',
+          foreignField: '_id',
+          as: 'adminId',
+          pipeline: [{ $project: { username: 1, displayName: 1 } }]
+        }
+      },
+      {
+        $unwind: '$user'
+      },
+      {
+        $unwind: {
+          path: '$adminId',
+          preserveNullAndEmptyArrays: true
+        }
+      }
+    ]);
     
     res.json(completedRequests);
   } catch (error) {
@@ -334,6 +438,256 @@ router.get('/search-users', auth, async (req, res) => {
   } catch (error) {
     console.error('User search failed:', error);
     res.status(500).json({ message: 'Tìm kiếm người dùng thất bại' });
+  }
+});
+
+/**
+ * Get all TopUp management data in one request (Admin only) - OPTIMIZED
+ * @route GET /api/topup-admin/dashboard-data
+ */
+router.get('/dashboard-data', auth, async (req, res) => {
+  try {
+    // Verify user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Chỉ admin mới có thể xem dashboard' });
+    }
+    
+    const recentTransactionsLimit = parseInt(req.query.recentLimit) || 20;
+    
+    // Execute all queries in parallel for better performance
+    const [
+      recentAdminTransactions,
+      recentCompletedRequests,
+      pendingRequests
+    ] = await Promise.all([
+      // Recent admin transactions (limited)
+      TopUpAdmin.aggregate([
+        { $sort: { createdAt: -1 } },
+        { $limit: recentTransactionsLimit },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'user',
+            foreignField: '_id',
+            as: 'user',
+            pipeline: [{ $project: { username: 1, displayName: 1 } }]
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'admin',
+            foreignField: '_id',
+            as: 'admin',
+            pipeline: [{ $project: { username: 1, displayName: 1 } }]
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'revokedBy',
+            foreignField: '_id',
+            as: 'revokedBy',
+            pipeline: [{ $project: { username: 1, displayName: 1 } }]
+          }
+        },
+        { $unwind: '$user' },
+        { $unwind: '$admin' },
+        {
+          $unwind: {
+            path: '$revokedBy',
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $addFields: {
+            transactionType: 'admin'
+          }
+        }
+      ]),
+      
+      // Recent completed requests (limited)
+      TopUpRequest.aggregate([
+        {
+          $match: { 
+            status: { $in: ['Completed', 'Failed'] } 
+          }
+        },
+        { $sort: { completedAt: -1 } },
+        { $limit: recentTransactionsLimit },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'user',
+            foreignField: '_id',
+            as: 'user',
+            pipeline: [{ $project: { username: 1, displayName: 1 } }]
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'adminId',
+            foreignField: '_id',
+            as: 'adminId',
+            pipeline: [{ $project: { username: 1, displayName: 1 } }]
+          }
+        },
+        { $unwind: '$user' },
+        {
+          $unwind: {
+            path: '$adminId',
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $addFields: {
+            transactionType: 'user'
+          }
+        }
+      ]),
+      
+      // Pending requests
+      TopUpRequest.aggregate([
+        {
+          $match: { status: 'Pending' }
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'user',
+            foreignField: '_id',
+            as: 'user',
+            pipeline: [{ $project: { username: 1, displayName: 1 } }]
+          }
+        },
+        { $unwind: '$user' }
+      ])
+    ]);
+    
+    // Combine recent transactions (admin + user) and sort by date
+    const allRecentTransactions = [
+      ...recentAdminTransactions,
+      ...recentCompletedRequests
+    ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    
+    res.json({
+      recentTransactions: allRecentTransactions.slice(0, recentTransactionsLimit),
+      pendingRequests: pendingRequests,
+      stats: {
+        totalAdminTransactions: recentAdminTransactions.length,
+        totalCompletedRequests: recentCompletedRequests.length,
+        totalPendingRequests: pendingRequests.length
+      }
+    });
+  } catch (error) {
+    console.error('Failed to fetch dashboard data:', error);
+    res.status(500).json({ message: 'Lỗi khi tải dữ liệu dashboard' });
+  }
+});
+
+/**
+ * Revoke an admin top-up transaction (Admin only)
+ * @route POST /api/topup-admin/revoke-transaction/:transactionId
+ */
+router.post('/revoke-transaction/:transactionId', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    // Verify user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Chỉ admin mới có thể thu hồi giao dịch' });
+    }
+    
+    const { transactionId } = req.params;
+    
+    // Validate transaction ID
+    if (!mongoose.Types.ObjectId.isValid(transactionId)) {
+      return res.status(400).json({ message: 'ID giao dịch không hợp lệ' });
+    }
+    
+    // Find the admin transaction
+    const transaction = await TopUpAdmin.findById(transactionId)
+      .populate('user', 'username displayName balance')
+      .session(session);
+    
+    if (!transaction) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Giao dịch không tồn tại' });
+    }
+    
+    // Check if transaction is already revoked
+    if (transaction.status === 'Revoked') {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'Giao dịch đã được thu hồi trước đó' });
+    }
+    
+    // Check if transaction is eligible for revocation (only completed admin transactions)
+    if (transaction.status !== 'Completed') {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'Chỉ có thể thu hồi giao dịch đã hoàn thành' });
+    }
+    
+    // Get the user
+    const user = await User.findById(transaction.user._id).session(session);
+    if (!user) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'Người dùng không tồn tại' });
+    }
+    
+    // Calculate new balance (minimum 0)
+    const currentBalance = user.balance || 0;
+    const amountToSubtract = transaction.amount;
+    const newBalance = Math.max(0, currentBalance - amountToSubtract);
+    const actualSubtracted = currentBalance - newBalance;
+    
+    // Update user balance
+    user.balance = newBalance;
+    await user.save({ session });
+    
+    // Mark transaction as revoked
+    transaction.status = 'Revoked';
+    transaction.revokedAt = new Date();
+    transaction.revokedBy = req.user._id;
+    transaction.notes = `Thu hồi bởi admin`;
+    await transaction.save({ session });
+    
+    // Clear user cache to ensure fresh balance is returned by API calls
+    clearUserCache(user._id, user.username);
+   
+    // Record revocation in UserTransaction ledger
+    await createTransaction({
+      userId: user._id,
+      amount: -actualSubtracted, // Negative amount to indicate subtraction
+      type: 'admin_topup',
+      description: `Thu hồi giao dịch phát 🌾 bởi admin (Giao dịch gốc: ${transactionId})`,
+      sourceId: transaction._id,
+      sourceModel: 'TopUpAdmin',
+      performedById: req.user._id,
+      balanceAfter: newBalance
+    }, session);
+    
+    await session.commitTransaction();
+    
+    res.json({ 
+      message: 'Giao dịch đã được thu hồi thành công',
+      transaction: {
+        id: transaction._id,
+        originalAmount: amountToSubtract,
+        actualSubtracted: actualSubtracted,
+        userCurrentBalance: newBalance,
+        revokedAt: transaction.revokedAt,
+        revokedBy: req.user.username
+      }
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Thu hồi giao dịch thất bại:', error);
+    res.status(500).json({ message: 'Thu hồi giao dịch thất bại' });
+  } finally {
+    session.endSession();
   }
 });
 

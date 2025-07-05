@@ -22,11 +22,18 @@ const topUpAdminSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['Pending', 'Completed', 'Failed'],
+    enum: ['Pending', 'Completed', 'Failed', 'Revoked'],
     default: 'Completed'
   },
   notes: {
     type: String
+  },
+  revokedAt: {
+    type: Date
+  },
+  revokedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
   }
 }, {
   timestamps: true
@@ -36,6 +43,7 @@ const topUpAdminSchema = new mongoose.Schema({
 topUpAdminSchema.index({ user: 1, createdAt: -1 });
 topUpAdminSchema.index({ admin: 1, createdAt: -1 });
 topUpAdminSchema.index({ status: 1 });
+topUpAdminSchema.index({ revokedBy: 1, revokedAt: -1 });
 
 const TopUpAdmin = mongoose.model('TopUpAdmin', topUpAdminSchema);
 

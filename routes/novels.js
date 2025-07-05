@@ -19,6 +19,40 @@ import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import { getCachedUserByUsername, clearUserCache } from '../utils/userCache.js';
 import { populateStaffNames } from '../utils/populateStaffNames.js';
 
+/**
+ * Import the calculateAndUpdateModuleRentBalance function from modules.js
+ * This function recalculates the rentBalance for a module based on its paid chapters
+ */
+const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => {
+  try {
+    // Get all chapters for this module that are in 'paid' mode
+    const paidChapters = await Chapter.find({ 
+      moduleId: moduleId, 
+      mode: 'paid' 
+    })
+    .select('chapterBalance')
+    .session(session)
+    .lean();
+    
+    // Calculate total rent balance (sum of all paid chapter balances)
+    const totalRentBalance = paidChapters.reduce((sum, chapter) => {
+      return sum + (chapter.chapterBalance || 0);
+    }, 0);
+    
+    // Update the module's rent balance
+    await Module.findByIdAndUpdate(
+      moduleId,
+      { rentBalance: totalRentBalance },
+      { session }
+    );
+    
+    return totalRentBalance;
+  } catch (error) {
+    console.error('Error calculating module rent balance:', error);
+    throw error;
+  }
+};
+
 const router = express.Router();
 
 // Query deduplication cache to prevent multiple identical requests
@@ -2870,6 +2904,7 @@ async function performAutoUnlockInTransaction(novelId, session) {
     let remainingBudget = novel.novelBudget;
     let unlockedContent = [];
     let shouldUpdateTimestamp = false;
+    let modulesNeedingRentBalanceUpdate = new Set(); // Track modules that need rentBalance recalculation
 
     for (const module of modules) {
       // If module is paid or undefined (treat undefined as paid), try to unlock it first
@@ -2905,8 +2940,9 @@ async function performAutoUnlockInTransaction(novelId, session) {
         }
       }
 
-      // If module is published (free or just unlocked), check its chapters in order
-      if (module.mode === 'published') {
+      // If module is published (free or just unlocked) OR in rent mode, check its chapters in order
+      // Rent mode modules can still have individual paid chapters that need unlocking
+      if (module.mode === 'published' || module.mode === 'rent') {
         // Get chapters for this module, sorted by order
         const chapters = await Chapter.find({ moduleId: module._id })
           .select('title order mode chapterBalance')
@@ -2924,6 +2960,10 @@ async function performAutoUnlockInTransaction(novelId, session) {
               await Chapter.findByIdAndUpdate(chapter._id, { mode: 'published' }, { session });
               remainingBudget -= chapter.chapterBalance;
               shouldUpdateTimestamp = true;
+              
+              // Mark this module for rentBalance recalculation
+              modulesNeedingRentBalanceUpdate.add(module._id.toString());
+              
               unlockedContent.push({ 
                 type: 'chapter', 
                 title: chapter.title, 
@@ -2957,6 +2997,11 @@ async function performAutoUnlockInTransaction(novelId, session) {
           break;
         }
       }
+    }
+
+    // Recalculate rentBalance for modules that had chapters unlocked
+    for (const moduleId of modulesNeedingRentBalanceUpdate) {
+      await calculateAndUpdateModuleRentBalance(moduleId, session);
     }
 
     // Update novel budget and timestamp if anything was unlocked
@@ -3054,6 +3099,9 @@ export async function checkAndUnlockContent(novelId) {
   // NOTE: This function is deprecated for contribution flows.
   // The contribution route now uses performAutoUnlockInTransaction for atomic operations.
   // This function is kept for backward compatibility with other potential callers.
+  // 
+  // IMPORTANT: This function now automatically recalculates rentBalance for modules
+  // when chapters are switched from paid to published during the unlock process.
   
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -3969,6 +4017,62 @@ router.get("/:id/dashboard", async (req, res) => {
   }
 });
 
+/**
+ * Manual auto-unlock for admins
+ * @route POST /api/novels/:id/auto-unlock
+ */
+router.post("/:id/auto-unlock", auth, async (req, res) => {
+  try {
+    // Only admins can manually trigger auto-unlock
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can manually trigger auto-unlock' });
+    }
 
+    const novelId = req.params.id;
+    
+    // Validate ObjectId format before proceeding
+    if (!mongoose.Types.ObjectId.isValid(novelId)) {
+      return res.status(400).json({ message: "Invalid novel ID format" });
+    }
+
+    // Check if novel exists
+    const novel = await Novel.findById(novelId);
+    if (!novel) {
+      return res.status(404).json({ message: "Novel not found" });
+    }
+
+    // Check if there's budget to unlock
+    if (novel.novelBudget <= 0) {
+      return res.status(400).json({ message: "Không có kho lúa để mở khóa" });
+    }
+
+    // Use the existing checkAndUnlockContent function
+    const result = await checkAndUnlockContent(novelId);
+
+    // Clear novel caches after manual unlock
+    clearNovelCaches();
+
+    // Notify clients of the update
+    notifyAllClients('novel_budget_updated', { 
+      novelId, 
+      newBudget: result.finalBudget,
+      timestamp: new Date().toISOString(),
+      reason: 'manual_unlock'
+    });
+
+    res.json({
+      success: true,
+      message: result.unlockedContent.length > 0 
+        ? `Đã mở khóa ${result.unlockedContent.length} nội dung thành công!`
+        : 'Không có nội dung nào có thể mở khóa với số lúa hiện tại.',
+      unlockedContent: result.unlockedContent,
+      finalBudget: result.finalBudget
+    });
+
+  } catch (err) {
+    console.error("Error in manual auto-unlock:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
 
 export default router;
