@@ -2904,7 +2904,7 @@ async function performAutoUnlockInTransaction(novelId, session) {
     let remainingBudget = novel.novelBudget;
     let unlockedContent = [];
     let shouldUpdateTimestamp = false;
-    let modulesNeedingRentBalanceUpdate = new Set(); // Track modules that need rentBalance recalculation
+    // REMOVED: let modulesNeedingRentBalanceUpdate = new Set(); // Track modules that need rentBalance recalculation
 
     for (const module of modules) {
       // If module is paid or undefined (treat undefined as paid), try to unlock it first
@@ -2961,8 +2961,8 @@ async function performAutoUnlockInTransaction(novelId, session) {
               remainingBudget -= chapter.chapterBalance;
               shouldUpdateTimestamp = true;
               
-              // Mark this module for rentBalance recalculation
-              modulesNeedingRentBalanceUpdate.add(module._id.toString());
+              // REMOVED: Mark this module for rentBalance recalculation
+              // REMOVED: modulesNeedingRentBalanceUpdate.add(module._id.toString());
               
               unlockedContent.push({ 
                 type: 'chapter', 
@@ -2999,10 +2999,10 @@ async function performAutoUnlockInTransaction(novelId, session) {
       }
     }
 
-    // Recalculate rentBalance for modules that had chapters unlocked
-    for (const moduleId of modulesNeedingRentBalanceUpdate) {
-      await calculateAndUpdateModuleRentBalance(moduleId, session);
-    }
+    // REMOVED: Recalculate rentBalance for modules that had chapters unlocked
+    // REMOVED: for (const moduleId of modulesNeedingRentBalanceUpdate) {
+    // REMOVED:   await calculateAndUpdateModuleRentBalance(moduleId, session);
+    // REMOVED: }
 
     // Update novel budget and timestamp if anything was unlocked
     if (shouldUpdateTimestamp) {
