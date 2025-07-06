@@ -2999,10 +2999,32 @@ async function performAutoUnlockInTransaction(novelId, session) {
       }
     }
 
-    // REMOVED: Recalculate rentBalance for modules that had chapters unlocked
-    // REMOVED: for (const moduleId of modulesNeedingRentBalanceUpdate) {
-    // REMOVED:   await calculateAndUpdateModuleRentBalance(moduleId, session);
-    // REMOVED: }
+    // Check rent modules for auto-switching to published mode (when total paid chapter balance ≤ 200)
+    const rentModulesNeedingCheck = new Set();
+    
+    // Collect rent modules that had chapters unlocked
+    for (const module of modules) {
+      if (module.mode === 'rent') {
+        // Check if this rent module had any chapters unlocked
+        const moduleHadUnlockedChapters = unlockedContent.some(content => 
+          content.type === 'chapter' && content.moduleId.toString() === module._id.toString()
+        );
+        
+        if (moduleHadUnlockedChapters) {
+          rentModulesNeedingCheck.add(module._id.toString());
+        }
+      }
+    }
+    
+    // Check rent modules for auto-switching (only rent modules, not for rentBalance updates)
+    for (const moduleId of rentModulesNeedingCheck) {
+      try {
+        await calculateAndUpdateModuleRentBalance(moduleId, session);
+      } catch (error) {
+        console.error(`Error checking rent module ${moduleId} for auto-switching:`, error);
+        // Don't fail the entire unlock process if auto-switch check fails
+      }
+    }
 
     // Update novel budget and timestamp if anything was unlocked
     if (shouldUpdateTimestamp) {

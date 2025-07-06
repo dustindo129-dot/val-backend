@@ -13,6 +13,7 @@ import User from '../models/User.js';
 /**
  * Calculate and update rentBalance for a module
  * rentBalance = (sum of all chapterBalance of paid chapters within that module) / 10
+ * Auto-switches rent modules to published when total paid chapter balance ≤ 200
  * @param {string} moduleId - The module ID
  * @param {object} session - MongoDB session (optional)
  * @returns {Promise<number>} The calculated rentBalance
@@ -24,9 +25,9 @@ const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => 
       throw new Error(`Invalid module ID: ${moduleId}`);
     }
 
-    // Check if module exists
-    const moduleExists = await Module.exists({ _id: moduleId }).session(session);
-    if (!moduleExists) {
+    // Get module info first to check current mode
+    const module = await Module.findById(moduleId).session(session);
+    if (!module) {
       console.warn(`Module ${moduleId} not found, skipping rentBalance calculation`);
       return 0;
     }
@@ -58,13 +59,22 @@ const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => 
     // Calculate rentBalance = totalChapterBalance / 10 (rounded down)
     const calculatedRentBalance = Math.max(0, Math.floor(totalChapterBalance / 10));
 
-    // Update the module's rentBalance
+    // Prepare update data
+    const updateData = { 
+      rentBalance: calculatedRentBalance,
+      updatedAt: new Date()
+    };
+
+    // Auto-switch from rent to published if total paid chapter balance ≤ 200
+    if (module.mode === 'rent' && totalChapterBalance <= 200) {
+      updateData.mode = 'published';
+      console.log(`Auto-switching module ${moduleId} from rent to published mode (total paid chapter balance: ${totalChapterBalance} ≤ 200 🌾)`);
+    }
+
+    // Update the module's rentBalance and potentially mode
     const updatedModule = await Module.findByIdAndUpdate(
       moduleId,
-      { 
-        rentBalance: calculatedRentBalance,
-        updatedAt: new Date()
-      },
+      updateData,
       { new: true, session }
     );
 
@@ -72,7 +82,7 @@ const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => 
       throw new Error(`Failed to update module ${moduleId}`);
     }
 
-    console.log(`Updated module ${moduleId} rentBalance: ${calculatedRentBalance} 🌾 (from ${chapterCount} paid chapters totaling ${totalChapterBalance} 🌾)`);
+    console.log(`Updated module ${moduleId} rentBalance: ${calculatedRentBalance} 🌾 (from ${chapterCount} paid chapters totaling ${totalChapterBalance} 🌾)${updateData.mode ? ` - Mode changed to: ${updateData.mode}` : ''}`);
     
     return calculatedRentBalance;
   } catch (error) {
