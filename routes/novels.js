@@ -18,40 +18,13 @@ import Gift from '../models/Gift.js';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import { getCachedUserByUsername, clearUserCache } from '../utils/userCache.js';
 import { populateStaffNames } from '../utils/populateStaffNames.js';
+import { checkAndSwitchRentModuleToPublished } from './modules.js';
 
 /**
- * Import the calculateAndUpdateModuleRentBalance function from modules.js
- * This function recalculates the rentBalance for a module based on its paid chapters
+ * Import the functions from modules.js
+ * - calculateAndUpdateModuleRentBalance: For initial rentBalance calculation when module is set to rent mode
+ * - checkAndSwitchRentModuleToPublished: For checking auto-switch without recalculating rentBalance
  */
-const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => {
-  try {
-    // Get all chapters for this module that are in 'paid' mode
-    const paidChapters = await Chapter.find({ 
-      moduleId: moduleId, 
-      mode: 'paid' 
-    })
-    .select('chapterBalance')
-    .session(session)
-    .lean();
-    
-    // Calculate total rent balance (sum of all paid chapter balances)
-    const totalRentBalance = paidChapters.reduce((sum, chapter) => {
-      return sum + (chapter.chapterBalance || 0);
-    }, 0);
-    
-    // Update the module's rent balance
-    await Module.findByIdAndUpdate(
-      moduleId,
-      { rentBalance: totalRentBalance },
-      { session }
-    );
-    
-    return totalRentBalance;
-  } catch (error) {
-    console.error('Error calculating module rent balance:', error);
-    throw error;
-  }
-};
 
 const router = express.Router();
 
@@ -3019,7 +2992,7 @@ async function performAutoUnlockInTransaction(novelId, session) {
     // Check rent modules for auto-switching (only rent modules, not for rentBalance updates)
     for (const moduleId of rentModulesNeedingCheck) {
       try {
-        await calculateAndUpdateModuleRentBalance(moduleId, session);
+        await checkAndSwitchRentModuleToPublished(moduleId, session);
       } catch (error) {
         console.error(`Error checking rent module ${moduleId} for auto-switching:`, error);
         // Don't fail the entire unlock process if auto-switch check fails
@@ -3122,8 +3095,8 @@ export async function checkAndUnlockContent(novelId) {
   // The contribution route now uses performAutoUnlockInTransaction for atomic operations.
   // This function is kept for backward compatibility with other potential callers.
   // 
-  // IMPORTANT: This function now automatically recalculates rentBalance for modules
-  // when chapters are switched from paid to published during the unlock process.
+  // IMPORTANT: This function checks for auto-switching rent modules to published mode
+  // when chapters are unlocked, but does NOT recalculate rentBalance (which should remain unchanged).
   
   const session = await mongoose.startSession();
   session.startTransaction();

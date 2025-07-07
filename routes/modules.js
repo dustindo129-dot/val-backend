@@ -14,6 +14,17 @@ import User from '../models/User.js';
  * Calculate and update rentBalance for a module
  * rentBalance = (sum of all chapterBalance of paid chapters within that module) / 10
  * Auto-switches rent modules to published when total paid chapter balance ≤ 200
+ * 
+ * IMPORTANT: This function should ONLY be used when:
+ * - Initially setting a module to 'rent' mode
+ * - Adding paid chapters to a module
+ * - Removing paid chapters from a module
+ * - Moving paid chapters between modules
+ * - Admin utility for recalculation
+ * 
+ * DO NOT use this function when chapters are unlocked (changed from 'paid' to 'published').
+ * For that case, use checkAndSwitchRentModuleToPublished() instead.
+ * 
  * @param {string} moduleId - The module ID
  * @param {object} session - MongoDB session (optional)
  * @returns {Promise<number>} The calculated rentBalance
@@ -92,9 +103,74 @@ const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => 
 };
 
 /**
- * Export the function so it can be used by other route files
+ * Check if a rent module should be auto-switched to published mode
+ * This function checks if total paid chapter balance ≤ 200 and switches the module
+ * WITHOUT recalculating the rentBalance (rentBalance should remain unchanged when chapters are unlocked)
+ * @param {string} moduleId - The module ID
+ * @param {object} session - MongoDB session (optional)
+ * @returns {Promise<boolean>} Whether the module was switched to published mode
  */
-export { calculateAndUpdateModuleRentBalance };
+const checkAndSwitchRentModuleToPublished = async (moduleId, session = null) => {
+  try {
+    // Validate moduleId
+    if (!moduleId || !mongoose.Types.ObjectId.isValid(moduleId)) {
+      throw new Error(`Invalid module ID: ${moduleId}`);
+    }
+
+    // Get module info first to check current mode
+    const module = await Module.findById(moduleId).session(session);
+    if (!module || module.mode !== 'rent') {
+      // Only process rent modules
+      return false;
+    }
+
+    // Get all paid chapters in this module to check total balance
+    const paidChaptersResult = await Chapter.aggregate([
+      {
+        $match: {
+          moduleId: mongoose.Types.ObjectId.createFromHexString(moduleId),
+          mode: 'paid',
+          chapterBalance: { $gt: 0 }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalBalance: { $sum: '$chapterBalance' }
+        }
+      }
+    ]).session(session);
+
+    // Calculate total chapterBalance
+    const totalChapterBalance = paidChaptersResult.length > 0 ? 
+      (paidChaptersResult[0].totalBalance || 0) : 0;
+
+    // Auto-switch from rent to published if total paid chapter balance ≤ 200
+    if (totalChapterBalance <= 200) {
+      await Module.findByIdAndUpdate(
+        moduleId,
+        { 
+          mode: 'published',
+          updatedAt: new Date()
+        },
+        { session }
+      );
+      
+      console.log(`Auto-switched module ${moduleId} from rent to published mode (total paid chapter balance: ${totalChapterBalance} ≤ 200 🌾)`);
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error(`Error checking rent module ${moduleId} for auto-switching:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Export the new function so it can be used by other route files
+ */
+export { calculateAndUpdateModuleRentBalance, checkAndSwitchRentModuleToPublished };
 
 const router = express.Router();
 
