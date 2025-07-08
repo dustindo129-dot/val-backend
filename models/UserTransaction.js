@@ -17,7 +17,7 @@ const userTransactionSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['topup', 'admin_topup', 'request', 'contribution', 'refund', 'gift', 'other'],
+    enum: ['topup', 'admin_topup', 'request', 'contribution', 'refund', 'gift', 'rental', 'other'],
     required: true,
     index: true
   },
@@ -35,7 +35,7 @@ const userTransactionSchema = new mongoose.Schema({
   },
   sourceModel: {
     type: String,
-    enum: ['TopUpRequest', 'TopUpAdmin', 'Request', 'Contribution', 'Novel', 'GiftTransaction', null]
+    enum: ['TopUpRequest', 'TopUpAdmin', 'Request', 'Contribution', 'Novel', 'GiftTransaction', 'ModuleRental', null]
   },
   performedBy: {
     type: mongoose.Schema.Types.ObjectId,

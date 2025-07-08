@@ -2798,7 +2798,7 @@ router.post("/:id/contribute", auth, async (req, res) => {
       await session.commitTransaction();
 
       // Clear caches and notify clients after successful transaction
-      if (autoUnlockResult.unlockedContent.length > 0) {
+      if (autoUnlockResult.unlockedContent.length > 0 || autoUnlockResult.switchedModules.length > 0) {
         clearNovelCaches();
         
         // Send notifications for unlocked content
@@ -2817,6 +2817,18 @@ router.post("/:id/contribute", auth, async (req, res) => {
               chapterTitle: content.title 
             });
           }
+        });
+
+        // Send notifications for modules that switched from rent to published mode
+        autoUnlockResult.switchedModules.forEach(module => {
+          notifyAllClients('module_mode_changed', { 
+            novelId, 
+            moduleId: module._id,
+            moduleTitle: module.title,
+            oldMode: 'rent',
+            newMode: 'published',
+            reason: 'auto_switch_rent_to_published'
+          });
         });
 
         // Send additional notification if novel moved to top of latest updates
@@ -2990,9 +3002,13 @@ async function performAutoUnlockInTransaction(novelId, session) {
     }
     
     // Check rent modules for auto-switching (only rent modules, not for rentBalance updates)
+    const switchedModules = [];
     for (const moduleId of rentModulesNeedingCheck) {
       try {
-        await checkAndSwitchRentModuleToPublished(moduleId, session);
+        const switchResult = await checkAndSwitchRentModuleToPublished(moduleId, session);
+        if (switchResult.switched) {
+          switchedModules.push(switchResult.module);
+        }
       } catch (error) {
         console.error(`Error checking rent module ${moduleId} for auto-switching:`, error);
         // Don't fail the entire unlock process if auto-switch check fails
@@ -3015,7 +3031,8 @@ async function performAutoUnlockInTransaction(novelId, session) {
 
     return { 
       unlockedContent, 
-      finalBudget: remainingBudget 
+      finalBudget: remainingBudget,
+      switchedModules 
     };
 
   } catch (error) {
@@ -3106,7 +3123,7 @@ export async function checkAndUnlockContent(novelId) {
     await session.commitTransaction();
     
     // Clear caches and notify clients after successful transaction
-    if (result.unlockedContent.length > 0) {
+    if (result.unlockedContent.length > 0 || result.switchedModules.length > 0) {
       clearNovelCaches();
       
       // Send notifications for unlocked content
@@ -3125,6 +3142,18 @@ export async function checkAndUnlockContent(novelId) {
             chapterTitle: content.title 
           });
         }
+      });
+
+      // Send notifications for modules that switched from rent to published mode
+      result.switchedModules.forEach(module => {
+        notifyAllClients('module_mode_changed', { 
+          novelId, 
+          moduleId: module._id,
+          moduleTitle: module.title,
+          oldMode: 'rent',
+          newMode: 'published',
+          reason: 'auto_switch_rent_to_published'
+        });
       });
 
       // Send additional notification if novel moved to top of latest updates

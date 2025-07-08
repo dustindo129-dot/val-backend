@@ -297,4 +297,57 @@ router.get('/user-transactions', auth, async (req, res) => {
   }
 });
 
-export default router; 
+export default router;
+
+/**
+ * Create both user and novel transaction records for module rental
+ * @param {Object} rentalData - Rental transaction data
+ * @param {Object} session - Mongoose session for transaction
+ */
+export const createRentalTransactions = async (rentalData, session) => {
+  try {
+    const { 
+      userId, 
+      novelId, 
+      moduleTitle, 
+      rentalAmount, 
+      userBalanceAfter, 
+      novelBalanceAfter, 
+      rentalId,
+      username
+    } = rentalData;
+    
+    // Import novel transaction function
+    const { createNovelTransaction } = await import('./novelTransactions.js');
+    
+    // Create user transaction record (deduction)
+    const userTransaction = await createTransaction({
+      userId: userId,
+      amount: -rentalAmount,
+      type: 'rental',
+      description: `Mở tạm thời tập "${moduleTitle}" (7 ngày)`,
+      sourceId: rentalId,
+      sourceModel: 'ModuleRental'
+    }, session);
+    
+    // Create novel transaction record (addition)
+    const novelTransaction = await createNovelTransaction({
+      novel: novelId,
+      amount: rentalAmount,
+      type: 'rental',
+      description: `Mở tạm thời tập "${moduleTitle}" (7 ngày) bởi ${username}`,
+      balanceAfter: novelBalanceAfter,
+      sourceId: rentalId,
+      sourceModel: 'ModuleRental',
+      performedBy: userId
+    }, session);
+    
+    return {
+      userTransaction,
+      novelTransaction
+    };
+  } catch (error) {
+    console.error('Failed to create rental transactions:', error);
+    throw error;
+  }
+}; 

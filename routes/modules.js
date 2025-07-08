@@ -3,12 +3,13 @@ import Module from '../models/Module.js';
 import { auth } from '../middleware/auth.js';
 import admin from '../middleware/admin.js';
 import Chapter from '../models/Chapter.js';
-import { clearNovelCaches } from '../utils/cacheUtils.js';
+import { clearNovelCaches, notifyAllClients } from '../utils/cacheUtils.js';
 import Novel from '../models/Novel.js';
 import mongoose from 'mongoose';
 import ModuleRental from '../models/ModuleRental.js';
 import ContributionHistory from '../models/ContributionHistory.js';
 import User from '../models/User.js';
+import { createRentalTransactions } from './userTransaction.js';
 
 /**
  * Calculate and update rentBalance for a module
@@ -147,20 +148,24 @@ const checkAndSwitchRentModuleToPublished = async (moduleId, session = null) => 
 
     // Auto-switch from rent to published if total paid chapter balance ≤ 200
     if (totalChapterBalance <= 200) {
-      await Module.findByIdAndUpdate(
+      const updatedModule = await Module.findByIdAndUpdate(
         moduleId,
         { 
           mode: 'published',
           updatedAt: new Date()
         },
-        { session }
+        { session, new: true }
       );
       
       console.log(`Auto-switched module ${moduleId} from rent to published mode (total paid chapter balance: ${totalChapterBalance} ≤ 200 🌾)`);
-      return true;
+      
+      // Send real-time notification to clients about the mode change
+      // Note: This is called within a transaction, so we'll send the notification after the transaction commits
+      // For now, we'll return the module info so the caller can send the notification
+      return { switched: true, module: updatedModule };
     }
 
-    return false;
+    return { switched: false };
   } catch (error) {
     console.error(`Error checking rent module ${moduleId} for auto-switching:`, error);
     throw error;
@@ -882,6 +887,19 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
     // Clear novel caches to ensure fresh data on next request
     clearNovelCaches();
 
+    // Send real-time notification if module mode changed
+    if (currentModule.mode !== req.body.mode) {
+      notifyAllClients('module_mode_changed', { 
+        novelId: req.params.novelId, 
+        moduleId: req.params.moduleId,
+        moduleTitle: updatedModule.title,
+        oldMode: currentModule.mode,
+        newMode: req.body.mode,
+        reason: 'manual_update'
+      });
+      console.log(`Module mode changed manually: ${updatedModule.title} from ${currentModule.mode} to ${req.body.mode}`);
+    }
+
     // Check for auto-unlock if module was changed to paid mode
     if (req.body.mode === 'paid' && currentModule.mode !== 'paid') {
       // Import the checkAndUnlockContent function from novels.js
@@ -1346,6 +1364,18 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
     // Link contribution history to rental
     rental.contributionHistoryId = contributionHistory._id;
     await rental.save({ session });
+
+    // Create both user and novel transaction records for the rental
+    await createRentalTransactions({
+      userId: userId,
+      novelId: novel._id,
+      moduleTitle: module.title,
+      rentalAmount: module.rentBalance,
+      userBalanceAfter: user.balance,
+      novelBalanceAfter: novel.novelBalance,
+      rentalId: rental._id,
+      username: user.displayName || user.username
+    }, session);
 
     await session.commitTransaction();
 

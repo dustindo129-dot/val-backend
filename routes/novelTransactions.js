@@ -109,4 +109,59 @@ router.get('/search-novels', auth, async (req, res) => {
   }
 });
 
-export default router; 
+export default router;
+
+/**
+ * Create both user and novel transaction records for gift sending
+ * @param {Object} giftData - Gift transaction data
+ * @param {Object} session - Mongoose session for transaction
+ */
+export const createGiftTransactions = async (giftData, session) => {
+  try {
+    const { 
+      userId, 
+      novelId, 
+      giftName, 
+      giftIcon, 
+      giftPrice, 
+      novelTitle, 
+      username, 
+      novelBalanceAfter, 
+      giftTransactionId
+    } = giftData;
+    
+    // Import user transaction function
+    const { createTransaction } = await import('./userTransaction.js');
+    
+    // Create user transaction record (deduction)
+    const userTransaction = await createTransaction({
+      userId: userId,
+      amount: -giftPrice,
+      type: 'gift',
+      description: `Tặng ${giftIcon} ${giftName} cho "${novelTitle}"`,
+      sourceId: giftTransactionId,
+      sourceModel: 'GiftTransaction',
+      performedById: userId
+    }, session);
+    
+    // Create novel transaction record (addition)
+    const novelTransaction = await createNovelTransaction({
+      novel: novelId,
+      type: 'gift_received',
+      amount: giftPrice,
+      balanceAfter: novelBalanceAfter,
+      description: `Nhận quà tặng ${giftIcon} ${giftName} từ ${username}`,
+      sourceId: giftTransactionId,
+      sourceModel: 'GiftTransaction',
+      performedBy: userId
+    }, session);
+    
+    return {
+      userTransaction,
+      novelTransaction
+    };
+  } catch (error) {
+    console.error('Failed to create gift transactions:', error);
+    throw error;
+  }
+}; 

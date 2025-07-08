@@ -6,8 +6,7 @@ import GiftTransaction from '../models/GiftTransaction.js';
 import Novel from '../models/Novel.js';
 import User from '../models/User.js';
 import ContributionHistory from '../models/ContributionHistory.js';
-import { createTransaction } from './userTransaction.js';
-import { createNovelTransaction } from './novelTransactions.js';
+import { createGiftTransactions } from './novelTransactions.js';
 import mongoose from 'mongoose';
 
 const router = express.Router();
@@ -226,27 +225,17 @@ router.post('/send', auth, async (req, res) => {
     });
     await giftTransaction.save({ session });
 
-    // Create user transaction record for the ledger
-    await createTransaction({
+    // Create both user and novel transaction records for the gift
+    await createGiftTransactions({
       userId,
-      amount: -gift.price, // Negative amount for deduction
-      type: 'gift',
-      description: `Tặng ${gift.icon} ${gift.name} cho "${novel.title}"`,
-      sourceId: giftTransaction._id,
-      sourceModel: 'GiftTransaction',
-      performedById: userId
-    }, session);
-
-    // Create novel transaction record
-    await createNovelTransaction({
-      novel: novelId,
-      type: 'gift_received',
-      amount: gift.price,
-      balanceAfter: novelBalanceAfter,
-      description: `Nhận quà tặng ${gift.icon} ${gift.name} từ ${user.username}`,
-      sourceId: giftTransaction._id,
-      sourceModel: 'GiftTransaction',
-      performedBy: userId
+      novelId,
+      giftName: gift.name,
+      giftIcon: gift.icon,
+      giftPrice: gift.price,
+      novelTitle: novel.title,
+      username: user.username,
+      novelBalanceAfter,
+      giftTransactionId: giftTransaction._id
     }, session);
 
     // Create contribution history record
