@@ -8,6 +8,7 @@ import { validatePrepaidCard } from '../integrations/cardProvider.js';
 import { getBankAccountInfo } from '../utils/paymentUtils.js';
 import paymentConfig from '../config/paymentConfig.js';
 import { createTransaction } from './userTransaction.js';
+import { broadcastEventToUser } from '../services/sseService.js';
 
 const router = express.Router();
 
@@ -164,6 +165,15 @@ router.post('/request', auth, async (req, res) => {
         
         await session.commitTransaction();
         
+        // Broadcast balance update event to user via SSE
+        broadcastEventToUser('balance_updated', {
+          userId: req.user._id,
+          balanceAdded: topUpRequest.balance,
+          newBalance: req.user.balance + topUpRequest.balance,
+          reason: 'topup',
+          description: 'Nạp tiền qua chuyển khoản ngân hàng (tự động - khớp với giao dịch trước đó)'
+        }, req.user._id);
+        
         return res.status(200).json({ 
           message: 'Đã tìm thấy giao dịch chuyển khoản khớp với mã của bạn. Tài khoản đã được cập nhật.',
           requestId: topUpRequest._id,
@@ -253,6 +263,15 @@ router.post('/request', auth, async (req, res) => {
       );
       
       await session.commitTransaction();
+      
+      // Broadcast balance update event to user via SSE
+      broadcastEventToUser('balance_updated', {
+        userId: req.user._id,
+        balanceAdded: topUpRequest.balance,
+        newBalance: req.user.balance + topUpRequest.balance,
+        reason: 'topup',
+        description: 'Nạp tiền qua thẻ trả trước'
+      }, req.user._id);
       
       return res.status(200).json({ 
         message: 'Card accepted and balance added to your account',
@@ -738,6 +757,15 @@ router.post('/process-bank-transfer', async (req, res) => {
           
           await session.commitTransaction();
           
+          // Broadcast balance update event to user via SSE
+          broadcastEventToUser('balance_updated', {
+            userId: targetUser._id,
+            balanceAdded: balanceToAdd,
+            newBalance: targetUser.balance,
+            reason: 'topup',
+            description: 'Nạp tiền qua chuyển khoản ngân hàng (tự động)'
+          }, targetUser._id);
+          
           results.push({
             transId,
             status: 'success',
@@ -833,6 +861,15 @@ router.post('/process-bank-transfer', async (req, res) => {
         }, session);
 
         await session.commitTransaction();
+
+        // Broadcast balance update event to user via SSE
+        broadcastEventToUser('balance_updated', {
+          userId: user._id,
+          balanceAdded: pendingRequest.balance,
+          newBalance: user.balance,
+          reason: 'topup',
+          description: description
+        }, user._id);
 
         results.push({
           transId,
@@ -1055,6 +1092,15 @@ router.post('/process-unmatched/:transactionId', auth, async (req, res) => {
     }, session);
     
     await session.commitTransaction();
+    
+    // Broadcast balance update event to user via SSE
+    broadcastEventToUser('balance_updated', {
+      userId: user._id,
+      balanceAdded: balance,
+      newBalance: user.balance,
+      reason: 'topup',
+      description: 'Nạp tiền qua chuyển khoản ngân hàng (xử lý thủ công bởi admin)'
+    }, user._id);
     
     res.status(200).json({
       message: 'Transaction processed successfully',
