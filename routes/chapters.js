@@ -447,7 +447,7 @@ router.get('/participation/user/:userId', async (req, res) => {
 // Get a specific chapter
 router.get('/:id', optionalAuth, async (req, res) => {
   try {
-    console.log(`Fetching chapter with ID: ${req.params.id}`);
+
     
     // Use query deduplication to prevent multiple identical requests
     const chapterData = await dedupQuery(`chapter:${req.params.id}`, async () => {
@@ -617,11 +617,8 @@ router.get('/:id', optionalAuth, async (req, res) => {
     });
 
     if (!chapterData) {
-      console.log('Chapter not found');
       return res.status(404).json({ message: 'Chapter not found' });
     }
-
-    console.log(`Found chapter: ${chapterData.title}`);
 
     // Check if user can access this chapter content
     const user = req.user; // Will be undefined if not authenticated
@@ -1774,6 +1771,7 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
     const chapterId = req.params.chapterId;
     const userId = req.user?._id;
     
+    console.log(`Fetching chapter with ID: ${chapterId}`);
    
     // Single aggregation pipeline that gets everything
     const pipeline = [
@@ -1948,8 +1946,11 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
     const [chapterData] = await Chapter.aggregate(pipeline);
     
     if (!chapterData) {
+      console.log('Chapter not found');
       return res.status(404).json({ message: 'Chapter not found' });
     }
+
+    console.log(`Found chapter: ${chapterData.title}`);
 
     // Format the response to match existing structure
     const response = {
