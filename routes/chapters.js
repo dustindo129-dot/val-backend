@@ -1763,7 +1763,7 @@ router.post('/fix-novel-wordcounts', auth, async (req, res) => {
 });
 
 /**
- * Get chapter with all related data (optimized single query)
+ * Get chapter with all related data (optimized single query) - INCLUDES ALL NAVIGATION AND MODULE CHAPTERS
  * @route GET /api/chapters/:chapterId/full-optimized
  */
 router.get('/:chapterId/full-optimized', async (req, res) => {
@@ -1773,7 +1773,7 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
     
     console.log(`Fetching chapter with ID: ${chapterId}`);
    
-    // Single aggregation pipeline that gets everything
+    // Single aggregation pipeline that gets everything INCLUDING all module chapters
     const pipeline = [
       {
         $match: { _id: new mongoose.Types.ObjectId(chapterId) }
@@ -1802,7 +1802,7 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
           as: 'module'
         }
       },
-      // Lookup sibling chapters for navigation
+      // Lookup ALL chapters in the module for navigation and dropdown
       {
         $lookup: {
           from: 'chapters',
@@ -1810,18 +1810,13 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
           pipeline: [
             {
               $match: {
-                $expr: {
-                  $and: [
-                    { $eq: ['$moduleId', '$$moduleId'] },
-                    { $ne: ['$_id', '$$chapterId'] }
-                  ]
-                }
+                $expr: { $eq: ['$moduleId', '$$moduleId'] }
               }
             },
-            { $project: { _id: 1, title: 1, order: 1 } },
+            { $project: { _id: 1, title: 1, order: 1, mode: 1, chapterBalance: 1 } },
             { $sort: { order: 1 } }
           ],
-          as: 'siblingChapters'
+          as: 'allModuleChapters'
         }
       },
       // Lookup user interactions if authenticated
@@ -1868,21 +1863,27 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
           as: 'chapterStats'
         }
       },
-      // Process the results
+      // Process the results and compute navigation
       {
         $addFields: {
           novel: { $arrayElemAt: ['$novel', 0] },
           module: { $arrayElemAt: ['$module', 0] },
           userInteraction: { $arrayElemAt: ['$userInteraction', 0] },
           chapterStats: { $arrayElemAt: ['$chapterStats', 0] },
+          // Compute previous chapter more robustly
           prevChapter: {
             $let: {
               vars: {
                 prevChapters: {
                   $filter: {
-                    input: '$siblingChapters',
-                    as: 'sibling',
-                    cond: { $lt: ['$$sibling.order', '$order'] }
+                    input: '$allModuleChapters',
+                    as: 'chapter',
+                    cond: { 
+                      $and: [
+                        { $lt: ['$$chapter.order', '$order'] },
+                        { $ne: ['$$chapter._id', '$_id'] }
+                      ]
+                    }
                   }
                 }
               },
@@ -1894,14 +1895,20 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
               }
             }
           },
+          // Compute next chapter more robustly  
           nextChapter: {
             $let: {
               vars: {
                 nextChapters: {
                   $filter: {
-                    input: '$siblingChapters',
-                    as: 'sibling',
-                    cond: { $gt: ['$$sibling.order', '$order'] }
+                    input: '$allModuleChapters',
+                    as: 'chapter',
+                    cond: { 
+                      $and: [
+                        { $gt: ['$$chapter.order', '$order'] },
+                        { $ne: ['$$chapter._id', '$_id'] }
+                      ]
+                    }
                   }
                 }
               },
@@ -1932,13 +1939,15 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
           translator: 1,
           editor: 1,
           proofreader: 1,
+          moduleId: 1,
+          novelId: 1,
           novel: 1,
           module: 1,
           prevChapter: 1,
           nextChapter: 1,
           userInteraction: 1,
-          chapterStats: 1
-          // Note: siblingChapters is automatically excluded since we don't include it
+          chapterStats: 1,
+          allModuleChapters: 1 // Include all module chapters for dropdown
         }
       }
     ];
@@ -1958,7 +1967,9 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
       interactions: {
         totalLikes: chapterData.chapterStats?.totalLikes || 0,
         userInteraction: chapterData.userInteraction || { liked: false, bookmarked: false }
-      }
+      },
+      // Include module chapters to eliminate the need for separate query
+      moduleChapters: chapterData.allModuleChapters || []
     };
 
     // Handle view counting asynchronously (fire-and-forget)
