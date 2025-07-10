@@ -18,7 +18,7 @@ import Gift from '../models/Gift.js';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import { getCachedUserByUsername, clearUserCache } from '../utils/userCache.js';
 import { populateStaffNames } from '../utils/populateStaffNames.js';
-import { checkAndSwitchRentModuleToPublished } from './modules.js';
+import { checkAndSwitchRentModuleToPublished, conditionallyRecalculateRentBalance } from './modules.js';
 
 /**
  * Import the functions from modules.js
@@ -3012,6 +3012,17 @@ async function performAutoUnlockInTransaction(novelId, session) {
       } catch (error) {
         console.error(`Error checking rent module ${moduleId} for auto-switching:`, error);
         // Don't fail the entire unlock process if auto-switch check fails
+      }
+    }
+
+    // Conditionally recalculate rent balance for modules that had chapters unlocked
+    // This uses the recalculateRentOnUnlock flag to determine if recalculation should happen
+    for (const moduleId of rentModulesNeedingCheck) {
+      try {
+        await conditionallyRecalculateRentBalance(moduleId, session);
+      } catch (error) {
+        console.error(`Error conditionally recalculating rent balance for module ${moduleId}:`, error);
+        // Don't fail the entire unlock process if rent balance recalculation fails
       }
     }
 

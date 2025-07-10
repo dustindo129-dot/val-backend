@@ -77,10 +77,12 @@ const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => 
       updatedAt: new Date()
     };
 
-    // Auto-switch from rent to published if total paid chapter balance ≤ 200
-    if (module.mode === 'rent' && totalChapterBalance <= 200) {
+    // Auto-switch from rent to published if total paid chapter balance ≤ 200 OR ≤ current rentBalance
+    if (module.mode === 'rent' && (totalChapterBalance <= 200 || totalChapterBalance <= module.rentBalance)) {
       updateData.mode = 'published';
-      console.log(`Auto-switching module ${moduleId} from rent to published mode (total paid chapter balance: ${totalChapterBalance} ≤ 200 🌾)`);
+      const reason = totalChapterBalance <= 200 ? 
+        `total paid chapter balance: ${totalChapterBalance} ≤ 200 🌾` : 
+        `total paid chapter balance: ${totalChapterBalance} ≤ current rentBalance: ${module.rentBalance} 🌾`;
     }
 
     // Update the module's rentBalance and potentially mode
@@ -105,7 +107,7 @@ const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => 
 
 /**
  * Check if a rent module should be auto-switched to published mode
- * This function checks if total paid chapter balance ≤ 200 and switches the module
+ * This function checks if total paid chapter balance ≤ 200 OR ≤ current rentBalance and switches the module
  * WITHOUT recalculating the rentBalance (rentBalance should remain unchanged when chapters are unlocked)
  * @param {string} moduleId - The module ID
  * @param {object} session - MongoDB session (optional)
@@ -146,8 +148,8 @@ const checkAndSwitchRentModuleToPublished = async (moduleId, session = null) => 
     const totalChapterBalance = paidChaptersResult.length > 0 ? 
       (paidChaptersResult[0].totalBalance || 0) : 0;
 
-    // Auto-switch from rent to published if total paid chapter balance ≤ 200
-    if (totalChapterBalance <= 200) {
+    // Auto-switch from rent to published if total paid chapter balance ≤ 200 OR ≤ current rentBalance
+    if (totalChapterBalance <= 200 || totalChapterBalance <= module.rentBalance) {
       const updatedModule = await Module.findByIdAndUpdate(
         moduleId,
         { 
@@ -157,7 +159,10 @@ const checkAndSwitchRentModuleToPublished = async (moduleId, session = null) => 
         { session, new: true }
       );
       
-      console.log(`Auto-switched module ${moduleId} from rent to published mode (total paid chapter balance: ${totalChapterBalance} ≤ 200 🌾)`);
+      const reason = totalChapterBalance <= 200 ? 
+        `total paid chapter balance: ${totalChapterBalance} ≤ 200 🌾` : 
+        `total paid chapter balance: ${totalChapterBalance} ≤ current rentBalance: ${module.rentBalance} 🌾`;
+      console.log(`Auto-switched module ${moduleId} from rent to published mode (${reason})`);
       
       // Send real-time notification to clients about the mode change
       // Note: This is called within a transaction, so we'll send the notification after the transaction commits
@@ -173,9 +178,51 @@ const checkAndSwitchRentModuleToPublished = async (moduleId, session = null) => 
 };
 
 /**
- * Export the new function so it can be used by other route files
+ * Conditionally recalculate rent balance for a module based on its recalculateRentOnUnlock setting
+ * This function should be called when chapters are unlocked via contribution
+ * @param {string} moduleId - The module ID
+ * @param {object} session - MongoDB session (optional)
+ * @returns {Promise<number>} The calculated rentBalance (0 if not recalculated)
  */
-export { calculateAndUpdateModuleRentBalance, checkAndSwitchRentModuleToPublished };
+const conditionallyRecalculateRentBalance = async (moduleId, session = null) => {
+  try {
+    // Validate moduleId
+    if (!moduleId || !mongoose.Types.ObjectId.isValid(moduleId)) {
+      throw new Error(`Invalid module ID: ${moduleId}`);
+    }
+
+    // Get module info first to check settings
+    const module = await Module.findById(moduleId).session(session);
+    if (!module) {
+      console.warn(`Module ${moduleId} not found, skipping rent balance recalculation`);
+      return 0;
+    }
+
+    // Only recalculate if module is in rent mode and has the recalculateRentOnUnlock flag enabled
+    if (module.mode === 'rent' && module.recalculateRentOnUnlock) {
+      console.log(`Recalculating rent balance for module ${moduleId} due to chapter unlock (recalculateRentOnUnlock enabled)`);
+      return await calculateAndUpdateModuleRentBalance(moduleId, session);
+    }
+
+    // If not in rent mode or flag is disabled, still check for auto-switching to published
+    if (module.mode === 'rent') {
+      const switchResult = await checkAndSwitchRentModuleToPublished(moduleId, session);
+      if (switchResult.switched) {
+        console.log(`Module ${moduleId} switched to published mode due to chapter unlock`);
+      }
+    }
+
+    return 0;
+  } catch (error) {
+    console.error(`Error conditionally recalculating rent balance for module ${moduleId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Export the new functions so they can be used by other route files
+ */
+export { calculateAndUpdateModuleRentBalance, checkAndSwitchRentModuleToPublished, conditionallyRecalculateRentBalance };
 
 const router = express.Router();
 
@@ -787,6 +834,7 @@ router.post('/:novelId/modules', auth, async (req, res) => {
       chapters: [],
       mode: req.body.mode || 'published',
       moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0,
+      recalculateRentOnUnlock: req.body.mode === 'rent' ? (req.body.recalculateRentOnUnlock || false) : false,
       rentBalance: 0 // Will be calculated automatically based on paid chapters
     });
 
@@ -870,6 +918,7 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
       illustration: req.body.illustration,
       mode: req.body.mode || 'published',
       moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0,
+      recalculateRentOnUnlock: req.body.mode === 'rent' ? (req.body.recalculateRentOnUnlock || false) : false,
       // rentBalance is calculated automatically, not set manually
       updatedAt: new Date()
     };

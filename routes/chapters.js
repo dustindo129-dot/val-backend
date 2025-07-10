@@ -28,7 +28,7 @@ import Novel from '../models/Novel.js';
 import mongoose from 'mongoose';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import ModuleRental from '../models/ModuleRental.js';
-import { calculateAndUpdateModuleRentBalance } from './modules.js';
+import { calculateAndUpdateModuleRentBalance, conditionallyRecalculateRentBalance } from './modules.js';
 
 // Import the novel cache clearing function
 import { clearNovelCaches, clearChapterCaches, notifyAllClients } from '../utils/cacheUtils.js';
@@ -622,7 +622,6 @@ router.get('/:id', optionalAuth, async (req, res) => {
     }
 
     console.log(`Found chapter: ${chapterData.title}`);
-    console.log(`Navigation: prev=${chapterData.prevChapter?._id}, next=${chapterData.nextChapter?._id}`);
 
     // Check if user can access this chapter content
     const user = req.user; // Will be undefined if not authenticated
@@ -718,10 +717,6 @@ router.get('/:id', optionalAuth, async (req, res) => {
     // Populate staff ObjectIds with user display names
     const populatedChapter = await populateStaffNames(chapterData);
 
-    // We don't need to increment views here anymore.
-    // The view increment is now handled by the dedicated endpoint
-    // in userChapterInteractions.js that respects the 8-hour window.
-    // This prevents double-counting of views.
 
     res.json({ chapter: populatedChapter });
   } catch (err) {
@@ -1195,7 +1190,14 @@ router.put('/:id', auth, async (req, res) => {
       // Recalculate module rent balance if mode or balance changed
       if (shouldRecalculateRentBalance) {
         try {
-          await calculateAndUpdateModuleRentBalance(existingChapter.moduleId);
+          // If chapter is being switched from paid to another mode, use conditional recalculation
+          // to respect the recalculateRentOnUnlock flag
+          if (existingChapter.mode === 'paid' && mode && mode !== 'paid') {
+            await conditionallyRecalculateRentBalance(existingChapter.moduleId);
+          } else {
+            // For other changes (like adding/removing paid chapters), always recalculate
+            await calculateAndUpdateModuleRentBalance(existingChapter.moduleId);
+          }
         } catch (rentBalanceError) {
           console.error('Error recalculating module rent balance:', rentBalanceError);
           // Don't fail the chapter update if rent balance calculation fails
@@ -1578,7 +1580,7 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
       });
     }
 
-    console.log(`Access granted for chapter ${chapter.title}: reason=${accessReason}`);
+
 
     // Build interaction response
     const interactions = {
@@ -1588,6 +1590,15 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
         bookmarked: userInteraction?.bookmarked || false
       }
     };
+
+    // OPTIMIZATION: Handle very long content more efficiently
+    const isVeryLongContent = populatedChapter.content && populatedChapter.content.length > 300000;
+    
+    if (isVeryLongContent) {
+      // Set appropriate headers for large content
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=300'); // 5 minutes cache for long content
+    }
 
     // Combine everything into a single response
     res.json({
@@ -1754,5 +1765,237 @@ router.post('/fix-novel-wordcounts', auth, async (req, res) => {
   }
 });
 
+/**
+ * Get chapter with all related data (optimized single query)
+ * @route GET /api/chapters/:chapterId/full-optimized
+ */
+router.get('/:chapterId/full-optimized', async (req, res) => {
+  try {
+    const chapterId = req.params.chapterId;
+    const userId = req.user?._id;
+    
+   
+    // Single aggregation pipeline that gets everything
+    const pipeline = [
+      {
+        $match: { _id: new mongoose.Types.ObjectId(chapterId) }
+      },
+      // Lookup novel data
+      {
+        $lookup: {
+          from: 'novels',
+          localField: 'novelId',
+          foreignField: '_id',
+          pipeline: [
+            { $project: { title: 1, illustration: 1, active: 1, author: 1, status: 1, genres: 1 } }
+          ],
+          as: 'novel'
+        }
+      },
+      // Lookup module data
+      {
+        $lookup: {
+          from: 'modules',
+          localField: 'moduleId',
+          foreignField: '_id',
+          pipeline: [
+            { $project: { title: 1, mode: 1, moduleBalance: 1, rentBalance: 1 } }
+          ],
+          as: 'module'
+        }
+      },
+      // Lookup sibling chapters for navigation
+      {
+        $lookup: {
+          from: 'chapters',
+          let: { moduleId: '$moduleId', currentOrder: '$order', chapterId: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$moduleId', '$$moduleId'] },
+                    { $ne: ['$_id', '$$chapterId'] }
+                  ]
+                }
+              }
+            },
+            { $project: { _id: 1, title: 1, order: 1 } },
+            { $sort: { order: 1 } }
+          ],
+          as: 'siblingChapters'
+        }
+      },
+      // Lookup user interactions if authenticated
+      ...(userId ? [{
+        $lookup: {
+          from: 'userchapterinteractions',
+          let: { chapterId: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$chapterId', '$$chapterId'] },
+                    { $eq: ['$userId', userId] }
+                  ]
+                }
+              }
+            },
+            { $project: { liked: 1, bookmarked: 1, _id: 0 } }
+          ],
+          as: 'userInteraction'
+        }
+      }] : []),
+      // Lookup chapter statistics
+      {
+        $lookup: {
+          from: 'userchapterinteractions',
+          let: { chapterId: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: { $eq: ['$chapterId', '$$chapterId'] }
+              }
+            },
+            {
+              $group: {
+                _id: null,
+                totalLikes: {
+                  $sum: { $cond: [{ $eq: ['$liked', true] }, 1, 0] }
+                }
+              }
+            }
+          ],
+          as: 'chapterStats'
+        }
+      },
+      // Process the results
+      {
+        $addFields: {
+          novel: { $arrayElemAt: ['$novel', 0] },
+          module: { $arrayElemAt: ['$module', 0] },
+          userInteraction: { $arrayElemAt: ['$userInteraction', 0] },
+          chapterStats: { $arrayElemAt: ['$chapterStats', 0] },
+          prevChapter: {
+            $let: {
+              vars: {
+                prevChapters: {
+                  $filter: {
+                    input: '$siblingChapters',
+                    as: 'sibling',
+                    cond: { $lt: ['$$sibling.order', '$order'] }
+                  }
+                }
+              },
+              in: {
+                $arrayElemAt: [
+                  { $sortArray: { input: '$$prevChapters', sortBy: { order: -1 } } },
+                  0
+                ]
+              }
+            }
+          },
+          nextChapter: {
+            $let: {
+              vars: {
+                nextChapters: {
+                  $filter: {
+                    input: '$siblingChapters',
+                    as: 'sibling',
+                    cond: { $gt: ['$$sibling.order', '$order'] }
+                  }
+                }
+              },
+              in: {
+                $arrayElemAt: [
+                  { $sortArray: { input: '$$nextChapters', sortBy: { order: 1 } } },
+                  0
+                ]
+              }
+            }
+          }
+        }
+      },
+      // Final projection (include all fields we need)
+      {
+        $project: {
+          _id: 1,
+          title: 1,
+          content: 1,
+          footnotes: 1,
+          mode: 1,
+          chapterBalance: 1,
+          order: 1,
+          views: 1,
+          wordCount: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          translator: 1,
+          editor: 1,
+          proofreader: 1,
+          novel: 1,
+          module: 1,
+          prevChapter: 1,
+          nextChapter: 1,
+          userInteraction: 1,
+          chapterStats: 1
+          // Note: siblingChapters is automatically excluded since we don't include it
+        }
+      }
+    ];
+
+    const [chapterData] = await Chapter.aggregate(pipeline);
+    
+    if (!chapterData) {
+      return res.status(404).json({ message: 'Chapter not found' });
+    }
+
+    // Format the response to match existing structure
+    const response = {
+      chapter: chapterData,
+      interactions: {
+        totalLikes: chapterData.chapterStats?.totalLikes || 0,
+        userInteraction: chapterData.userInteraction || { liked: false, bookmarked: false }
+      }
+    };
+
+    // Handle view counting asynchronously (fire-and-forget)
+    if (userId) {
+      setImmediate(async () => {
+        try {
+          await Chapter.findByIdAndUpdate(chapterId, { $inc: { views: 1 } });
+          
+          // Update recently read
+          await UserChapterInteraction.findOneAndUpdate(
+            { userId, chapterId, novelId: chapterData.novel._id },
+            {
+              $setOnInsert: {
+                userId,
+                chapterId,
+                novelId: chapterData.novel._id,
+                createdAt: new Date(),
+                liked: false,
+                bookmarked: false
+              },
+              $set: {
+                lastReadAt: new Date(),
+                updatedAt: new Date()
+              }
+            },
+            { upsert: true }
+          );
+        } catch (error) {
+          console.error('Error updating view count and recently read:', error);
+        }
+      });
+    }
+
+    res.json(response);
+  } catch (error) {
+    console.error('Error fetching chapter data:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
 
 export default router; 

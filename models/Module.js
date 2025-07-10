@@ -51,6 +51,10 @@ const moduleSchema = new mongoose.Schema({
       },
       message: 'Giá thuê tập phải là số không âm'
     }
+  },
+  recalculateRentOnUnlock: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true
