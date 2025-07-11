@@ -714,6 +714,37 @@ router.get('/:id', optionalAuth, async (req, res) => {
     // Populate staff ObjectIds with user display names
     const populatedChapter = await populateStaffNames(chapterData);
 
+    // Handle view counting asynchronously (fire-and-forget)
+    // Count views for all users (both authenticated and anonymous)
+    setImmediate(async () => {
+      try {
+        await Chapter.findByIdAndUpdate(req.params.id, { $inc: { views: 1 } });
+        
+        // Update recently read only for authenticated users
+        if (req.user) {
+          await UserChapterInteraction.findOneAndUpdate(
+            { userId: req.user._id, chapterId: req.params.id, novelId: chapterData.novelId },
+            {
+              $setOnInsert: {
+                userId: req.user._id,
+                chapterId: req.params.id,
+                novelId: chapterData.novelId,
+                createdAt: new Date(),
+                liked: false,
+                bookmarked: false
+              },
+              $set: {
+                lastReadAt: new Date(),
+                updatedAt: new Date()
+              }
+            },
+            { upsert: true }
+          );
+        }
+      } catch (error) {
+        console.error('Error updating view count and recently read:', error);
+      }
+    });
 
     res.json({ chapter: populatedChapter });
   } catch (err) {
@@ -1766,7 +1797,7 @@ router.post('/fix-novel-wordcounts', auth, async (req, res) => {
  * Get chapter with all related data (optimized single query) - INCLUDES ALL NAVIGATION AND MODULE CHAPTERS
  * @route GET /api/chapters/:chapterId/full-optimized
  */
-router.get('/:chapterId/full-optimized', async (req, res) => {
+router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
   try {
     const chapterId = req.params.chapterId;
     const userId = req.user?._id;
@@ -1981,12 +2012,13 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
     };
 
     // Handle view counting asynchronously (fire-and-forget)
-    if (userId) {
-      setImmediate(async () => {
-        try {
-          await Chapter.findByIdAndUpdate(chapterId, { $inc: { views: 1 } });
-          
-          // Update recently read
+    // Count views for all users (both authenticated and anonymous)
+    setImmediate(async () => {
+      try {
+        await Chapter.findByIdAndUpdate(chapterId, { $inc: { views: 1 } });
+        
+        // Update recently read only for authenticated users
+        if (userId) {
           await UserChapterInteraction.findOneAndUpdate(
             { userId, chapterId, novelId: chapterData.novel._id },
             {
@@ -2005,11 +2037,11 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
             },
             { upsert: true }
           );
-        } catch (error) {
-          console.error('Error updating view count and recently read:', error);
         }
-      });
-    }
+      } catch (error) {
+        console.error('Error updating view count and recently read:', error);
+      }
+    });
 
     res.json(response);
   } catch (error) {
