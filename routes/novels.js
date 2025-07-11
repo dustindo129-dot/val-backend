@@ -2231,35 +2231,63 @@ router.patch("/:id/balance", auth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid balance value' });
     }
     
-    // Find novel first to get current balance
-    const novel = await Novel.findById(novelId).session(session);
-    if (!novel) {
+    // Optimized: Get old balance and update in a single atomic operation
+    const result = await Novel.findOneAndUpdate(
+      { _id: novelId },
+      [
+        {
+          $set: {
+            // Store old balance before updating
+            oldBalance: { $ifNull: ['$novelBalance', 0] },
+            novelBalance: novelBalance
+          }
+        }
+      ],
+      { 
+        new: true, 
+        session,
+        // Return both old and new values
+        projection: { 
+          title: 1, 
+          novelBalance: 1, 
+          oldBalance: 1,
+          novelBudget: 1,
+          updatedAt: 1
+        }
+      }
+    );
+    
+    if (!result) {
       await session.abortTransaction();
       return res.status(404).json({ message: 'Novel not found' });
     }
     
-    const oldBalance = novel.novelBalance || 0;
+    const oldBalance = result.oldBalance || 0;
     const change = novelBalance - oldBalance;
     
-    // Update novel balance
-    const updatedNovel = await Novel.findByIdAndUpdate(
-      novelId,
-      { novelBalance },
-      { new: true, session }
-    );
-    
-    // Record transaction
-    await createNovelTransaction({
-      novel: novelId,
-      amount: change,
-      type: 'admin',
-      description: 'Admin điều chỉnh số dư thủ công',
-      balanceAfter: novelBalance,
-      performedBy: req.user._id
-    }, session);
+    // Only record transaction if there was actually a change
+    if (change !== 0) {
+      await createNovelTransaction({
+        novel: novelId,
+        amount: change,
+        type: 'admin',
+        description: 'Admin điều chỉnh số dư thủ công',
+        balanceAfter: novelBalance,
+        performedBy: req.user._id
+      }, session);
+    }
     
     await session.commitTransaction();
-    res.json(updatedNovel);
+    
+    // Remove the temporary oldBalance field from response
+    const { oldBalance: _, ...responseNovel } = result.toObject();
+    
+    // Return enriched response with change information for frontend optimization
+    res.json({
+      ...responseNovel,
+      balanceChange: change,
+      oldBalance: oldBalance
+    });
   } catch (error) {
     await session.abortTransaction();
     console.error('Error updating novel balance:', error);
