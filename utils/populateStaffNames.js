@@ -38,11 +38,13 @@ export const populateStaffNames = async (obj) => {
     // Helper function to collect ObjectIds from a value
     const collectObjectIds = (value) => {
       if (isValidObjectId(value)) {
-        allObjectIds.add(objectIdToString(value));
+        const stringId = objectIdToString(value);
+        allObjectIds.add(stringId);
       } else if (Array.isArray(value)) {
         value.forEach(item => {
           if (isValidObjectId(item)) {
-            allObjectIds.add(objectIdToString(item));
+            const stringId = objectIdToString(item);
+            allObjectIds.add(stringId);
           }
         });
       }
@@ -97,7 +99,8 @@ export const populateStaffNames = async (obj) => {
 
       if (isValidObjectId(staffValue)) {
         const stringId = objectIdToString(staffValue);
-        return userMap[stringId] || staffValue; // Use cached user data or fallback to original
+        const result = userMap[stringId] || staffValue;
+        return result; // Use cached user data or fallback to original
       }
 
       // If not an ObjectId, return as is (already a display name or text)
@@ -110,13 +113,16 @@ export const populateStaffNames = async (obj) => {
         return staffArray;
       }
 
-      return staffArray.map(item => {
+      const result = staffArray.map(item => {
         if (isValidObjectId(item)) {
           const stringId = objectIdToString(item);
-          return userMap[stringId] || item; // Use cached user data or fallback to original
+          const resolved = userMap[stringId] || item;
+          return resolved; // Use cached user data or fallback to original
         }
         return item; // Keep text items as is
       });
+
+      return result;
     };
 
     // Create a copy of the object to avoid mutating the original

@@ -1961,9 +1961,17 @@ router.get('/:chapterId/full-optimized', async (req, res) => {
 
     console.log(`Found chapter: ${chapterData.title}`);
 
+    // Populate staff ObjectIds with user display names for both chapter and nested novel data
+    const populatedChapter = await populateStaffNames(chapterData);
+    
+    // Also populate the nested novel data if it exists
+    if (populatedChapter.novel) {
+      populatedChapter.novel = await populateStaffNames(populatedChapter.novel);
+    }
+
     // Format the response to match existing structure
     const response = {
-      chapter: chapterData,
+      chapter: populatedChapter,
       interactions: {
         totalLikes: chapterData.chapterStats?.totalLikes || 0,
         userInteraction: chapterData.userInteraction || { liked: false, bookmarked: false }
