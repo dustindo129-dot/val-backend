@@ -1833,6 +1833,18 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
           as: 'module'
         }
       },
+      // Lookup user who created this chapter
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'createdBy',
+          foreignField: '_id',
+          pipeline: [
+            { $project: { displayName: 1, username: 1 } }
+          ],
+          as: 'createdByUser'
+        }
+      },
       // Lookup ALL chapters in the module for navigation and dropdown
       {
         $lookup: {
@@ -1899,6 +1911,7 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
         $addFields: {
           novel: { $arrayElemAt: ['$novel', 0] },
           module: { $arrayElemAt: ['$module', 0] },
+          createdByUser: { $arrayElemAt: ['$createdByUser', 0] },
           userInteraction: { $arrayElemAt: ['$userInteraction', 0] },
           chapterStats: { $arrayElemAt: ['$chapterStats', 0] },
           // Compute previous chapter more robustly
@@ -1974,6 +1987,7 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
           novelId: 1,
           novel: 1,
           module: 1,
+          createdByUser: 1,
           prevChapter: 1,
           nextChapter: 1,
           userInteraction: 1,
