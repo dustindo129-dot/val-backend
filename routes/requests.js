@@ -30,7 +30,7 @@ router.get('/', async (req, res) => {
       sortCriteria = { createdAt: -1 };
     }
     
-    // Query both pending requests and approved web requests
+    // Query both pending requests and approved web requests (exclude withdrawn)
     const requests = await Request.find({ 
       $or: [
         { status: 'pending', type: { $in: ['new', 'web'] } },
@@ -299,28 +299,34 @@ router.post('/:requestId/approve', auth, async (req, res) => {
       { session }
     );
     
-    // Create contribution history record for the request deposit
+    // Create separate ContributionHistory records for deposit and contributions
+    // This ensures proper audit trail for all money transferred to the novel
+    let runningBudget = oldBudget;
+    
+    // 1. Create contribution history record for the original request deposit
     if (request.deposit > 0) {
+      runningBudget += request.deposit;
       await ContributionHistory.create([{
         novelId: matchingNovel._id,
         userId: request.user,
         amount: request.deposit,
         note: request.type === 'new' 
-          ? `Tiền cọc yêu cầu truyện mới: ${request.title}`
-          : `Tiền cọc đề xuất từ nhóm dịch: ${request.title}`,
-        budgetAfter: newBudget,
+          ? `Lúa cọc yêu cầu truyện mới: ${request.title}`
+          : `Lúa cọc đề xuất từ nhóm dịch: ${request.title}`,
+        budgetAfter: runningBudget,
         type: 'user'
       }], { session });
     }
     
-    // Create contribution history records for all approved contributions
+    // 2. Create contribution history records for each individual contribution
     for (const contribution of allContributions) {
+      runningBudget += contribution.amount;
       await ContributionHistory.create([{
         novelId: matchingNovel._id,
         userId: contribution.user,
         amount: contribution.amount,
         note: `Đóng góp cho yêu cầu: ${request.title}${contribution.note ? ` - ${contribution.note}` : ''}`,
-        budgetAfter: newBudget, // All contributions are processed together, so they all get the final budget
+        budgetAfter: runningBudget,
         type: 'user'
       }], { session });
     }
@@ -450,7 +456,7 @@ router.post('/:requestId/decline', auth, async (req, res) => {
       userId: user._id,
       amount: request.deposit, // Positive amount for refunds
       type: 'refund',
-      description: `Hoàn tiền do admin từ chối yêu cầu`,
+      description: `Hoàn lúa do admin từ chối yêu cầu`,
       sourceId: request._id,
       sourceModel: 'Request',
       performedById: req.user._id, // Admin initiated
@@ -492,7 +498,7 @@ router.post('/:requestId/decline', auth, async (req, res) => {
               userId: contributor._id,
               amount: contribution.amount,
               type: 'refund',
-              description: `Hoàn tiền do admin từ chối yêu cầu`,
+              description: `Hoàn lúa do admin từ chối yêu cầu`,
               sourceId: request._id,
               sourceModel: 'Request',
               performedById: req.user._id, // Admin initiated
@@ -576,7 +582,7 @@ router.post('/:requestId/withdraw', auth, async (req, res) => {
       userId: user._id,
       amount: request.deposit, // Positive amount for refunds
       type: 'refund',
-      description: `Hoàn tiền từ việc rút lại yêu cầu`,
+      description: `Hoàn lúa từ việc rút lại yêu cầu`,
       sourceId: request._id,
       sourceModel: 'Request',
       performedById: null, // User initiated
@@ -617,7 +623,7 @@ router.post('/:requestId/withdraw', auth, async (req, res) => {
               userId: contributor._id,
               amount: contribution.amount,
               type: 'refund',
-              description: `Hoàn tiền do yêu cầu được rút lại`,
+              description: `Hoàn lúa do yêu cầu được rút lại`,
               sourceId: request._id,
               sourceModel: 'Request',
               performedById: null,
@@ -628,8 +634,9 @@ router.post('/:requestId/withdraw', auth, async (req, res) => {
       }
     }
     
-    // Delete the request
-    await Request.findByIdAndDelete(requestId).session(session);
+    // Mark the request as withdrawn instead of deleting it
+    request.status = 'withdrawn';
+    await request.save({ session });
     
     await session.commitTransaction();
     res.json({ 
@@ -664,7 +671,7 @@ router.get('/all', auth, async (req, res) => {
     const query = {};
     
     // Add status filter if specified
-    if (status && ['pending', 'approved', 'declined'].includes(status)) {
+    if (status && ['pending', 'approved', 'declined', 'withdrawn'].includes(status)) {
       query.status = status;
     }
     

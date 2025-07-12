@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import { createNovelTransaction } from './novelTransactions.js';
 import { createTransaction } from './userTransaction.js';
 import { clearUserCache } from '../utils/userCache.js';
+import ContributionHistory from '../models/ContributionHistory.js';
 
 const router = express.Router();
 
@@ -217,15 +218,8 @@ router.post('/:contributionId/approve', auth, async (req, res) => {
         await contribution.save({ session });
         
         // Handle contribution amount based on request type
-        if (contribution.request.type === 'open' && contribution.request.novel) {
-          // For chapter opening requests, add contribution to novel balance
-          const Novel = mongoose.model('Novel');
-          await Novel.findByIdAndUpdate(
-            contribution.request.novel,
-            { $inc: { novelBalance: contribution.amount } },
-            { session }
-          );
-        }
+        // Note: Currently only 'new' and 'web' request types are supported
+        // This section is reserved for future request type handling if needed
         
         await session.commitTransaction();
       } catch (error) {
@@ -296,18 +290,8 @@ router.post('/request/:requestId/approve-all', auth, async (req, res) => {
           { session }
         );
         
-        // If request is for a novel opening, add all contributions to novel balance
-        if (request.type === 'open' && request.novel) {
-          const totalAmount = contributions.reduce((sum, contribution) => sum + contribution.amount, 0);
-          
-          // Add total contribution amount to novel balance
-          const Novel = mongoose.model('Novel');
-          await Novel.findByIdAndUpdate(
-            request.novel,
-            { $inc: { novelBalance: totalAmount } },
-            { session }
-          );
-        }
+        // Note: Individual contributions are now handled through request approval flow
+        // All contributions for 'new' and 'web' requests are processed when the request is approved
         
         await session.commitTransaction();
         return { count: contributions.length };
