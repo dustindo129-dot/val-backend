@@ -415,37 +415,35 @@ router.get('/bookmark/:novelId', auth, async (req, res) => {
 });
 
 /**
- * Record a view for a chapter
+ * Record a view for a chapter (DEPRECATED - views are now tracked automatically)
  * @route POST /api/userchapterinteractions/view/:chapterId
+ * @deprecated This endpoint is deprecated as views are now tracked automatically with cooldown
  */
 router.post('/view/:chapterId', async (req, res) => {
   try {
     const chapterId = req.params.chapterId;
     
-    // Use a direct atomic update instead of loading the entire chapter first
-    // This is much faster and avoids race conditions
-    const updateResult = await Chapter.findByIdAndUpdate(
-      chapterId,
-      { $inc: { views: 1 } },
-      { new: true, select: 'views' } // Return just the updated views field
-    );
+    // This endpoint is deprecated - views are now tracked automatically
+    // Just return the current view count without incrementing
+    const chapter = await Chapter.findById(chapterId).select('views');
     
-    if (!updateResult) {
+    if (!chapter) {
       return res.status(404).json({ message: "Chapter not found" });
     }
     
-    // Return the updated view count
+    // Return the current view count without incrementing
     return res.json({ 
-      views: updateResult.views,
-      counted: true
+      views: chapter.views || 0,
+      counted: false,
+      message: "Views are now tracked automatically"
     });
   } catch (err) {
-    console.error("Error recording view:", err);
+    console.error("Error getting view count:", err);
     // Still return some data to prevent client-side errors
     res.status(200).json({ 
       views: 0,
       counted: false,
-      error: "Error recording view"
+      error: "Error getting view count"
     });
   }
 });

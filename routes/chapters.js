@@ -757,10 +757,34 @@ router.get('/:id', optionalAuth, async (req, res) => {
             { upsert: true }
           );
         } else {
-          // For anonymous users, we can't track individual cooldowns
-          // We'll rely on client-side localStorage to prevent spam
-          // Only increment view if this is likely a legitimate view
-          shouldIncrementView = true;
+          // For anonymous users, implement server-side rate limiting using IP address
+          // This prevents anonymous users from spamming views
+          const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
+          const ipViewKey = `ip_view_${clientIP}_${req.params.id}`;
+          
+          // Check if this IP has viewed this chapter recently (using a simple in-memory cache)
+          if (!global.viewIPCache) {
+            global.viewIPCache = new Map();
+          }
+          
+          const lastViewTime = global.viewIPCache.get(ipViewKey);
+          const now = Date.now();
+          const fourHours = 4 * 60 * 60 * 1000; // 4 hours cooldown for anonymous users
+          
+          if (!lastViewTime || (now - lastViewTime) > fourHours) {
+            shouldIncrementView = true;
+            global.viewIPCache.set(ipViewKey, now);
+            
+            // Clean up old entries every 100 views to prevent memory leaks
+            if (global.viewIPCache.size > 1000) {
+              const cutoffTime = now - (24 * 60 * 60 * 1000); // 24 hours ago
+              for (const [key, timestamp] of global.viewIPCache.entries()) {
+                if (timestamp < cutoffTime) {
+                  global.viewIPCache.delete(key);
+                }
+              }
+            }
+          }
         }
         
         // Only increment view count if cooldown has passed
@@ -2134,10 +2158,34 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
             { upsert: true }
           );
         } else {
-          // For anonymous users, we can't track individual cooldowns
-          // We'll rely on client-side localStorage to prevent spam
-          // Only increment view if this is likely a legitimate view
-          shouldIncrementView = true;
+          // For anonymous users, implement server-side rate limiting using IP address
+          // This prevents anonymous users from spamming views
+          const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
+          const ipViewKey = `ip_view_${clientIP}_${chapterId}`;
+          
+          // Check if this IP has viewed this chapter recently (using a simple in-memory cache)
+          if (!global.viewIPCache) {
+            global.viewIPCache = new Map();
+          }
+          
+          const lastViewTime = global.viewIPCache.get(ipViewKey);
+          const now = Date.now();
+          const fourHours = 4 * 60 * 60 * 1000; // 4 hours cooldown for anonymous users
+          
+          if (!lastViewTime || (now - lastViewTime) > fourHours) {
+            shouldIncrementView = true;
+            global.viewIPCache.set(ipViewKey, now);
+            
+            // Clean up old entries every 100 views to prevent memory leaks
+            if (global.viewIPCache.size > 1000) {
+              const cutoffTime = now - (24 * 60 * 60 * 1000); // 24 hours ago
+              for (const [key, timestamp] of global.viewIPCache.entries()) {
+                if (timestamp < cutoffTime) {
+                  global.viewIPCache.delete(key);
+                }
+              }
+            }
+          }
         }
         
         // Only increment view count if cooldown has passed
