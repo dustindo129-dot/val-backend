@@ -37,18 +37,24 @@ const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => 
       throw new Error(`Invalid module ID: ${moduleId}`);
     }
 
+    // Convert moduleId to string if it's an ObjectId
+    const moduleIdString = String(moduleId);
+
     // Get module info first to check current mode
-    const module = await Module.findById(moduleId).session(session);
+    const module = await Module.findById(moduleIdString).session(session);
     if (!module) {
-      console.warn(`Module ${moduleId} not found, skipping rentBalance calculation`);
+      console.warn(`Module ${moduleIdString} not found, skipping rentBalance calculation`);
       return 0;
     }
+
+    // Create ObjectId for aggregation
+    const moduleObjectId = mongoose.Types.ObjectId.createFromHexString(moduleIdString);
 
     // Get all paid chapters in this module using aggregation for better performance
     const paidChaptersResult = await Chapter.aggregate([
       {
         $match: {
-          moduleId: mongoose.Types.ObjectId.createFromHexString(moduleId),
+          moduleId: moduleObjectId,
           mode: 'paid',
           chapterBalance: { $gt: 0 }
         }
@@ -87,16 +93,16 @@ const calculateAndUpdateModuleRentBalance = async (moduleId, session = null) => 
 
     // Update the module's rentBalance and potentially mode
     const updatedModule = await Module.findByIdAndUpdate(
-      moduleId,
+      moduleIdString,
       updateData,
       { new: true, session }
     );
 
     if (!updatedModule) {
-      throw new Error(`Failed to update module ${moduleId}`);
+      throw new Error(`Failed to update module ${moduleIdString}`);
     }
 
-    console.log(`Updated module ${moduleId} rentBalance: ${calculatedRentBalance} 🌾 (from ${chapterCount} paid chapters totaling ${totalChapterBalance} 🌾)${updateData.mode ? ` - Mode changed to: ${updateData.mode}` : ''}`);
+    console.log(`Updated module ${moduleIdString} rentBalance: ${calculatedRentBalance} 🌾 (from ${chapterCount} paid chapters totaling ${totalChapterBalance} 🌾)${updateData.mode ? ` - Mode changed to: ${updateData.mode}` : ''}`);
     
     return calculatedRentBalance;
   } catch (error) {
@@ -120,18 +126,24 @@ const checkAndSwitchRentModuleToPublished = async (moduleId, session = null) => 
       throw new Error(`Invalid module ID: ${moduleId}`);
     }
 
+    // Convert moduleId to string if it's an ObjectId
+    const moduleIdString = String(moduleId);
+
     // Get module info first to check current mode
-    const module = await Module.findById(moduleId).session(session);
+    const module = await Module.findById(moduleIdString).session(session);
     if (!module || module.mode !== 'rent') {
       // Only process rent modules
       return false;
     }
 
+    // Create ObjectId for aggregation
+    const moduleObjectId = mongoose.Types.ObjectId.createFromHexString(moduleIdString);
+
     // Get all paid chapters in this module to check total balance
     const paidChaptersResult = await Chapter.aggregate([
       {
         $match: {
-          moduleId: mongoose.Types.ObjectId.createFromHexString(moduleId),
+          moduleId: moduleObjectId,
           mode: 'paid',
           chapterBalance: { $gt: 0 }
         }
@@ -151,7 +163,7 @@ const checkAndSwitchRentModuleToPublished = async (moduleId, session = null) => 
     // Auto-switch from rent to published if total paid chapter balance ≤ 200 OR ≤ current rentBalance
     if (totalChapterBalance <= 200 || totalChapterBalance <= module.rentBalance) {
       const updatedModule = await Module.findByIdAndUpdate(
-        moduleId,
+        moduleIdString,
         { 
           mode: 'published',
           updatedAt: new Date()
@@ -162,7 +174,7 @@ const checkAndSwitchRentModuleToPublished = async (moduleId, session = null) => 
       const reason = totalChapterBalance <= 200 ? 
         `total paid chapter balance: ${totalChapterBalance} ≤ 200 🌾` : 
         `total paid chapter balance: ${totalChapterBalance} ≤ current rentBalance: ${module.rentBalance} 🌾`;
-      console.log(`Auto-switched module ${moduleId} from rent to published mode (${reason})`);
+      console.log(`Auto-switched module ${moduleIdString} from rent to published mode (${reason})`);
       
       // Send real-time notification to clients about the mode change
       // Note: This is called within a transaction, so we'll send the notification after the transaction commits
@@ -191,24 +203,27 @@ const conditionallyRecalculateRentBalance = async (moduleId, session = null) => 
       throw new Error(`Invalid module ID: ${moduleId}`);
     }
 
+    // Convert moduleId to string if it's an ObjectId
+    const moduleIdString = String(moduleId);
+
     // Get module info first to check settings
-    const module = await Module.findById(moduleId).session(session);
+    const module = await Module.findById(moduleIdString).session(session);
     if (!module) {
-      console.warn(`Module ${moduleId} not found, skipping rent balance recalculation`);
+      console.warn(`Module ${moduleIdString} not found, skipping rent balance recalculation`);
       return 0;
     }
 
     // Only recalculate if module is in rent mode and has the recalculateRentOnUnlock flag enabled
     if (module.mode === 'rent' && module.recalculateRentOnUnlock) {
-      console.log(`Recalculating rent balance for module ${moduleId} due to chapter unlock (recalculateRentOnUnlock enabled)`);
-      return await calculateAndUpdateModuleRentBalance(moduleId, session);
+      console.log(`Recalculating rent balance for module ${moduleIdString} due to chapter unlock (recalculateRentOnUnlock enabled)`);
+      return await calculateAndUpdateModuleRentBalance(moduleIdString, session);
     }
 
     // If not in rent mode or flag is disabled, still check for auto-switching to published
     if (module.mode === 'rent') {
-      const switchResult = await checkAndSwitchRentModuleToPublished(moduleId, session);
+      const switchResult = await checkAndSwitchRentModuleToPublished(moduleIdString, session);
       if (switchResult.switched) {
-        console.log(`Module ${moduleId} switched to published mode due to chapter unlock`);
+        console.log(`Module ${moduleIdString} switched to published mode due to chapter unlock`);
       }
     }
 

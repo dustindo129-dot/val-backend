@@ -3155,11 +3155,14 @@ export async function checkAndUnlockContent(novelId) {
   // when chapters are unlocked, but does NOT recalculate rentBalance (which should remain unchanged).
   
   const session = await mongoose.startSession();
-  session.startTransaction();
+  let transactionCommitted = false;
   
   try {
+    session.startTransaction();
+    
     const result = await performAutoUnlockInTransaction(novelId, session);
     await session.commitTransaction();
+    transactionCommitted = true;
     
     // Clear caches and notify clients after successful transaction
     if (result.unlockedContent.length > 0 || result.switchedModules.length > 0) {
@@ -3206,7 +3209,10 @@ export async function checkAndUnlockContent(novelId) {
     return result;
 
   } catch (error) {
-    await session.abortTransaction();
+    // Only abort transaction if it hasn't been committed yet
+    if (!transactionCommitted) {
+      await session.abortTransaction();
+    }
     console.error('Error in auto-unlock:', error);
     throw error; // Re-throw to allow calling code to handle the error
   } finally {

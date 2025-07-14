@@ -865,7 +865,8 @@ router.post('/', auth, async (req, res) => {
     const newChapter = await chapter.save();
 
     // Perform multiple updates in parallel with timeout protection
-    await Promise.all([
+    // Use Promise.allSettled to ensure one failing operation doesn't fail the entire request
+    const updateResults = await Promise.allSettled([
       // Update the module's chapters array
       Module.findByIdAndUpdate(
         moduleId,
@@ -890,6 +891,14 @@ router.post('/', auth, async (req, res) => {
       clearNovelCaches()
     ]);
 
+    // Log any failed operations but don't fail the entire request
+    updateResults.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        const operationNames = ['module update', 'novel timestamp update', 'word count recalculation', 'rent balance calculation', 'cache clearing'];
+        console.error(`Post-creation operation failed (${operationNames[index]}):`, result.reason);
+      }
+    });
+
     // Get novel info for the notification
     const novel = await Novel.findById(novelId).select('title');
 
@@ -911,25 +920,31 @@ router.post('/', auth, async (req, res) => {
 
     // Check for auto-unlock if a paid chapter was created
     if (mode === 'paid') {
-      // Import the checkAndUnlockContent function from novels.js
-      const { checkAndUnlockContent } = await import('./novels.js');
-      await checkAndUnlockContent(novelId);
-      
-      // IMPORTANT: Clear all relevant caches after auto-unlock to prevent stale data
-      clearChapterCaches(newChapter._id.toString());
-      
-      // Clear slug cache entries for this chapter to prevent stale mode caching
-      const chapterIdString = newChapter._id.toString();
-      const keysToDelete = [];
-      for (const [key, value] of slugCache.entries()) {
-        if (value.data && value.data.id && value.data.id.toString() === chapterIdString) {
-          keysToDelete.push(key);
+      try {
+        // Import the checkAndUnlockContent function from novels.js
+        const { checkAndUnlockContent } = await import('./novels.js');
+        await checkAndUnlockContent(novelId);
+        
+        // IMPORTANT: Clear all relevant caches after auto-unlock to prevent stale data
+        clearChapterCaches(newChapter._id.toString());
+        
+        // Clear slug cache entries for this chapter to prevent stale mode caching
+        const chapterIdString = newChapter._id.toString();
+        const keysToDelete = [];
+        for (const [key, value] of slugCache.entries()) {
+          if (value.data && value.data.id && value.data.id.toString() === chapterIdString) {
+            keysToDelete.push(key);
+          }
         }
+        keysToDelete.forEach(key => slugCache.delete(key));
+        
+        // Clear query deduplication cache for this chapter
+        pendingQueries.delete(`chapter:${newChapter._id}`);
+      } catch (unlockError) {
+        console.error('Error during auto-unlock after paid chapter creation:', unlockError);
+        // Don't fail the chapter creation if auto-unlock fails
+        // The chapter was successfully created, auto-unlock is just a bonus feature
       }
-      keysToDelete.forEach(key => slugCache.delete(key));
-      
-      // Clear query deduplication cache for this chapter
-      pendingQueries.delete(`chapter:${newChapter._id}`);
     }
 
     // Fetch the final chapter state AFTER auto-unlock (if it happened)
@@ -1027,6 +1042,7 @@ router.put('/:id', auth, async (req, res) => {
 
   while (attempt < maxRetries) {
     const session = await mongoose.startSession();
+    let transactionCommitted = false;
     
     try {
       session.startTransaction();
@@ -1175,6 +1191,7 @@ router.put('/:id', auth, async (req, res) => {
       }
 
       await session.commitTransaction();
+      transactionCommitted = true;
 
       // Clear novel caches
       clearNovelCaches();
@@ -1246,7 +1263,11 @@ router.put('/:id', auth, async (req, res) => {
       return res.json(populatedChapter);
 
     } catch (err) {
-      await session.abortTransaction();
+      // Only abort transaction if it hasn't been committed yet
+      if (!transactionCommitted) {
+        await session.abortTransaction();
+      }
+      
       attempt++;
       
       // Check if this is a transient error that can be retried
@@ -1256,7 +1277,7 @@ router.put('/:id', auth, async (req, res) => {
                               err.code === 16500; // InterruptedAtShutdown
       
       if (isRetryableError && attempt < maxRetries) {
-        console.warn(`Retrying chapter update (attempt ${attempt}/${maxRetries}) for chapter ${chapterId}:`, err.message);
+        console.warn(`Retrying chapter update (attempt ${attempt}/${maxRetries}) for chapter ${req.params.id}:`, err.message);
         
         // Exponential backoff with jitter
         const baseDelay = Math.pow(2, attempt - 1) * 150; // 150ms, 300ms, 600ms
@@ -1289,6 +1310,7 @@ router.delete('/:id', auth, async (req, res) => {
 
   while (attempt < maxRetries) {
     const session = await mongoose.startSession();
+    let transactionCommitted = false;
     
     try {
       session.startTransaction();
@@ -1309,7 +1331,7 @@ router.delete('/:id', auth, async (req, res) => {
       }
 
       // Store IDs for cleanup operations
-      const { novelId, moduleId } = chapter;
+      const { novelId, moduleId, order: deletedOrder } = chapter;
       const wasPaidChapter = chapter.mode === 'paid' && chapter.chapterBalance > 0;
 
       // Delete the chapter
@@ -1323,6 +1345,19 @@ router.delete('/:id', auth, async (req, res) => {
           $set: { updatedAt: new Date() }
         },
         { session, maxTimeMS: 5000 }
+      );
+
+      // Reorder remaining chapters in the same module
+      // Decrement order by 1 for all chapters with order > deletedOrder
+      await Chapter.updateMany(
+        { 
+          moduleId: moduleId,
+          order: { $gt: deletedOrder }
+        },
+        { 
+          $inc: { order: -1 }
+        },
+        { session, maxTimeMS: 10000 }
       );
 
       // Delete all user interactions for this chapter
@@ -1343,6 +1378,7 @@ router.delete('/:id', auth, async (req, res) => {
       // Chapter deletion is a management action, not new content
 
       await session.commitTransaction();
+      transactionCommitted = true;
 
       // Clear novel caches
       clearNovelCaches();
@@ -1365,7 +1401,11 @@ router.delete('/:id', auth, async (req, res) => {
       });
 
     } catch (err) {
-      await session.abortTransaction();
+      // Only abort transaction if it hasn't been committed yet
+      if (!transactionCommitted) {
+        await session.abortTransaction();
+      }
+      
       attempt++;
       
       // Check if this is a transient error that can be retried
