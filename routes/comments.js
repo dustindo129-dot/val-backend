@@ -1041,7 +1041,7 @@ router.delete('/:commentId', auth, async (req, res) => {
       comment.isDeleted = true;
       comment.adminDeleted = true;
       
-      // If it's a root comment, apply the same to all replies
+      // If it's a root comment, apply the same to all replies (admin deletion cascades)
       if (!comment.parentId) {
         await Comment.updateMany(
           { parentId: comment._id },
@@ -1049,17 +1049,12 @@ router.delete('/:commentId', auth, async (req, res) => {
         );
       }
     } else {
-      // User deletion - show as [deleted]
+      // User deletion - show as [deleted] but keep thread structure intact
       comment.isDeleted = true;
       comment.adminDeleted = false;
       
-      // If it's a root comment, apply the same to all replies
-      if (!comment.parentId) {
-        await Comment.updateMany(
-          { parentId: comment._id },
-          { isDeleted: true, adminDeleted: false }
-        );
-      }
+      // For user deletions, do NOT cascade to replies - preserve thread structure
+      // Replies will remain visible and functional
     }
 
     await comment.save();
