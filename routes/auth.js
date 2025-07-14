@@ -189,14 +189,20 @@ router.post('/signup', async (req, res) => {
 
 /**
  * Login user and return JWT token
+ * Accepts both username and email as login identifier
  * @route POST /api/auth/login
  */
 router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    // Find user by username
-    const user = await User.findOne({ username });
+    // Find user by username OR email
+    const user = await User.findOne({ 
+      $or: [
+        { username: username },
+        { email: username }
+      ]
+    });
     if (!user) {
       return res.status(401).json({ message: 'Invalid username or password' });
     }
