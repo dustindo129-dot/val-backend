@@ -714,14 +714,30 @@ router.get('/:id', optionalAuth, async (req, res) => {
     // Populate staff ObjectIds with user display names
     const populatedChapter = await populateStaffNames(chapterData);
 
-    // Handle view counting asynchronously (fire-and-forget)
-    // Count views for all users (both authenticated and anonymous)
+    // Handle view counting asynchronously (fire-and-forget) with cooldown
+    // Count views for all users (both authenticated and anonymous) but with 4-hour cooldown
     setImmediate(async () => {
       try {
-        await Chapter.findByIdAndUpdate(req.params.id, { $inc: { views: 1 } });
+        let shouldIncrementView = false;
         
-        // Update recently read only for authenticated users
         if (req.user) {
+          // For authenticated users, check if they've viewed this chapter recently
+          const existingInteraction = await UserChapterInteraction.findOne({
+            userId: req.user._id,
+            chapterId: req.params.id
+          });
+          
+          if (!existingInteraction || !existingInteraction.lastReadAt) {
+            // First time viewing this chapter
+            shouldIncrementView = true;
+          } else {
+            // Check if last view was more than 4 hours ago
+            const fourHours = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
+            const timeSinceLastView = Date.now() - existingInteraction.lastReadAt.getTime();
+            shouldIncrementView = timeSinceLastView > fourHours;
+          }
+          
+          // Update user interaction regardless of view count
           await UserChapterInteraction.findOneAndUpdate(
             { userId: req.user._id, chapterId: req.params.id, novelId: chapterData.novelId },
             {
@@ -740,6 +756,16 @@ router.get('/:id', optionalAuth, async (req, res) => {
             },
             { upsert: true }
           );
+        } else {
+          // For anonymous users, we can't track individual cooldowns
+          // We'll rely on client-side localStorage to prevent spam
+          // Only increment view if this is likely a legitimate view
+          shouldIncrementView = true;
+        }
+        
+        // Only increment view count if cooldown has passed
+        if (shouldIncrementView) {
+          await Chapter.findByIdAndUpdate(req.params.id, { $inc: { views: 1 } });
         }
       } catch (error) {
         console.error('Error updating view count and recently read:', error);
@@ -2065,14 +2091,30 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
       moduleChapters: chapterData.allModuleChapters || []
     };
 
-    // Handle view counting asynchronously (fire-and-forget)
-    // Count views for all users (both authenticated and anonymous)
+    // Handle view counting asynchronously (fire-and-forget) with cooldown
+    // Count views for all users (both authenticated and anonymous) but with 4-hour cooldown
     setImmediate(async () => {
       try {
-        await Chapter.findByIdAndUpdate(chapterId, { $inc: { views: 1 } });
+        let shouldIncrementView = false;
         
-        // Update recently read only for authenticated users
         if (userId) {
+          // For authenticated users, check if they've viewed this chapter recently
+          const existingInteraction = await UserChapterInteraction.findOne({
+            userId,
+            chapterId
+          });
+          
+          if (!existingInteraction || !existingInteraction.lastReadAt) {
+            // First time viewing this chapter
+            shouldIncrementView = true;
+          } else {
+            // Check if last view was more than 4 hours ago
+            const fourHours = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
+            const timeSinceLastView = Date.now() - existingInteraction.lastReadAt.getTime();
+            shouldIncrementView = timeSinceLastView > fourHours;
+          }
+          
+          // Update user interaction regardless of view count
           await UserChapterInteraction.findOneAndUpdate(
             { userId, chapterId, novelId: chapterData.novel._id },
             {
@@ -2091,6 +2133,16 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
             },
             { upsert: true }
           );
+        } else {
+          // For anonymous users, we can't track individual cooldowns
+          // We'll rely on client-side localStorage to prevent spam
+          // Only increment view if this is likely a legitimate view
+          shouldIncrementView = true;
+        }
+        
+        // Only increment view count if cooldown has passed
+        if (shouldIncrementView) {
+          await Chapter.findByIdAndUpdate(chapterId, { $inc: { views: 1 } });
         }
       } catch (error) {
         console.error('Error updating view count and recently read:', error);
