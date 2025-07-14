@@ -24,6 +24,10 @@ const requestSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  contactInfo: {
+    type: String,
+    trim: true
+  },
   illustration: {
     type: String,
     trim: true

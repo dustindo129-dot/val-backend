@@ -17,7 +17,7 @@ const router = express.Router();
 router.get('/', async (req, res) => {
   try {
     // Get sort parameter (default to newest)
-    const { sort = 'newest' } = req.query;
+    const { sort = 'newest', includeAll = 'false' } = req.query;
     
     // Define sort criteria
     let sortCriteria = {};
@@ -30,13 +30,21 @@ router.get('/', async (req, res) => {
       sortCriteria = { createdAt: -1 };
     }
     
-    // Query both pending requests and approved web requests (exclude withdrawn)
-    const requests = await Request.find({ 
-      $or: [
-        { status: 'pending', type: { $in: ['new', 'web'] } },
-        { type: 'web', status: 'approved' }
-      ]
-    })
+    let query;
+    if (includeAll === 'true') {
+      // For history view - show ALL requests including withdrawn
+      query = {}; // No filter - show everything
+    } else {
+      // For main list view - show only pending requests and approved web requests
+      query = { 
+        $or: [
+          { status: 'pending', type: { $in: ['new', 'web'] } },
+          { type: 'web', status: 'approved' }
+        ]
+      };
+    }
+    
+    const requests = await Request.find(query)
       .populate('user', 'username displayName avatar role')
       .populate('novel', 'title _id')
       .populate('module', 'title _id')
@@ -67,7 +75,7 @@ router.post('/', auth, async (req, res) => {
   session.startTransaction();
   
   try {
-    const { type, title, novelId, moduleId, chapterId, deposit, note, goalBalance, image } = req.body;
+    const { type, title, novelId, moduleId, chapterId, deposit, note, contactInfo, goalBalance, image } = req.body;
     
     // Validate deposit amount (except for web requests which use goalBalance)
     if (type !== 'web' && (!deposit || isNaN(deposit) || deposit <= 0)) {
@@ -103,6 +111,11 @@ router.post('/', auth, async (req, res) => {
     // Add note if provided
     if (note) {
       requestData.note = note;
+    }
+    
+    // Add contactInfo if provided (only for 'new' requests)
+    if (contactInfo && type === 'new') {
+      requestData.contactInfo = contactInfo;
     }
     
     // Add illustration if provided
@@ -725,7 +738,7 @@ router.get('/history', auth, async (req, res) => {
 router.put('/:requestId', auth, async (req, res) => {
   try {
     const { requestId } = req.params;
-    const { note, illustration } = req.body;
+    const { note, contactInfo, illustration } = req.body;
     
     // Find the request
     const request = await Request.findById(requestId);
@@ -759,6 +772,10 @@ router.put('/:requestId', auth, async (req, res) => {
     
     if (note !== undefined) {
       updateData.note = note;
+    }
+    
+    if (contactInfo !== undefined && request.type === 'new') {
+      updateData.contactInfo = contactInfo;
     }
     
     if (illustration !== undefined) {
