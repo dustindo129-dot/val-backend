@@ -162,7 +162,7 @@ router.get('/novel/:novelId', async (req, res) => {
             localField: 'user',
             foreignField: '_id',
             pipeline: [
-              { $project: { username: 1, displayName: 1, avatar: 1 } }
+              { $project: { username: 1, displayName: 1, avatar: 1, role: 1 } }
             ],
             as: 'userInfo'
           }
@@ -226,7 +226,8 @@ router.get('/novel/:novelId', async (req, res) => {
             _id: '$userInfo._id',
             username: '$userInfo.username',
             displayName: '$userInfo.displayName',
-            avatar: '$userInfo.avatar'
+            avatar: '$userInfo.avatar',
+            role: '$userInfo.role'
           }
         }
       });
@@ -316,7 +317,7 @@ router.get('/', async (req, res) => {
             localField: 'user',
             foreignField: '_id',
             pipeline: [
-              { $project: { username: 1, displayName: 1, avatar: 1 } }
+              { $project: { username: 1, displayName: 1, avatar: 1, role: 1 } }
             ],
             as: 'userInfo'
           }
@@ -342,7 +343,8 @@ router.get('/', async (req, res) => {
               _id: '$userInfo._id',
               username: '$userInfo.username',
               displayName: '$userInfo.displayName',
-              avatar: '$userInfo.avatar'
+              avatar: '$userInfo.avatar',
+              role: '$userInfo.role'
             }
           }
         }
@@ -432,7 +434,7 @@ router.get('/recent', async (req, res) => {
             localField: 'user',
             foreignField: '_id',
             pipeline: [
-              { $project: { username: 1, displayName: 1, avatar: 1 } }
+              { $project: { username: 1, displayName: 1, avatar: 1, role: 1 } }
             ],
             as: 'userInfo'
           }
@@ -545,7 +547,8 @@ router.get('/recent', async (req, res) => {
               _id: '$userInfo._id',
               username: '$userInfo.username',
               displayName: '$userInfo.displayName',
-              avatar: '$userInfo.avatar'
+              avatar: '$userInfo.avatar',
+              role: '$userInfo.role'
             }
           }
         }
@@ -602,7 +605,7 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     clearUserStatsCache(req.user._id.toString());
     
     // Populate user info
-    await reply.populate('user', 'username displayName avatar');
+    await reply.populate('user', 'username displayName avatar role');
 
     // Create notification for the original commenter
     if (parentComment.user.toString() !== req.user._id.toString()) {
@@ -928,7 +931,7 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
     clearUserStatsCache(req.user._id.toString());
 
     // Populate user info
-    await comment.populate('user', 'username displayName avatar');
+    await comment.populate('user', 'username displayName avatar role');
 
     // Create follow notifications for users following this novel
     let novelId = null;
@@ -1007,7 +1010,7 @@ router.patch('/:commentId', auth, checkBan, async (req, res) => {
     clearAllCommentCaches();
     
     // Populate user info before returning
-    await comment.populate('user', 'username displayName avatar');
+    await comment.populate('user', 'username displayName avatar role');
     
     res.json(comment);
   } catch (error) {
