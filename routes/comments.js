@@ -4,6 +4,38 @@ import Comment from '../models/Comment.js';
 import { broadcastEvent } from '../services/sseService.js';
 import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification } from '../services/notificationService.js';
 
+// Helper function to get novel-specific roles for users
+const getNovelRoles = async (novel, userIds) => {
+  if (!novel?.active || !userIds?.length) return {};
+  
+  const roles = {};
+  const { pj_user, translator, editor, proofreader } = novel.active;
+  
+  userIds.forEach(userId => {
+    const userIdStr = userId.toString();
+    const userRoles = [];
+    
+    if (pj_user && pj_user.some(id => id.toString() === userIdStr)) {
+      userRoles.push('pj_user');
+    }
+    if (translator && translator.some(id => id.toString() === userIdStr)) {
+      userRoles.push('translator');
+    }
+    if (editor && editor.some(id => id.toString() === userIdStr)) {
+      userRoles.push('editor');
+    }
+    if (proofreader && proofreader.some(id => id.toString() === userIdStr)) {
+      userRoles.push('proofreader');
+    }
+    
+    if (userRoles.length > 0) {
+      roles[userIdStr] = userRoles;
+    }
+  });
+  
+  return roles;
+};
+
 const router = express.Router();
 
 // Simple in-memory cache for recent comments
@@ -234,13 +266,27 @@ router.get('/novel/:novelId', async (req, res) => {
 
       const allComments = await Comment.aggregate(pipeline);
 
-      // Add liked status if user is authenticated
+      // Get novel information for role checking
+      const Novel = (await import('../models/Novel.js')).default;
+      const novel = await Novel.findById(novelId);
+      
+      // Get novel-specific roles for comment authors
+      const userIds = [...new Set(allComments.map(comment => comment.user._id))];
+      const novelRoles = await getNovelRoles(novel, userIds);
+
+      // Add liked status and novel-specific roles if user is authenticated
       if (req.user) {
         const userId = req.user._id;
         allComments.forEach(comment => {
           comment.liked = comment.likes.includes(userId);
         });
       }
+
+      // Add novel-specific roles to each comment
+      allComments.forEach(comment => {
+        const userIdStr = comment.user._id.toString();
+        comment.user.novelRoles = novelRoles[userIdStr] || [];
+      });
 
       return allComments;
     });
@@ -352,6 +398,22 @@ router.get('/', async (req, res) => {
 
       const allComments = await Comment.aggregate(pipeline);
 
+      // Get novel information for role checking
+      let novel = null;
+      if (contentType === 'novels') {
+        const Novel = (await import('../models/Novel.js')).default;
+        novel = await Novel.findById(contentId);
+      } else if (contentType === 'chapters') {
+        // For chapters, get the novel from the chapter
+        const Chapter = (await import('../models/Chapter.js')).default;
+        const chapter = await Chapter.findById(contentId).populate('novelId');
+        novel = chapter?.novelId;
+      }
+      
+      // Get novel-specific roles for comment authors
+      const userIds = [...new Set(allComments.map(comment => comment.user._id))];
+      const novelRoles = novel ? await getNovelRoles(novel, userIds) : {};
+
       // Add liked status if user is authenticated
       if (req.user) {
         const userId = req.user._id;
@@ -359,6 +421,12 @@ router.get('/', async (req, res) => {
           comment.liked = comment.likes.includes(userId);
         });
       }
+
+      // Add novel-specific roles to each comment
+      allComments.forEach(comment => {
+        const userIdStr = comment.user._id.toString();
+        comment.user.novelRoles = novelRoles[userIdStr] || [];
+      });
 
       return allComments;
     });
