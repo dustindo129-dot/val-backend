@@ -1915,9 +1915,15 @@ router.put("/:id", [auth, admin], async (req, res) => {
           );
           
           // Check if these users are managing any other novels ACTIVELY
+          // Need to check for both ObjectId and string representations since active.pj_user is Mixed type
+          const userIdStrings = removedFromActivePjUsers; // These are already strings
+          
           const stillManagingNovels = await Novel.find({
-            _id: { $ne: req.params.id }, // Exclude current novel
-            'active.pj_user': { $in: removedObjectIds }
+            _id: { $ne: novelId }, // Exclude current novel - USE novelId instead of req.params.id
+            $or: [
+              { 'active.pj_user': { $in: removedObjectIds } }, // Check ObjectId format
+              { 'active.pj_user': { $in: userIdStrings } }     // Check string format
+            ]
           }).lean();
           
           const stillManagingUserIds = new Set();
@@ -1925,7 +1931,9 @@ router.put("/:id", [auth, admin], async (req, res) => {
             if (otherNovel.active?.pj_user) {
               otherNovel.active.pj_user.forEach(userId => {
                 // Add all users who are still active pj_users in other novels
-                stillManagingUserIds.add(userId.toString());
+                const userIdStr = userId.toString();
+                stillManagingUserIds.add(userIdStr);
+                console.log(`[NOVEL UPDATE] User ${userIdStr} is still active pj_user in novel "${otherNovel.title}"`);
               });
             }
           });
@@ -1945,7 +1953,7 @@ router.put("/:id", [auth, admin], async (req, res) => {
             const usersToActuallyDemote = await User.find({
               _id: { $in: demoteObjectIds },
               role: 'pj_user'
-            }).select('_id username').lean();
+            }).select('_id username displayName role').lean();
             
             if (usersToActuallyDemote.length > 0) {
               await User.updateMany(
