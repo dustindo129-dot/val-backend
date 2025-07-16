@@ -222,9 +222,19 @@ router.get('/novel/:novelId', async (req, res) => {
                       {
                         $or: [
                           // Handle contentId format: "novelId-chapterId"
-                          { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] },
-                          // Handle direct chapter ID
-                          { $eq: [{ $toString: '$_id' }, '$$contentId'] }
+                          { 
+                            $and: [
+                              { $ne: [{ $indexOfCP: ['$$contentId', '-'] }, -1] },  // Contains dash
+                              { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] }
+                            ]
+                          },
+                          // Handle direct chapter ID (no dash)
+                          { 
+                            $and: [
+                              { $eq: [{ $indexOfCP: ['$$contentId', '-'] }, -1] },  // No dash
+                              { $eq: [{ $toString: '$_id' }, '$$contentId'] }
+                            ]
+                          }
                         ]
                       }
                     ]
@@ -406,7 +416,15 @@ router.get('/', async (req, res) => {
       } else if (contentType === 'chapters') {
         // For chapters, get the novel from the chapter
         const Chapter = (await import('../models/Chapter.js')).default;
-        const chapter = await Chapter.findById(contentId).populate('novelId');
+        
+        // Handle contentId format: "novelId-chapterId" or direct chapterId
+        let chapterId = contentId;
+        if (contentId.includes('-')) {
+          const parts = contentId.split('-');
+          chapterId = parts[1]; // Take the second part as chapterId
+        }
+        
+        const chapter = await Chapter.findById(chapterId).populate('novelId');
         novel = chapter?.novelId;
       }
       
@@ -548,8 +566,24 @@ router.get('/recent', async (req, res) => {
                   $expr: {
                     $and: [
                       { $eq: ['$$contentType', 'chapters'] },
-                      // Handle contentId format: "novelId-chapterId"
-                      { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] }
+                      {
+                        $or: [
+                          // Handle contentId format: "novelId-chapterId"
+                          { 
+                            $and: [
+                              { $ne: [{ $indexOfCP: ['$$contentId', '-'] }, -1] },  // Contains dash
+                              { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] }
+                            ]
+                          },
+                          // Handle direct chapter ID (no dash)
+                          { 
+                            $and: [
+                              { $eq: [{ $indexOfCP: ['$$contentId', '-'] }, -1] },  // No dash
+                              { $eq: [{ $toString: '$_id' }, '$$contentId'] }
+                            ]
+                          }
+                        ]
+                      }
                     ]
                   }
                 }
