@@ -943,7 +943,230 @@ router.get("/", optionalAuth, async (req, res) => {
     const bypass = shouldBypassCache(req.path, req.query);
     console.log(`Novel list request: ${bypass ? 'Bypassing cache' : 'Using cache if available'}`);
 
-    // Check if this is an admin dashboard request (needs full data)
+    // SECURITY FIX: Always check user role first before any other logic
+    // If user is pj_user, ALWAYS apply role-based filtering regardless of query parameters
+    const isPjUser = req.user && req.user.role === 'pj_user';
+    
+    // For pj_user, ALWAYS use filtered query - no exceptions
+    if (isPjUser) {
+      console.log('pj_user request detected - applying role-based filtering');
+      
+      // Build the query conditions, only including defined values
+      const queryConditions = [];
+      
+      // Always include the ObjectId as string
+      if (req.user._id) {
+        queryConditions.push({ 'active.pj_user': req.user._id.toString() });
+      }
+      
+      // Only include user.id if it's defined
+      if (req.user.id) {
+        queryConditions.push({ 'active.pj_user': req.user.id });
+      }
+      
+      // Only include username if it's defined
+      if (req.user.username) {
+        queryConditions.push({ 'active.pj_user': req.user.username });
+      }
+      
+      // If no valid conditions, return empty result
+      if (queryConditions.length === 0) {
+        return res.json({
+          novels: [],
+          pagination: {
+            currentPage: 1,
+            totalPages: 1,
+            totalItems: 0
+          }
+        });
+      }
+      
+      // Check if paid content info is requested
+      const includePaidInfo = req.query.includePaidInfo === 'true';
+      
+      // Find novels where the user is in active.pj_user array
+      let userManagedNovels;
+      
+      if (includePaidInfo) {
+        // Use aggregation to include paid content info for pj_user
+        userManagedNovels = await Novel.aggregate([
+          {
+            $match: {
+              $or: queryConditions
+            }
+          },
+          // Lookup modules to check for paid content
+          {
+            $lookup: {
+              from: 'modules',
+              localField: '_id',
+              foreignField: 'novelId',
+              pipeline: [
+                {
+                  $project: {
+                    mode: 1,
+                    moduleBalance: 1,
+                    rentBalance: 1
+                  }
+                }
+              ],
+              as: 'modules'
+            }
+          },
+          // Lookup chapters to check for paid content
+          {
+            $lookup: {
+              from: 'chapters',
+              localField: '_id',
+              foreignField: 'novelId',
+              pipeline: [
+                {
+                  $project: {
+                    mode: 1,
+                    chapterBalance: 1,
+                    moduleId: 1
+                  }
+                }
+              ],
+              as: 'chapters'
+            }
+          },
+          // Add fields to check for paid content
+          {
+            $addFields: {
+              hasPaidContent: {
+                $or: [
+                  // Check if any module has positive balance AND is still paid mode
+                  {
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: '$modules',
+                            cond: { 
+                              $and: [
+                                { $gt: ['$$this.moduleBalance', 0] },
+                                { $eq: ['$$this.mode', 'paid'] }
+                              ]
+                            }
+                          }
+                        }
+                      },
+                      0
+                    ]
+                  },
+                  // Check if any chapter has positive balance AND is still paid mode
+                  {
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: '$chapters',
+                            cond: { 
+                              $and: [
+                                { $gt: ['$$this.chapterBalance', 0] },
+                                { $eq: ['$$this.mode', 'paid'] }
+                              ]
+                            }
+                          }
+                        }
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              paidModulesCount: {
+                $size: {
+                  $filter: {
+                    input: '$modules',
+                    cond: { 
+                      $and: [
+                        { $gt: ['$$this.moduleBalance', 0] },
+                        { $eq: ['$$this.mode', 'paid'] }
+                      ]
+                    }
+                  }
+                }
+              },
+              paidChaptersCount: {
+                $size: {
+                  $filter: {
+                    input: '$chapters',
+                    cond: { 
+                      $and: [
+                        { $gt: ['$$this.chapterBalance', 0] },
+                        { $eq: ['$$this.mode', 'paid'] }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          // Filter to only include novels with current paid content (if requested)
+          ...(req.query.sortType === 'paid' ? [{
+            $match: {
+              $or: [
+                { paidModulesCount: { $gt: 0 } },
+                { paidChaptersCount: { $gt: 0 } }
+              ]
+            }
+          }] : []),
+          {
+            $project: {
+              title: 1,
+              illustration: 1,
+              author: 1,
+              illustrator: 1,
+              status: 1,
+              genres: 1,
+              alternativeTitles: 1,
+              updatedAt: 1,
+              createdAt: 1,
+              description: 1,
+              note: 1,
+              active: 1,
+              inactive: 1,
+              novelBalance: 1,
+              novelBudget: 1,
+              hasPaidContent: 1,
+              paidModulesCount: 1,
+              paidChaptersCount: 1,
+              availableForRent: 1
+            }
+          },
+          { $sort: { updatedAt: -1 } }
+        ]);
+      } else {
+        // Use simple find for pj_user without paid content info
+        userManagedNovels = await Novel.find({
+          $or: queryConditions
+        })
+        .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget availableForRent')
+        .sort({ updatedAt: -1 })
+        .lean();
+      }
+
+      // Skip expensive chapter lookups and staff population for pj_user - they don't need them for dashboard
+      const skipPopulation = req.query.skipPopulation === 'true';
+      const finalNovels = skipPopulation ? userManagedNovels : await Promise.all(
+        userManagedNovels.map(novel => populateStaffNames(novel))
+      );
+
+      const response = {
+        novels: finalNovels,
+        pagination: {
+          currentPage: 1,
+          totalPages: 1,
+          totalItems: finalNovels.length
+        }
+      };
+
+      return res.json(response);
+    }
+
+    // Check if this is an admin dashboard request (needs full data) for admin/moderator users
     // Admin dashboard typically requests with limit=1000 and skipPopulation=true
     // Also check for includePaidInfo which is only used by admin dashboard
     const isAdminDashboardRequest = req.query.limit === '1000' && (req.query.skipPopulation === 'true' || req.query.includePaidInfo === 'true');
@@ -955,7 +1178,7 @@ router.get("/", optionalAuth, async (req, res) => {
     // Check if paid content info is requested
     const includePaidInfo = req.query.includePaidInfo === 'true';
     
-    // Use lightweight query for homepage and novel directory (ALL users including pj_user get same optimized data)
+    // Use lightweight query for homepage and novel directory (public access)
     if (!isAdminDashboardRequest) {
       // Generate cache key based on pagination and request type
       const requestType = isNovelDirectoryRequest ? 'directory' : 'homepage';
@@ -1082,222 +1305,9 @@ router.get("/", optionalAuth, async (req, res) => {
 
     // ADMIN DASHBOARD REQUESTS ONLY - Apply role-based filtering here
     
-    // Check if user is authenticated and is pj_user (only for admin dashboard)
-    const isPjUser = req.user && req.user.role === 'pj_user';
+    // Note: pj_user filtering is already handled above, this section is for admin/moderator only
 
-    // For pj_user, use optimized query with server-side filtering
-    if (isPjUser) {
-      // Build the query conditions, only including defined values
-      const queryConditions = [];
-      
-      // Always include the ObjectId as string
-      if (req.user._id) {
-        queryConditions.push({ 'active.pj_user': req.user._id.toString() });
-      }
-      
-      // Only include user.id if it's defined
-      if (req.user.id) {
-        queryConditions.push({ 'active.pj_user': req.user.id });
-      }
-      
-      // Only include username if it's defined
-      if (req.user.username) {
-        queryConditions.push({ 'active.pj_user': req.user.username });
-      }
-      
-      // If no valid conditions, return empty result
-      if (queryConditions.length === 0) {
-        return res.json({
-          novels: [],
-          pagination: {
-            currentPage: 1,
-            totalPages: 1,
-            totalItems: 0
-          }
-        });
-      }
-      
-      // Find novels where the user is in active.pj_user array
-      let userManagedNovels;
-      
-      if (includePaidInfo) {
-        // Use aggregation to include paid content info for pj_user
-        userManagedNovels = await Novel.aggregate([
-          {
-            $match: {
-              $or: queryConditions
-            }
-          },
-          // Lookup modules to check for paid content
-          {
-            $lookup: {
-              from: 'modules',
-              localField: '_id',
-              foreignField: 'novelId',
-              pipeline: [
-                {
-                  $project: {
-                    mode: 1,
-                    moduleBalance: 1,
-                    rentBalance: 1
-                  }
-                }
-              ],
-              as: 'modules'
-            }
-          },
-          // Lookup chapters to check for paid content
-          {
-            $lookup: {
-              from: 'chapters',
-              localField: '_id',
-              foreignField: 'novelId',
-              pipeline: [
-                {
-                  $project: {
-                    mode: 1,
-                    chapterBalance: 1,
-                    moduleId: 1
-                  }
-                }
-              ],
-              as: 'chapters'
-            }
-          },
-          // Add fields to check for paid content
-          {
-            $addFields: {
-              hasPaidContent: {
-                $or: [
-                  // Check if any module has positive balance AND is still paid mode
-                  {
-                    $gt: [
-                      {
-                        $size: {
-                          $filter: {
-                            input: '$modules',
-                            cond: { 
-                              $and: [
-                                { $gt: ['$$this.moduleBalance', 0] },
-                                { $eq: ['$$this.mode', 'paid'] }
-                              ]
-                            }
-                          }
-                        }
-                      },
-                      0
-                    ]
-                  },
-                  // Check if any chapter has positive balance AND is still paid mode
-                  {
-                    $gt: [
-                      {
-                        $size: {
-                          $filter: {
-                            input: '$chapters',
-                            cond: { 
-                              $and: [
-                                { $gt: ['$$this.chapterBalance', 0] },
-                                { $eq: ['$$this.mode', 'paid'] }
-                              ]
-                            }
-                          }
-                        }
-                      },
-                      0
-                    ]
-                  }
-                ]
-              },
-              paidModulesCount: {
-                $size: {
-                  $filter: {
-                    input: '$modules',
-                    cond: { 
-                      $and: [
-                        { $gt: ['$$this.moduleBalance', 0] },
-                        { $eq: ['$$this.mode', 'paid'] }
-                      ]
-                    }
-                  }
-                }
-              },
-              paidChaptersCount: {
-                $size: {
-                  $filter: {
-                    input: '$chapters',
-                    cond: { 
-                      $and: [
-                        { $gt: ['$$this.chapterBalance', 0] },
-                        { $eq: ['$$this.mode', 'paid'] }
-                      ]
-                    }
-                  }
-                }
-              }
-            }
-          },
-          // Filter to only include novels with current paid content
-          {
-            $match: {
-              $or: [
-                { paidModulesCount: { $gt: 0 } },
-                { paidChaptersCount: { $gt: 0 } }
-              ]
-            }
-          },
-          {
-            $project: {
-              title: 1,
-              illustration: 1,
-              author: 1,
-              illustrator: 1,
-              status: 1,
-              genres: 1,
-              alternativeTitles: 1,
-              updatedAt: 1,
-              createdAt: 1,
-              description: 1,
-              note: 1,
-              active: 1,
-              inactive: 1,
-              novelBalance: 1,
-              novelBudget: 1,
-              hasPaidContent: 1,
-              paidModulesCount: 1,
-              paidChaptersCount: 1,
-              availableForRent: 1
-            }
-          },
-          { $sort: { updatedAt: -1 } }
-        ]);
-      } else {
-        // Use simple find for pj_user without paid content info
-        userManagedNovels = await Novel.find({
-          $or: queryConditions
-        })
-        .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget availableForRent')
-        .sort({ updatedAt: -1 })
-        .lean();
-      }
-
-      // Skip expensive chapter lookups and staff population for pj_user - they don't need them for dashboard
-      const skipPopulation = req.query.skipPopulation === 'true';
-      const finalNovels = skipPopulation ? userManagedNovels : await Promise.all(
-        userManagedNovels.map(novel => populateStaffNames(novel))
-      );
-
-      const response = {
-        novels: finalNovels,
-        pagination: {
-          currentPage: 1,
-          totalPages: 1,
-          totalItems: finalNovels.length
-        }
-      };
-
-      return res.json(response);
-    }
+    // This section should never be reached by pj_user due to the security fix above
 
     // For admin/moderator/regular users, use the full aggregation
     // Generate cache key based on pagination, user role, and paid content info
