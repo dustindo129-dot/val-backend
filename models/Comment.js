@@ -103,6 +103,11 @@ const commentSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }],
+  // Track all users who have EVER liked this comment (for notification spam prevention)
+  likeHistory: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
   isDeleted: {
     type: Boolean,
     default: false
@@ -132,6 +137,7 @@ commentSchema.index({ contentType: 1, contentId: 1, adminDeleted: 1 });
 commentSchema.index({ createdAt: -1 });
 commentSchema.index({ user: 1, isDeleted: 1 });
 commentSchema.index({ isPinned: 1, contentType: 1, contentId: 1 });
+commentSchema.index({ likeHistory: 1 }); // Index for checking like history
 // Index for novel comment queries (including regex searches)
 commentSchema.index({ contentType: 1, contentId: 1, adminDeleted: 1, createdAt: -1 });
 

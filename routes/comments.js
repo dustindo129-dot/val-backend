@@ -807,39 +807,92 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
 });
 
 /**
- * Like a comment
+ * Like a comment (Facebook-style with metadata and real-time updates)
  * Toggles like status
  * @route POST /api/comments/:commentId/like
  */
 router.post('/:commentId/like', auth, checkBan, async (req, res) => {
   try {
     const userId = req.user._id;
+    const { timestamp, deviceId } = req.body;
 
-    // Get the comment before updating to check previous like status
-    const commentBefore = await Comment.findById(req.params.commentId);
-    if (!commentBefore) {
-      return res.status(404).json({ message: 'Comment not found' });
-    }
-
-    const wasLiked = commentBefore.likes.includes(userId);
-
-    // Use findOneAndUpdate to handle concurrent requests atomically
+    // Single atomic update operation with duplicate prevention
     const comment = await Comment.findOneAndUpdate(
       { _id: req.params.commentId },
       [
         {
           $set: {
+            // First ensure likes array exists and has no duplicates
             likes: {
               $cond: {
                 if: { $in: [userId, "$likes"] },
-                then: { $filter: { input: "$likes", cond: { $ne: ["$$this", userId] } } },
-                else: { $concatArrays: ["$likes", [userId]] }
+                then: { 
+                  // If already liked, remove the like
+                  $filter: { 
+                    input: "$likes", 
+                    cond: { $ne: ["$$this", userId] } 
+                  }
+                },
+                else: { 
+                  // If not liked, add like (with duplicate prevention)
+                  $reduce: {
+                    input: { $concatArrays: [{ $ifNull: ["$likes", []] }, [userId]] },
+                    initialValue: [],
+                    in: {
+                      $cond: {
+                        if: { $in: ["$$this", "$$value"] },
+                        then: "$$value",
+                        else: { $concatArrays: ["$$value", ["$$this"]] }
+                      }
+                    }
+                  }
+                }
               }
-            }
+            },
+            // Add to likeHistory with duplicate prevention
+            likeHistory: {
+              $reduce: {
+                input: { 
+                  $concatArrays: [
+                    { $ifNull: ["$likeHistory", []] }, 
+                    [userId]
+                  ]
+                },
+                initialValue: [],
+                in: {
+                  $cond: {
+                    if: { $in: ["$$this", "$$value"] },
+                    then: "$$value",
+                    else: { $concatArrays: ["$$value", ["$$this"]] }
+                  }
+                }
+              }
+            },
+            // Calculate if this is a first-time like
+            isFirstTimeLike: {
+              $and: [
+                { $not: [{ $in: [userId, { $ifNull: ["$likeHistory", []] }] }] },
+                { $not: [{ $in: [userId, { $ifNull: ["$likes", []] }] }] }
+              ]
+            },
+            // Store metadata
+            lastLikeTimestamp: timestamp || new Date(),
+            lastLikeDeviceId: deviceId
           }
         }
       ],
-      { new: true }
+      { 
+        new: true,
+        projection: { 
+          likes: 1, 
+          user: 1, 
+          contentType: 1, 
+          contentId: 1,
+          likeHistory: 1,
+          isFirstTimeLike: 1,
+          lastLikeTimestamp: 1
+        }
+      }
     );
 
     if (!comment) {
@@ -847,10 +900,10 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
     }
 
     const isLiked = comment.likes.includes(userId);
+    const serverTimestamp = Date.now();
 
-    // Create notification only when liking (not when unliking)
-    if (!wasLiked && isLiked) {
-      // Extract novelId and chapterId from contentId and contentType
+    // Create notification only when liking for the FIRST TIME EVER
+    if (comment.isFirstTimeLike && isLiked && comment.user.toString() !== userId.toString()) {
       let novelId = null;
       let chapterId = null;
       
@@ -888,9 +941,19 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
       }
     }
 
+    // Broadcast real-time update to all connected clients
+    broadcastEvent('comment_like_update', {
+      commentId: comment._id.toString(),
+      likeCount: comment.likes.length,
+      likedBy: comment.likes.map(id => id.toString()),
+      timestamp: serverTimestamp,
+      deviceId: deviceId
+    });
+
     res.json({
       likes: comment.likes.length,
-      liked: isLiked
+      liked: isLiked,
+      timestamp: serverTimestamp
     });
   } catch (err) {
     console.error('Error processing like:', err);
