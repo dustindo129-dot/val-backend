@@ -943,12 +943,18 @@ router.get("/", optionalAuth, async (req, res) => {
     const bypass = shouldBypassCache(req.path, req.query);
     console.log(`Novel list request: ${bypass ? 'Bypassing cache' : 'Using cache if available'}`);
 
-    // SECURITY FIX: Always check user role first before any other logic
-    // If user is pj_user, ALWAYS apply role-based filtering regardless of query parameters
+    // Check if this is an admin dashboard request (needs full data) for admin/moderator users
+    // Admin dashboard typically requests with limit=1000 and bypass=true and (skipPopulation=true OR includePaidInfo=true)
+    const isAdminDashboardRequest = req.query.limit === '1000' && 
+                                  req.query.bypass === 'true' && 
+                                  (req.query.skipPopulation === 'true' || req.query.includePaidInfo === 'true');
+    
+    // SECURITY FIX: For pj_user, ONLY apply filtering if this is an admin dashboard request
+    // Public browsing (homepage, novel directory) should show all novels to everyone including pj_user
     const isPjUser = req.user && req.user.role === 'pj_user';
     
-    // For pj_user, ALWAYS use filtered query - no exceptions
-    if (isPjUser) {
+    // For pj_user making admin dashboard requests, apply role-based filtering
+    if (isPjUser && isAdminDashboardRequest) {
       console.log('pj_user request detected - applying role-based filtering');
       
       // Build the query conditions, only including defined values
@@ -1166,10 +1172,7 @@ router.get("/", optionalAuth, async (req, res) => {
       return res.json(response);
     }
 
-    // Check if this is an admin dashboard request (needs full data) for admin/moderator users
-    // Admin dashboard typically requests with limit=1000 and skipPopulation=true
-    // Also check for includePaidInfo which is only used by admin dashboard
-    const isAdminDashboardRequest = req.query.limit === '1000' && (req.query.skipPopulation === 'true' || req.query.includePaidInfo === 'true');
+    // Note: isAdminDashboardRequest is already defined above with more secure logic
     
     // Check if this is a novel directory request (needs word count)
     // Novel directory typically requests with limit=1000 but no skipPopulation
@@ -1303,13 +1306,8 @@ router.get("/", optionalAuth, async (req, res) => {
       return res.json(response);
     }
 
-    // ADMIN DASHBOARD REQUESTS ONLY - Apply role-based filtering here
-    
-    // Note: pj_user filtering is already handled above, this section is for admin/moderator only
-
-    // This section should never be reached by pj_user due to the security fix above
-
     // For admin/moderator/regular users, use the full aggregation
+    // Note: pj_user can reach this section for public browsing (homepage, novel directory)
     // Generate cache key based on pagination, user role, and paid content info
     const cacheKey = `novels_page_${page}_limit_${limit}_${req.user?.role || 'guest'}_paid_${includePaidInfo}`;
     const cachedData = bypass ? null : cache.get(cacheKey);
