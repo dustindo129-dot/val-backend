@@ -15,7 +15,16 @@ const userSchema = new mongoose.Schema({
   username: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    minlength: 3,
+    maxlength: 20,
+    validate: {
+      validator: function(v) {
+        // Only allow letters, numbers, and underscores
+        return /^[a-zA-Z0-9_]{3,20}$/.test(v);
+      },
+      message: props => `${props.value} không phải là tên người dùng hợp lệ. Chỉ được chứa chữ cái, số và dấu gạch dưới (_), độ dài từ 3-20 ký tự.`
+    }
   },
   displayName: {
     type: String,
@@ -29,7 +38,14 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true,
     trim: true,
-    lowercase: true
+    lowercase: true,
+    validate: {
+      validator: function(v) {
+        // Ensure email is not the same as username
+        return v !== this.username;
+      },
+      message: 'Email không được giống với tên người dùng'
+    }
   },
   password: {
     type: String,
