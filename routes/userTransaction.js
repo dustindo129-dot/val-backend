@@ -33,8 +33,8 @@ router.get('/user/:userId', auth, async (req, res) => {
       .sort({ createdAt: -1 })
       .skip(Number(offset))
       .limit(Number(limit))
-      .populate('user', 'username avatar')
-      .populate('performedBy', 'username role');
+      .populate('user', 'username displayName avatar')
+      .populate('performedBy', 'username displayName role');
     
     // Get total count for pagination
     const total = await UserTransaction.countDocuments(query);
@@ -74,7 +74,7 @@ router.get('/me', auth, async (req, res) => {
       .sort({ createdAt: -1 })
       .skip(Number(offset))
       .limit(Number(limit))
-      .populate('performedBy', 'username role');
+      .populate('performedBy', 'username displayName role');
     
     // Get total count for pagination
     const total = await UserTransaction.countDocuments(query);
@@ -183,8 +183,8 @@ router.get('/', auth, async (req, res) => {
       .sort({ createdAt: -1 })
       .skip(Number(offset))
       .limit(Number(limit))
-      .populate('user', 'username avatar')
-      .populate('performedBy', 'username role');
+      .populate('user', 'username displayName avatar')
+      .populate('performedBy', 'username displayName role');
     
     // Get total count for pagination
     const total = await UserTransaction.countDocuments(query);
@@ -255,10 +255,10 @@ router.get('/user-transactions', auth, async (req, res) => {
         .sort({ createdAt: -1 })
         .skip(Number(offset))
         .limit(Number(limit))
-        .populate('user', 'username avatar')
+        .populate('user', 'username displayName avatar')
         .populate({
           path: 'performedBy',
-          select: 'username role',
+          select: 'username displayName role',
           // Handle case where the performedBy user might not exist
           match: { _id: { $ne: null } }
         });
