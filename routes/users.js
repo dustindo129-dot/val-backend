@@ -384,6 +384,13 @@ router.put('/:displayNameSlug/display-name', auth, async (req, res) => {
       return res.status(400).json({ message: 'Display name cannot exceed 50 characters' });
     }
 
+    // Validate display name format (no special characters or spaces for new display names)
+    if (!/^[a-zA-Z0-9_]{1,50}$/.test(displayName.trim())) {
+      return res.status(400).json({ 
+        message: 'Tên hiển thị chỉ được chứa chữ cái, số và dấu gạch dưới (_), không được có khoảng trắng hoặc ký tự đặc biệt.'
+      });
+    }
+
     // Get user
     const user = await User.findById(req.user._id);
 
