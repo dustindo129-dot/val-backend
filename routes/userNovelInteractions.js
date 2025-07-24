@@ -635,7 +635,7 @@ router.get('/reviews/:novelId', async (req, res) => {
       novelId,
       review: { $exists: true, $ne: null }
     })
-    .populate('userId', 'username avatar') // Get user information
+    .populate('userId', 'username displayName avatar') // Get user information
     .sort({ updatedAt: -1 }) // Newest first
     .skip(skip)
     .limit(limit);

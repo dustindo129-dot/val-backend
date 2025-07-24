@@ -204,6 +204,30 @@ router.get('/novel/:novelId', async (req, res) => {
         }
       );
 
+      // Add novel lookup for role checking
+      pipeline.push({
+        $lookup: {
+          from: 'novels',
+          let: { contentId: '$contentId' },
+          pipeline: [
+            {
+              $match: {
+                $expr: { $eq: [{ $toString: '$_id' }, novelId] }
+              }
+            },
+            {
+              $project: {
+                'active.pj_user': 1,
+                'active.translator': 1,
+                'active.editor': 1,
+                'active.proofreader': 1
+              }
+            }
+          ],
+          as: 'novelInfo'
+        }
+      });
+
       // Add chapter info lookup only if we have chapter comments
       if (chapterIds.length > 0) {
         pipeline.push({
@@ -270,19 +294,16 @@ router.get('/novel/:novelId', async (req, res) => {
             displayName: '$userInfo.displayName',
             avatar: '$userInfo.avatar',
             role: '$userInfo.role'
-          }
+          },
+          novelInfo: { $arrayElemAt: ['$novelInfo', 0] }
         }
       });
 
       const allComments = await Comment.aggregate(pipeline);
 
-      // Get novel information for role checking
-      const Novel = (await import('../models/Novel.js')).default;
-      const novel = await Novel.findById(novelId);
-      
-      // Get novel-specific roles for comment authors
+      // Get novel-specific roles for comment authors using the novel data from aggregation
       const userIds = [...new Set(allComments.map(comment => comment.user._id))];
-      const novelRoles = await getNovelRoles(novel, userIds);
+      const novelRoles = allComments[0]?.novelInfo ? await getNovelRoles(allComments[0].novelInfo, userIds) : {};
 
       // Add liked status and novel-specific roles if user is authenticated
       if (req.user) {
@@ -296,6 +317,8 @@ router.get('/novel/:novelId', async (req, res) => {
       allComments.forEach(comment => {
         const userIdStr = comment.user._id.toString();
         comment.user.novelRoles = novelRoles[userIdStr] || [];
+        // Clean up the novelInfo since we don't need to send it to client
+        delete comment.novelInfo;
       });
 
       return allComments;
