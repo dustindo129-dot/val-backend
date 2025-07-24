@@ -22,6 +22,13 @@ router.post('/register-admin', async (req, res) => {
       return res.status(403).json({ message: 'Invalid admin code' });
     }
 
+    // Validate username format (only for new signups)
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+      return res.status(400).json({ 
+        message: 'Tên người dùng chỉ được chứa chữ cái, số và dấu gạch dưới (_), độ dài từ 3-20 ký tự.'
+      });
+    }
+
     // Check if user already exists
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
@@ -104,6 +111,13 @@ router.post('/signup', async (req, res) => {
 
     if (!username) {
       return res.status(400).json({ message: 'Username is required' });
+    }
+
+    // Validate username format (only for new signups)
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+      return res.status(400).json({ 
+        message: 'Tên người dùng chỉ được chứa chữ cái, số và dấu gạch dưới (_), độ dài từ 3-20 ký tự.'
+      });
     }
 
     // First check username separately
