@@ -116,6 +116,20 @@ const commentSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Fields for tracking admin/moderator deletions
+  deletionReason: {
+    type: String,
+    default: ''
+  },
+  deletedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  deletedAt: {
+    type: Date,
+    default: null
+  },
   isPinned: {
     type: Boolean,
     default: false

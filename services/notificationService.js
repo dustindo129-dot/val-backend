@@ -393,6 +393,88 @@ export const createLikedCommentNotification = async (commentOwnerId, commentId, 
 };
 
 /**
+ * Create notification for comment deletion by admin/moderator
+ * @param {string} commentOwnerId - ID of the user who owns the deleted comment
+ * @param {string} moderatorId - ID of the admin/moderator who deleted the comment
+ * @param {string} reason - Reason for deletion
+ * @param {string} novelId - ID of the novel where the comment was made
+ * @param {string} chapterId - ID of the chapter where the comment was made (optional)
+ * @param {string} commentText - Preview of the deleted comment
+ */
+export const createCommentDeletionNotification = async (commentOwnerId, moderatorId, reason, novelId, chapterId = null, commentText = '') => {
+  try {
+    // Don't notify if moderator is deleting their own comment
+    if (commentOwnerId === moderatorId) {
+      return;
+    }
+
+    const [novel, moderator] = await Promise.all([
+      Novel.findById(novelId),
+      User.findById(moderatorId).select('displayName username role')
+    ]);
+
+    if (!novel || !moderator) return;
+
+    const moderatorTitle = moderator.role === 'admin' ? 'Admin' : 'Mod';
+
+    // Create a preview of the comment (first 50 characters)
+    const commentPreview = commentText ? 
+      (commentText.length > 50 ? commentText.substring(0, 50) + '...' : commentText) : 
+      'bình luận của bạn';
+
+    let message;
+    let linkData = { 
+      novelId, 
+      novelTitle: novel.title
+    };
+
+    if (chapterId) {
+      const chapter = await Chapter.findById(chapterId);
+      if (chapter) {
+        message = `<b>${moderatorTitle}</b> đã xóa ${commentPreview} tại <b>${chapter.title}</b> trong truyện <b>${novel.title}</b>`;
+        linkData.chapterId = chapterId;
+        linkData.chapterTitle = chapter.title;
+      } else {
+        message = `<b>${moderatorTitle}</b> đã xóa ${commentPreview} trong truyện <b>${novel.title}</b>`;
+      }
+    } else {
+      message = `<b>${moderatorTitle}</b> đã xóa ${commentPreview} trong truyện <b>${novel.title}</b>`;
+    }
+
+    // Add reason to message if provided
+    if (reason && reason.trim()) {
+      message += `<br><b>Lý do:</b> ${reason.trim()}`;
+    }
+
+    const notification = new Notification({
+      userId: commentOwnerId,
+      type: 'comment_deleted',
+      title: 'Bình luận bị xóa',
+      message,
+      relatedUser: moderatorId,
+      relatedNovel: novelId,
+      relatedChapter: chapterId,
+      data: {
+        ...linkData,
+        reason: reason || '',
+        moderatorRole: moderator.role
+      }
+    });
+
+    await notification.save();
+    console.log(`Comment deletion notification created for user ${commentOwnerId}`);
+    
+    // Broadcast new notification event to specific user only
+    broadcastEventToUser('new_notification', {
+      userId: commentOwnerId,
+      notification: notification.toObject()
+    }, commentOwnerId);
+  } catch (error) {
+    console.error('Error creating comment deletion notification:', error);
+  }
+};
+
+/**
  * Get unread notification count for a user
  * @param {string} userId - ID of the user
  * @returns {number} Count of unread notifications

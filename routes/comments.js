@@ -2,7 +2,7 @@ import express from 'express';
 import { auth, checkBan } from '../middleware/auth.js';
 import Comment from '../models/Comment.js';
 import { broadcastEvent } from '../services/sseService.js';
-import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification } from '../services/notificationService.js';
+import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification, createCommentDeletionNotification } from '../services/notificationService.js';
 
 // Helper function to get novel-specific roles for users
 const getNovelRoles = async (novel, userIds) => {
@@ -1186,7 +1186,7 @@ router.patch('/:commentId', auth, checkBan, async (req, res) => {
 
 /**
  * Delete a comment
- * Only comment author or admin can delete
+ * Only comment author, admin, or moderator can delete
  * @route DELETE /api/comments/:commentId
  */
 router.delete('/:commentId', auth, async (req, res) => {
@@ -1198,23 +1198,83 @@ router.delete('/:commentId', auth, async (req, res) => {
 
     // Check if user is authorized to delete the comment
     const isAdmin = req.user.role === 'admin';
+    const isModerator = req.user.role === 'moderator';
     const isAuthor = comment.user.toString() === req.user._id.toString();
+    const isModAction = isAdmin || isModerator;
 
-    if (!isAdmin && !isAuthor) {
+    if (!isModAction && !isAuthor) {
       return res.status(403).json({ message: 'Not authorized to delete this comment' });
     }
 
-    if (isAdmin) {
-      // Admin deletion - remove from interface but keep in DB
+    // Get deletion reason from request body (only for admin/moderator deletions)
+    const { reason = '' } = req.body;
+
+    if (isModAction) {
+      // Admin/Moderator deletion - remove from interface but keep in DB
       comment.isDeleted = true;
       comment.adminDeleted = true;
+      
+      // Store deletion reason and moderator info
+      comment.deletionReason = reason;
+      comment.deletedBy = req.user._id;
+      comment.deletedAt = new Date();
       
       // If it's a root comment, apply the same to all replies (admin deletion cascades)
       if (!comment.parentId) {
         await Comment.updateMany(
           { parentId: comment._id },
-          { isDeleted: true, adminDeleted: true }
+          { 
+            isDeleted: true, 
+            adminDeleted: true,
+            deletionReason: reason,
+            deletedBy: req.user._id,
+            deletedAt: new Date()
+          }
         );
+      }
+
+      // Send notification to comment owner if it's not their own comment
+      if (comment.user.toString() !== req.user._id.toString()) {
+        // Determine novel and chapter info for notification
+        let novelId = null;
+        let chapterId = null;
+        
+        if (comment.contentType === 'novels') {
+          novelId = comment.contentId;
+        } else if (comment.contentType === 'chapters') {
+          // For chapters, contentId might be in format "novelId-chapterId"
+          const parts = comment.contentId.split('-');
+          if (parts.length === 2) {
+            novelId = parts[0];
+            chapterId = parts[1];
+          } else {
+            chapterId = comment.contentId;
+            // Try to get novelId from the chapter document
+            try {
+              const Chapter = (await import('../models/Chapter.js')).default;
+              const chapterDoc = await Chapter.findById(chapterId);
+              if (chapterDoc) {
+                novelId = chapterDoc.novelId.toString();
+              }
+            } catch (err) {
+              console.error('Error getting novelId from chapter:', err);
+            }
+          }
+        }
+        
+        if (novelId) {
+          // Strip HTML tags from comment text for preview
+          const commentText = comment.text ? comment.text.replace(/<[^>]*>/g, '') : '';
+          
+          await createCommentDeletionNotification(
+            comment.user.toString(),
+            req.user._id.toString(),
+            reason,
+            novelId,
+            chapterId,
+            commentText
+          );
+        }
       }
     } else {
       // User deletion - show as [deleted] but keep thread structure intact
@@ -1232,7 +1292,7 @@ router.delete('/:commentId', auth, async (req, res) => {
     
     res.json({ 
       message: 'Comment deleted successfully',
-      isAdminDelete: isAdmin
+      isModAction: isModAction
     });
   } catch (error) {
     console.error('Error deleting comment:', error);
