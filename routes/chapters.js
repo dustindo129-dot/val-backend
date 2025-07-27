@@ -905,6 +905,7 @@ router.post('/', auth, async (req, res) => {
       proofreader,
       createdBy: req.user._id,
       mode: mode || 'published',
+      originallyDraft: (mode === 'draft'), // Track if originally created as draft
       views: 0,
       footnotes: footnotes || [],
       chapterBalance: mode === 'paid' ? (chapterBalance || 0) : 0,
@@ -1245,15 +1246,17 @@ router.put('/:id', auth, async (req, res) => {
 
       // Check if chapter is being switched from draft to any public mode
       // This should also update the novel timestamp and send notifications
+      // BUT ONLY if the chapter was originally created in draft mode to prevent abuse
       const isDraftBecomingPublic = existingChapter.mode === 'draft' && 
-        mode && (mode === 'published' || mode === 'protected' || mode === 'paid');
+        mode && (mode === 'published' || mode === 'protected' || mode === 'paid') &&
+        existingChapter.originallyDraft === true; // Only for chapters originally created as drafts
 
       // Only update novel's timestamp for significant changes that should affect "latest updates"
       // Don't update for simple content edits, administrative balance changes, etc.
       // Novel timestamp will be updated automatically when paid content is unlocked via contributions
       // Exceptions: 
       // 1. When manually switching a chapter from paid to published/protected
-      // 2. When switching a chapter from draft to any public mode (published/protected/paid)
+      // 2. When switching a chapter from draft to any public mode (but ONLY if originally created as draft)
       const shouldUpdateNovelTimestamp = isUnlockingPaidContent || isDraftBecomingPublic;
 
       if (shouldUpdateNovelTimestamp) {

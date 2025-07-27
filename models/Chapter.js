@@ -45,6 +45,13 @@ const chapterSchema = new mongoose.Schema({
     enum: ['published', 'draft', 'protected', 'paid'],
     default: 'published'
   },
+  // Track if this chapter was originally created in draft mode
+  // This prevents abuse cases like published->draft->published triggering notifications again
+  originallyDraft: {
+    type: Boolean,
+    default: false,
+    immutable: true // This field cannot be changed after creation
+  },
   wordCount: {
     type: Number,
     default: 0,
