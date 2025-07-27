@@ -914,9 +914,11 @@ router.post('/', auth, async (req, res) => {
     // Save the chapter
     const newChapter = await chapter.save();
 
-    // Perform multiple updates in parallel with timeout protection
-    // Use Promise.allSettled to ensure one failing operation doesn't fail the entire request
-    const updateResults = await Promise.allSettled([
+    // Check if this is a draft chapter - draft chapters should not update novel timestamp or send notifications
+    const isDraftChapter = (mode === 'draft');
+
+    // Prepare update operations - conditionally include novel timestamp update
+    const updateOperations = [
       // Update the module's chapters array
       Module.findByIdAndUpdate(
         moduleId,
@@ -924,27 +926,39 @@ router.post('/', auth, async (req, res) => {
         { maxTimeMS: 5000 }
       ),
       
-      // Update novel's updatedAt timestamp ONLY (no view count updates)
-      Novel.findByIdAndUpdate(
-        novelId,
-        { updatedAt: new Date() },
-        { maxTimeMS: 5000 }
-      ),
-      
       // Recalculate novel word count with the new chapter (has built-in retry logic)
       recalculateNovelWordCount(novelId),
       
-      // Recalculate module rent balance if this is a paid chapter
-      mode === 'paid' && chapterBalance > 0 ? calculateAndUpdateModuleRentBalance(moduleId) : Promise.resolve(),
-      
       // Clear novel caches
       clearNovelCaches()
-    ]);
+    ];
+
+    // Only update novel timestamp if this is NOT a draft chapter
+    if (!isDraftChapter) {
+      updateOperations.splice(1, 0, // Insert at index 1
+        Novel.findByIdAndUpdate(
+          novelId,
+          { updatedAt: new Date() },
+          { maxTimeMS: 5000 }
+        )
+      );
+    }
+
+    // Add rent balance calculation if this is a paid chapter
+    if (mode === 'paid' && chapterBalance > 0) {
+      updateOperations.push(calculateAndUpdateModuleRentBalance(moduleId));
+    }
+
+    // Perform multiple updates in parallel with timeout protection
+    // Use Promise.allSettled to ensure one failing operation doesn't fail the entire request
+    const updateResults = await Promise.allSettled(updateOperations);
 
     // Log any failed operations but don't fail the entire request
     updateResults.forEach((result, index) => {
       if (result.status === 'rejected') {
-        const operationNames = ['module update', 'novel timestamp update', 'word count recalculation', 'rent balance calculation', 'cache clearing'];
+        const operationNames = isDraftChapter 
+          ? ['module update', 'word count recalculation', 'cache clearing', 'rent balance calculation']
+          : ['module update', 'novel timestamp update', 'word count recalculation', 'cache clearing', 'rent balance calculation'];
         console.error(`Post-creation operation failed (${operationNames[index]}):`, result.reason);
       }
     });
@@ -952,21 +966,24 @@ router.post('/', auth, async (req, res) => {
     // Get novel info for the notification
     const novel = await Novel.findById(novelId).select('title');
 
-    // Create notifications for users who bookmarked this novel
-    await createNewChapterNotifications(
-      novelId.toString(),
-      newChapter._id.toString(),
-      newChapter.title
-    );
+    // Only create notifications and notify clients for non-draft chapters
+    if (!isDraftChapter) {
+      // Create notifications for users who bookmarked this novel
+      await createNewChapterNotifications(
+        novelId.toString(),
+        newChapter._id.toString(),
+        newChapter.title
+      );
 
-    // Notify all clients about the new chapter
-    notifyAllClients('new_chapter', {
-      chapterId: newChapter._id,
-      chapterTitle: newChapter.title,
-      novelId: novelId,
-      novelTitle: novel?.title || 'Unknown Novel',
-      timestamp: new Date().toISOString()
-    });
+      // Notify all clients about the new chapter
+      notifyAllClients('new_chapter', {
+        chapterId: newChapter._id,
+        chapterTitle: newChapter.title,
+        novelId: novelId,
+        novelTitle: novel?.title || 'Unknown Novel',
+        timestamp: new Date().toISOString()
+      });
+    }
 
     // Check for auto-unlock if a paid chapter was created
     if (mode === 'paid') {
@@ -1226,11 +1243,18 @@ router.put('/:id', auth, async (req, res) => {
       const isUnlockingPaidContent = existingChapter.mode === 'paid' && 
         mode && (mode === 'published' || mode === 'protected');
 
+      // Check if chapter is being switched from draft to any public mode
+      // This should also update the novel timestamp and send notifications
+      const isDraftBecomingPublic = existingChapter.mode === 'draft' && 
+        mode && (mode === 'published' || mode === 'protected' || mode === 'paid');
+
       // Only update novel's timestamp for significant changes that should affect "latest updates"
       // Don't update for simple content edits, administrative balance changes, etc.
       // Novel timestamp will be updated automatically when paid content is unlocked via contributions
-      // Exception: When manually switching a chapter from paid to published/protected
-      const shouldUpdateNovelTimestamp = isUnlockingPaidContent;
+      // Exceptions: 
+      // 1. When manually switching a chapter from paid to published/protected
+      // 2. When switching a chapter from draft to any public mode (published/protected/paid)
+      const shouldUpdateNovelTimestamp = isUnlockingPaidContent || isDraftBecomingPublic;
 
       if (shouldUpdateNovelTimestamp) {
         await Novel.findByIdAndUpdate(
@@ -1245,6 +1269,33 @@ router.put('/:id', auth, async (req, res) => {
 
       // Clear novel caches
       clearNovelCaches();
+
+      // Send notifications and SSE updates for draft chapters becoming public
+      if (isDraftBecomingPublic) {
+        try {
+          // Get novel info for notifications
+          const novel = await Novel.findById(existingChapter.novelId).select('title');
+          
+          // Create notifications for users who bookmarked this novel
+          await createNewChapterNotifications(
+            existingChapter.novelId.toString(),
+            updatedChapter._id.toString(),
+            updatedChapter.title
+          );
+
+          // Notify all clients about the chapter becoming public
+          notifyAllClients('new_chapter', {
+            chapterId: updatedChapter._id,
+            chapterTitle: updatedChapter.title,
+            novelId: existingChapter.novelId,
+            novelTitle: novel?.title || 'Unknown Novel',
+            timestamp: new Date().toISOString()
+          });
+        } catch (notificationError) {
+          console.error('Error sending notifications for draft chapter becoming public:', notificationError);
+          // Don't fail the chapter update if notifications fail
+        }
+      }
 
       // Check if chapterBalance changed and trigger auto-unlock if needed
       const chapterBalanceChanged = req.user.role === 'admin' && 

@@ -591,7 +591,13 @@ router.get("/vietnamese", async (req, res) => {
                 pipeline: [
                   {
                     $match: {
-                      $expr: { $eq: ['$novelId', '$$novelId'] }
+                      $expr: { 
+                        $and: [
+                          { $eq: ['$novelId', '$$novelId'] },
+                          // Filter out draft chapters from Vietnamese novels display
+                          { $ne: ['$mode', 'draft'] }
+                        ]
+                      }
                     }
                   },
                   { $sort: { createdAt: -1 } },
@@ -616,7 +622,13 @@ router.get("/vietnamese", async (req, res) => {
                 pipeline: [
                   {
                     $match: {
-                      $expr: { $eq: ['$novelId', '$$novelId'] }
+                      $expr: { 
+                        $and: [
+                          { $eq: ['$novelId', '$$novelId'] },
+                          // Also filter out draft chapters from first chapter link
+                          { $ne: ['$mode', 'draft'] }
+                        ]
+                      }
                     }
                   },
                   { $sort: { order: 1 } },
@@ -754,7 +766,13 @@ router.get("/hot", async (req, res) => {
               pipeline: [
                 {
                   $match: {
-                    $expr: { $eq: ['$novelId', '$$novelId'] }
+                    $expr: { 
+                      $and: [
+                        { $eq: ['$novelId', '$$novelId'] },
+                        // Filter out draft chapters from hot novels display
+                        { $ne: ['$mode', 'draft'] }
+                      ]
+                    }
                   }
                 },
                 { $sort: { createdAt: -1 } },
@@ -807,7 +825,13 @@ router.get("/hot", async (req, res) => {
               pipeline: [
                 {
                   $match: {
-                    $expr: { $eq: ['$novelId', '$$novelId'] }
+                    $expr: { 
+                      $and: [
+                        { $eq: ['$novelId', '$$novelId'] },
+                        // Filter out draft chapters from hot novels display
+                        { $ne: ['$mode', 'draft'] }
+                      ]
+                    }
                   }
                 },
                 { $sort: { createdAt: -1 } },
@@ -874,7 +898,13 @@ router.get("/hot", async (req, res) => {
               pipeline: [
                 {
                   $match: {
-                    $expr: { $eq: ['$novelId', '$$novelId'] }
+                    $expr: { 
+                      $and: [
+                        { $eq: ['$novelId', '$$novelId'] },
+                        // Filter out draft chapters from recent novels display
+                        { $ne: ['$mode', 'draft'] }
+                      ]
+                    }
                   }
                 },
                 { $sort: { createdAt: -1 } },
@@ -1229,11 +1259,17 @@ router.get("/", optionalAuth, async (req, res) => {
                   pipeline: [
                     {
                       $match: {
-                        $expr: { $eq: ['$novelId', '$$novelId'] }
+                        $expr: { 
+                          $and: [
+                            { $eq: ['$novelId', '$$novelId'] },
+                            // Filter out draft chapters from homepage display
+                            { $ne: ['$mode', 'draft'] }
+                          ]
+                        }
                       }
                     },
                     { $sort: { createdAt: -1 } },
-                    { $limit: 3 }, // Homepage shows latest 3 chapters
+                    { $limit: 3 }, // Homepage shows latest 3 non-draft chapters
                     {
                       $project: {
                         _id: 1,
@@ -1253,7 +1289,13 @@ router.get("/", optionalAuth, async (req, res) => {
                   pipeline: [
                     {
                       $match: {
-                        $expr: { $eq: ['$novelId', '$$novelId'] }
+                        $expr: { 
+                          $and: [
+                            { $eq: ['$novelId', '$$novelId'] },
+                            // Also filter out draft chapters from first chapter link
+                            { $ne: ['$mode', 'draft'] }
+                          ]
+                        }
                       }
                     },
                     { $sort: { order: 1 } },
