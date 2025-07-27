@@ -57,7 +57,7 @@ const requestSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'approved', 'declined'],
+    enum: ['pending', 'approved', 'declined', 'withdrawn'],
     default: 'pending'
   },
   likes: [{
