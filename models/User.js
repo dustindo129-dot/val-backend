@@ -20,8 +20,7 @@ const userSchema = new mongoose.Schema({
     maxlength: 20
   },
   userNumber: {
-    type: Number,
-    required: true
+    type: Number
   },
   displayName: {
     type: String,
@@ -170,12 +169,33 @@ userSchema.index({ userNumber: 1 }, { unique: true, background: true });
 userSchema.pre('save', async function(next) {
   // Auto-assign userNumber for new users
   if (this.isNew && !this.userNumber) {
-    try {
-      // Find the highest userNumber and increment by 1
-      const lastUser = await mongoose.model('User').findOne({}, {}, { sort: { userNumber: -1 } });
-      this.userNumber = lastUser ? lastUser.userNumber + 1 : 1;
-    } catch (error) {
-      return next(error);
+    let retries = 0;
+    const maxRetries = 5;
+    
+    while (retries < maxRetries) {
+      try {
+        // Find the highest userNumber and increment by 1
+        const lastUser = await mongoose.model('User').findOne({}, { userNumber: 1 }, { sort: { userNumber: -1 } });
+        const nextUserNumber = lastUser ? lastUser.userNumber + 1 : 1;
+        
+        // Check if this userNumber is already taken
+        const existingUser = await mongoose.model('User').findOne({ userNumber: nextUserNumber });
+        if (!existingUser) {
+          this.userNumber = nextUserNumber;
+          break;
+        } else {
+          // If taken, increment and try again
+          retries++;
+          continue;
+        }
+      } catch (error) {
+        return next(error);
+      }
+    }
+    
+    // If we couldn't find an available userNumber after retries, generate a timestamp-based one
+    if (!this.userNumber) {
+      this.userNumber = Date.now() % 1000000; // Use last 6 digits of timestamp
     }
   }
   
