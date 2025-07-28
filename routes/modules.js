@@ -1689,4 +1689,98 @@ router.post('/recalculate-rent-balance', auth, admin, async (req, res) => {
   }
 });
 
+/**
+ * Get rental counts for modules in a novel (admin/moderator/pj_user only)
+ * @route GET /api/modules/:novelId/rental-counts
+ */
+router.get('/:novelId/rental-counts', auth, async (req, res) => {
+  try {
+    const { novelId } = req.params;
+    const user = req.user;
+
+    // Validate novelId
+    if (!mongoose.Types.ObjectId.isValid(novelId)) {
+      return res.status(400).json({ message: 'Invalid novel ID' });
+    }
+
+    // Get the novel to check permissions
+    const novel = await Novel.findById(novelId);
+    if (!novel) {
+      return res.status(404).json({ message: 'Novel not found' });
+    }
+
+    // Helper function to check if user has pj_user access
+    const checkPjUserAccess = (pjUserArray, user) => {
+      if (!pjUserArray || !Array.isArray(pjUserArray) || !user) return false;
+      
+      return pjUserArray.some(pjUser => {
+        // Handle case where pjUser is an object (new format)
+        if (typeof pjUser === 'object' && pjUser !== null) {
+          return (
+            pjUser._id === user.id ||
+            pjUser._id === user._id ||
+            pjUser.username === user.username ||
+            pjUser.displayName === user.displayName ||
+            pjUser.userNumber === user.userNumber
+          );
+        }
+        // Handle case where pjUser is a primitive value (old format)
+        return (
+          pjUser === user.id ||
+          pjUser === user._id ||
+          pjUser === user.username ||
+          pjUser === user.displayName ||
+          pjUser === user.userNumber
+        );
+      });
+    };
+
+    // Check permissions: admin, moderator, or pj_user for this novel
+    const canSeeRentalStats = user && (
+      user.role === 'admin' || 
+      user.role === 'moderator' || 
+      (user.role === 'pj_user' && checkPjUserAccess(novel.active?.pj_user, user))
+    );
+
+    if (!canSeeRentalStats) {
+      return res.status(403).json({ message: 'Not authorized to view rental statistics' });
+    }
+
+    // Get all modules for this novel
+    const modules = await Module.find({ novelId }).select('_id');
+    const moduleIds = modules.map(m => m._id);
+
+    // Get active rental counts for each module
+    const rentalCounts = {};
+    
+    if (moduleIds.length > 0) {
+      const rentalStats = await ModuleRental.aggregate([
+        {
+          $match: {
+            moduleId: { $in: moduleIds },
+            isActive: true,
+            endTime: { $gt: new Date() }
+          }
+        },
+        {
+          $group: {
+            _id: '$moduleId',
+            count: { $sum: 1 }
+          }
+        }
+      ]);
+
+      // Convert to object with moduleId as key
+      rentalStats.forEach(stat => {
+        rentalCounts[stat._id.toString()] = stat.count;
+      });
+    }
+
+    res.json(rentalCounts);
+  } catch (error) {
+    console.error('Error fetching rental counts:', error);
+    res.status(500).json({ message: 'Failed to fetch rental counts' });
+  }
+});
+
 export default router;
