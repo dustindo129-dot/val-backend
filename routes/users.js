@@ -2377,4 +2377,493 @@ const clearUserResolutionCache = (userId = null) => {
 // Export cache clearing function for use by other routes
 export { clearUserStatsCache, clearUserResolutionCache };
 
+/**
+ * Get user's public profile by userNumber (no authentication required)
+ * @route GET /api/users/number/:userNumber/public-profile
+ */
+router.get('/number/:userNumber/public-profile', async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const user = await User.findOne({ userNumber }).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Return only public information
+    const publicProfile = {
+      _id: user._id,
+      username: user.username,
+      displayName: user.displayName,
+      userNumber: user.userNumber,
+      avatar: user.avatar,
+      role: user.role,
+      intro: user.intro || '',
+      interests: user.interests || [],
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin,
+      isVerified: user.isVerified || false,
+      visitors: user.visitors || { total: 0 }
+    };
+    
+    res.json(publicProfile);
+
+    // Increment visitor count after sending response (non-blocking)
+    // Skip visitor tracking if requested (similar to novel view tracking)
+    if (req.query.skipVisitorTracking !== 'true') {
+      // Find the full document (not lean) and use the model method
+      User.findById(user._id)
+        .then(fullUser => {
+          if (fullUser) {
+            return fullUser.incrementVisitors();
+          }
+        })
+        .catch(err => console.error('Error updating visitor count:', err));
+    }
+  } catch (err) {
+    console.error('Error getting user public profile:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Update user's avatar by userNumber
+ * @route POST /api/users/number/:userNumber/avatar
+ */
+router.post('/number/:userNumber/avatar', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    const { avatar } = req.body;
+    if (!avatar) {
+      return res.status(400).json({ message: 'No avatar URL provided' });
+    }
+
+    // Update user's avatar in database
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { avatar },
+      { new: true }
+    ).select('-password');
+
+    res.json({ avatar: user.avatar });
+  } catch (error) {
+    console.error('Avatar update error:', error);
+    res.status(500).json({ message: 'Failed to update avatar' });
+  }
+});
+
+/**
+ * Update user's display name by userNumber
+ * @route PUT /api/users/number/:userNumber/display-name
+ */
+router.put('/number/:userNumber/display-name', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    const { displayName } = req.body;
+
+    // Validate display name
+    if (!displayName || displayName.trim().length === 0) {
+      return res.status(400).json({ message: 'Display name cannot be empty' });
+    }
+
+    if (displayName.trim().length > 50) {
+      return res.status(400).json({ message: 'Display name cannot exceed 50 characters' });
+    }
+
+    // Get user
+    const user = await User.findById(req.user._id);
+
+    // Check if user can change display name (once per month)
+    if (user.displayNameLastChanged) {
+      const oneMonthAgo = new Date();
+      oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+      
+      if (user.displayNameLastChanged > oneMonthAgo) {
+        const nextChangeDate = new Date(user.displayNameLastChanged);
+        nextChangeDate.setMonth(nextChangeDate.getMonth() + 1);
+        
+        return res.status(400).json({ 
+          message: 'You can only change your display name once per month',
+          nextChangeDate: nextChangeDate.toISOString()
+        });
+      }
+    }
+
+    // Update display name and timestamp - validation will be handled by the schema middleware
+    user.displayName = displayName.trim();
+    user.displayNameLastChanged = new Date();
+    await user.save();
+
+    res.json({ 
+      displayName: user.displayName,
+      displayNameLastChanged: user.displayNameLastChanged
+    });
+  } catch (error) {
+    console.error('Display name update error:', error);
+    let errorMessage = 'Failed to update display name';
+    
+    if (error.message.includes('đã tồn tại')) {
+      errorMessage = error.message;
+    } else if (error.message.includes('ký tự đặc biệt')) {
+      errorMessage = error.message;
+    }
+    
+    res.status(500).json({ message: errorMessage });
+  }
+});
+
+/**
+ * Request email change by userNumber
+ * @route PUT /api/users/number/:userNumber/email
+ */
+router.put('/number/:userNumber/email', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    const { email, currentPassword } = req.body;
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    // Check if new email is the same as current email
+    if (email.toLowerCase() === req.user.email.toLowerCase()) {
+      return res.status(400).json({ message: 'New email must be different from current email' });
+    }
+
+    // Check if email is already in use BEFORE password verification
+    const emailExists = await User.findOne({ email, _id: { $ne: req.user._id } });
+    if (emailExists) {
+      return res.status(400).json({ message: 'Email is already in use' });
+    }
+
+    // Get user with password
+    const user = await User.findById(req.user._id);
+
+    // Verify current password
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ message: 'Current password is incorrect' });
+    }
+
+    // Generate confirmation token
+    const crypto = await import('crypto');
+    const confirmationToken = crypto.randomBytes(32).toString('hex');
+    const expires = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
+
+    // Store pending email change
+    user.pendingEmailChange = {
+      newEmail: email,
+      token: confirmationToken,
+      expires: expires
+    };
+    await user.save();
+
+    // Send confirmation email to current email
+    const { sendEmailChangeConfirmation } = await import('../services/emailService.js');
+    await sendEmailChangeConfirmation(user.email, email, confirmationToken);
+
+    res.json({ 
+      message: 'Email change confirmation sent to your current email address',
+      requiresConfirmation: true
+    });
+  } catch (error) {
+    console.error('Email change request error:', error);
+    res.status(500).json({ message: 'Failed to send email change confirmation' });
+  }
+});
+
+/**
+ * Update user's password by userNumber
+ * @route PUT /api/users/number/:userNumber/password
+ */
+router.put('/number/:userNumber/password', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    const { currentPassword, newPassword } = req.body;
+
+    // Validate password strength
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+    }
+
+    // Get user with password
+    const user = await User.findById(req.user._id);
+
+    // Verify current password
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ message: 'Current password is incorrect' });
+    }
+
+    // Update password - let the pre-save middleware handle hashing
+    user.password = newPassword;
+    await user.save();
+
+    res.json({ message: 'Password updated successfully' });
+  } catch (error) {
+    console.error('Password update error:', error);
+    res.status(500).json({ message: 'Failed to update password' });
+  }
+});
+
+/**
+ * Get blocked users list by userNumber
+ * @route GET /api/users/number/:userNumber/blocked
+ */
+router.get('/number/:userNumber/blocked', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to view blocked users' });
+    }
+    
+    const user = await User.findById(req.user._id)
+      .populate('blockedUsers', 'username displayName avatar');
+    
+    res.json(user.blockedUsers);
+  } catch (error) {
+    console.error('Get blocked users error:', error);
+    res.status(500).json({ message: 'Failed to get blocked users' });
+  }
+});
+
+/**
+ * Block a user by userNumber
+ * @route POST /api/users/number/:userNumber/block
+ */
+router.post('/number/:userNumber/block', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to block users' });
+    }
+
+    const { userToBlock } = req.body;
+    
+    // Cannot block yourself
+    if (req.user.username === userToBlock) {
+      return res.status(400).json({ message: 'Cannot block yourself' });
+    }
+
+    // Find the user to block
+    const userToBlockObj = await User.findOne({ username: userToBlock });
+    if (!userToBlockObj) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Get the current user
+    const currentUser = await User.findById(req.user._id);
+    
+    // Check if already blocked
+    if (currentUser.blockedUsers.includes(userToBlockObj._id)) {
+      return res.status(400).json({ message: 'User is already blocked' });
+    }
+
+    // Check block limit
+    if (currentUser.blockedUsers.length >= 50) {
+      return res.status(400).json({ message: 'Cannot block more than 50 users' });
+    }
+
+    // Add to blocked users
+    currentUser.blockedUsers.push(userToBlockObj._id);
+    await currentUser.save();
+
+    res.json({ message: 'User blocked successfully' });
+  } catch (error) {
+    console.error('Block user error:', error);
+    res.status(500).json({ message: 'Failed to block user' });
+  }
+});
+
+/**
+ * Unblock a user by userNumber
+ * @route DELETE /api/users/number/:userNumber/block/:blockedUsername
+ */
+router.delete('/number/:userNumber/block/:blockedUsername', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    const { blockedUsername } = req.params;
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to unblock users' });
+    }
+    
+    // Find the blocked user
+    const blockedUser = await User.findOne({ username: blockedUsername });
+    if (!blockedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Get current user
+    const currentUser = await User.findById(req.user._id);
+    
+    // Remove from blocked users
+    currentUser.blockedUsers = currentUser.blockedUsers.filter(
+      id => id.toString() !== blockedUser._id.toString()
+    );
+    await currentUser.save();
+
+    res.json({ message: 'User unblocked successfully' });
+  } catch (error) {
+    console.error('Unblock user error:', error);
+    res.status(500).json({ message: 'Failed to unblock user' });
+  }
+});
+
+/**
+ * Update user's introduction by userNumber
+ * @route PUT /api/users/number/:userNumber/intro
+ */
+router.put('/number/:userNumber/intro', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    const { intro } = req.body;
+
+    // Validate intro length
+    if (intro && intro.length > 2000) {
+      return res.status(400).json({ message: 'Introduction cannot exceed 2000 characters' });
+    }
+
+    // Get user
+    const user = await User.findById(req.user._id);
+
+    // Update introduction
+    user.intro = intro || '';
+    await user.save();
+
+    // Clear user resolution cache since user data changed
+    clearUserResolutionCache(req.user._id);
+
+    res.json({ 
+      intro: user.intro
+    });
+  } catch (error) {
+    console.error('Introduction update error:', error);
+    res.status(500).json({ message: 'Failed to update introduction' });
+  }
+});
+
 export default router; 

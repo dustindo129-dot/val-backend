@@ -82,13 +82,13 @@ export const populateStaffNames = async (obj) => {
     // Fetch all users in one batched query
     const users = await User.find(
       { _id: { $in: Array.from(allObjectIds) } },
-      { displayName: 1, username: 1 }
+      { displayName: 1, username: 1, userNumber: 1, avatar: 1, role: 1 }
     ).lean();
 
     // Create user lookup map
     const userMap = {};
     users.forEach(user => {
-      userMap[user._id.toString()] = user.displayName || user.username;
+      userMap[user._id.toString()] = user;
     });
 
     // Helper function to process a single staff field (for chapters)
@@ -99,8 +99,9 @@ export const populateStaffNames = async (obj) => {
 
       if (isValidObjectId(staffValue)) {
         const stringId = objectIdToString(staffValue);
-        const result = userMap[stringId] || staffValue;
-        return result; // Use cached user data or fallback to original
+        const userObj = userMap[stringId];
+        // For chapters, still return display name for backward compatibility
+        return userObj ? (userObj.displayName || userObj.username) : staffValue;
       }
 
       // If not an ObjectId, return as is (already a display name or text)
@@ -116,8 +117,9 @@ export const populateStaffNames = async (obj) => {
       const result = staffArray.map(item => {
         if (isValidObjectId(item)) {
           const stringId = objectIdToString(item);
-          const resolved = userMap[stringId] || item;
-          return resolved; // Use cached user data or fallback to original
+          const userObj = userMap[stringId];
+          // For novels, return full user object if available, otherwise fallback to original
+          return userObj || item;
         }
         return item; // Keep text items as is
       });

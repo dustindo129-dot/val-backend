@@ -19,6 +19,10 @@ const userSchema = new mongoose.Schema({
     minlength: 3,
     maxlength: 20
   },
+  userNumber: {
+    type: Number,
+    required: true
+  },
   displayName: {
     type: String,
     trim: true
@@ -155,20 +159,44 @@ const userSchema = new mongoose.Schema({
 userSchema.index({ username: 1 }, { unique: true, background: true });
 userSchema.index({ email: 1 }, { unique: true, background: true });
 userSchema.index({ displayName: 1 }, { unique: true, sparse: true, background: true });
+userSchema.index({ userNumber: 1 }, { unique: true, background: true });
 
 /**
  * Pre-save middleware to hash password and set displayName default
  * Only hashes password if it has been modified
  * Sets displayName to username if not provided
+ * Auto-assigns userNumber for new users
  */
 userSchema.pre('save', async function(next) {
+  // Auto-assign userNumber for new users
+  if (this.isNew && !this.userNumber) {
+    try {
+      // Find the highest userNumber and increment by 1
+      const lastUser = await mongoose.model('User').findOne({}, {}, { sort: { userNumber: -1 } });
+      this.userNumber = lastUser ? lastUser.userNumber + 1 : 1;
+    } catch (error) {
+      return next(error);
+    }
+  }
+  
   // Set displayName to username if not provided
   if (!this.displayName) {
     this.displayName = this.username;
   }
   
-  // Check for duplicate displayName if it's being modified (case-insensitive)
+  // Validate displayName format if it's being modified
   if (this.isModified('displayName')) {
+    // Allow letters, numbers, spaces, and Vietnamese characters, but no special characters
+    const displayNameRegex = /^[a-zA-Z0-9\u00C0-\u024F\u1E00-\u1EFF\s]+$/;
+    if (!displayNameRegex.test(this.displayName)) {
+      const error = new Error('Tên hiển thị chỉ được chứa chữ cái, số và khoảng trắng. Không được chứa ký tự đặc biệt.');
+      return next(error);
+    }
+    
+    // Trim multiple spaces and normalize
+    this.displayName = this.displayName.replace(/\s+/g, ' ').trim();
+    
+    // Check for duplicate displayName (case-insensitive)
     const existingUser = await mongoose.model('User').findOne({
       displayName: { $regex: new RegExp(`^${escapeRegex(this.displayName)}$`, 'i') },
       _id: { $ne: this._id }

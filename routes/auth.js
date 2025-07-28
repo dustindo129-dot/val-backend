@@ -86,6 +86,7 @@ router.post('/register-admin', async (req, res) => {
         id: user._id, 
         username: user.username, 
         displayName: user.displayName, 
+        userNumber: user.userNumber,
         email: user.email, 
         role: user.role, 
         displayNameLastChanged: user.displayNameLastChanged 
@@ -186,6 +187,7 @@ router.post('/signup', async (req, res) => {
         id: user._id, 
         username: user.username,
         displayName: user.displayName,
+        userNumber: user.userNumber,
         email: user.email, 
         role: user.role,
         avatar: user.avatar,
@@ -290,6 +292,7 @@ router.post('/login', async (req, res) => {
         id: user._id, 
         username: user.username,
         displayName: user.displayName,
+        userNumber: user.userNumber,
         email: user.email,
         role: user.role,
         avatar: user.avatar,
@@ -340,6 +343,7 @@ router.get('/check-session', auth, async (req, res) => {
         id: req.user._id,
         username: req.user.username,
         displayName: req.user.displayName,
+        userNumber: req.user.userNumber,
         role: req.user.role
       }
     });
