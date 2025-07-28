@@ -2866,4 +2866,60 @@ router.put('/number/:userNumber/intro', auth, async (req, res) => {
   }
 });
 
+/**
+ * Get multiple users by their IDs or userNumbers
+ * @route POST /api/users/by-ids
+ */
+router.post('/by-ids', async (req, res) => {
+  try {
+    const { ids } = req.body;
+    
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: 'IDs array is required' });
+    }
+    
+    // Limit the number of IDs to prevent abuse
+    if (ids.length > 50) {
+      return res.status(400).json({ message: 'Cannot fetch more than 50 users at once' });
+    }
+    
+    // Separate ObjectIds and userNumbers
+    const objectIds = [];
+    const userNumbers = [];
+    
+    ids.forEach(id => {
+      if (mongoose.Types.ObjectId.isValid(id) && /^[0-9a-fA-F]{24}$/.test(id)) {
+        objectIds.push(mongoose.Types.ObjectId.createFromHexString(id));
+      } else if (!isNaN(parseInt(id))) {
+        userNumbers.push(parseInt(id));
+      }
+      // Skip invalid IDs
+    });
+    
+    // Build query conditions
+    const queryConditions = [];
+    if (objectIds.length > 0) {
+      queryConditions.push({ _id: { $in: objectIds } });
+    }
+    if (userNumbers.length > 0) {
+      queryConditions.push({ userNumber: { $in: userNumbers } });
+    }
+    
+    if (queryConditions.length === 0) {
+      return res.json({ users: [] });
+    }
+    
+    // Fetch users
+    const users = await User.find(
+      { $or: queryConditions },
+      { displayName: 1, username: 1, userNumber: 1, avatar: 1, role: 1, _id: 1 }
+    ).lean();
+    
+    res.json({ users });
+  } catch (error) {
+    console.error('Error fetching users by IDs:', error);
+    res.status(500).json({ message: 'Failed to fetch users' });
+  }
+});
+
 export default router; 
