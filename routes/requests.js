@@ -10,6 +10,29 @@ import { clearUserCache } from '../utils/userCache.js';
 
 const router = express.Router();
 
+// Simple in-memory cache for requests
+const requestsCache = new Map();
+const REQUESTS_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
+
+const getCachedRequests = (cacheKey) => {
+  const cached = requestsCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp) < REQUESTS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedRequests = (cacheKey, data) => {
+  requestsCache.set(cacheKey, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+const clearRequestsCache = () => {
+  requestsCache.clear();
+};
+
 /**
  * Get all requests
  * @route GET /api/requests
@@ -18,6 +41,15 @@ router.get('/', async (req, res) => {
   try {
     // Get sort parameter (default to newest)
     const { sort = 'newest', includeAll = 'false' } = req.query;
+    
+    // Create cache key based on parameters
+    const cacheKey = `requests_${sort}_${includeAll}`;
+    
+    // Check cache first
+    const cachedResult = getCachedRequests(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
     
     // Define sort criteria
     let sortCriteria = {};
@@ -45,7 +77,7 @@ router.get('/', async (req, res) => {
     }
     
     const requests = await Request.find(query)
-      .populate('user', 'username displayName avatar role')
+      .populate('user', 'username displayName avatar role userNumber')
       .populate('novel', 'title _id')
       .populate('module', 'title _id')
       .populate('chapter', 'title _id')
@@ -58,6 +90,9 @@ router.get('/', async (req, res) => {
         (b.likes ? b.likes.length : 0) - (a.likes ? a.likes.length : 0)
       );
     }
+    
+    // Cache the result
+    setCachedRequests(cacheKey, requests);
     
     return res.json(requests);
   } catch (error) {
@@ -129,6 +164,9 @@ router.post('/', auth, async (req, res) => {
     const newRequest = new Request(requestData);
     await newRequest.save({ session });
     
+    // Clear requests cache since new request was created
+    clearRequestsCache();
+    
     // Only deduct deposit for non-web requests
     if (type !== 'web') {
       // Store old balance for transaction record
@@ -162,7 +200,7 @@ router.post('/', auth, async (req, res) => {
     // For admin web recommendations, we don't add to novel balance - that happens via contributions
     
     // Populate user and novel data before sending response
-    await newRequest.populate('user', 'username displayName avatar role');
+    await newRequest.populate('user', 'username displayName avatar role userNumber');
     if (type === 'web') {
       await newRequest.populate('novel', 'title _id');
     }
@@ -210,6 +248,9 @@ router.post('/:requestId/like', auth, async (req, res) => {
     }
     
     await request.save();
+    
+    // Clear requests cache since request likes were updated
+    clearRequestsCache();
     
     res.json({ 
       liked: !alreadyLiked,
@@ -363,6 +404,9 @@ router.post('/:requestId/approve', auth, async (req, res) => {
     request.novel = matchingNovel._id;
     await request.save({ session });
     
+    // Clear requests cache since request was approved
+    clearRequestsCache();
+    
     // Record the transaction in UserTransaction ledger - no balance change since deposit was already deducted
     await createTransaction({
       userId: request.user,
@@ -456,6 +500,9 @@ router.post('/:requestId/decline', auth, async (req, res) => {
     // Update request status
     request.status = 'declined';
     await request.save({ session });
+    
+    // Clear requests cache since request was declined
+    clearRequestsCache();
     
     // Refund deposit to user
     user.balance += request.deposit;
@@ -651,6 +698,9 @@ router.post('/:requestId/withdraw', auth, async (req, res) => {
     request.status = 'withdrawn';
     await request.save({ session });
     
+    // Clear requests cache since request was withdrawn
+    clearRequestsCache();
+    
     await session.commitTransaction();
     res.json({ 
       message: 'Yêu cầu đã được rút lại thành công',
@@ -695,7 +745,7 @@ router.get('/all', auth, async (req, res) => {
     
     // Query all requests matching filters
     const requests = await Request.find(query)
-      .populate('user', 'username displayName avatar role')
+      .populate('user', 'username displayName avatar role userNumber')
       .populate('novel', 'title _id')
       .populate('module', 'title _id')
       .populate('chapter', 'title _id')
@@ -787,7 +837,7 @@ router.put('/:requestId', auth, async (req, res) => {
        requestId,
        updateData,
        { new: true }
-     ).populate('user', 'username displayName avatar role')
+     ).populate('user', 'username displayName avatar role userNumber')
       .populate('novel', 'title _id');
     
     res.json({

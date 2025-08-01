@@ -288,13 +288,14 @@ router.get('/novel/:novelId', async (req, res) => {
           isPinned: 1,
           isEdited: 1,
           chapterInfo: { $arrayElemAt: ['$chapterInfo', 0] },
-          user: {
-            _id: '$userInfo._id',
-            username: '$userInfo.username',
-            displayName: '$userInfo.displayName',
-            avatar: '$userInfo.avatar',
-            role: '$userInfo.role'
-          },
+                      user: {
+              _id: '$userInfo._id',
+              username: '$userInfo.username',
+              displayName: '$userInfo.displayName',
+              avatar: '$userInfo.avatar',
+              role: '$userInfo.role',
+              userNumber: '$userInfo.userNumber'
+            },
           novelInfo: { $arrayElemAt: ['$novelInfo', 0] }
         }
       });
@@ -732,7 +733,7 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     clearUserStatsCache(req.user._id.toString());
     
     // Populate user info
-    await reply.populate('user', 'username displayName avatar role');
+    await reply.populate('user', 'username displayName avatar role userNumber');
 
     // Create notification for the original commenter
     if (parentComment.user.toString() !== req.user._id.toString()) {
@@ -1121,7 +1122,7 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
     clearUserStatsCache(req.user._id.toString());
 
     // Populate user info
-    await comment.populate('user', 'username displayName avatar role');
+    await comment.populate('user', 'username displayName avatar role userNumber');
 
     // Create follow notifications for users following this novel
     let novelId = null;
@@ -1200,7 +1201,7 @@ router.patch('/:commentId', auth, checkBan, async (req, res) => {
     clearAllCommentCaches();
     
     // Populate user info before returning
-    await comment.populate('user', 'username displayName avatar role');
+    await comment.populate('user', 'username displayName avatar role userNumber');
     
     res.json(comment);
   } catch (error) {

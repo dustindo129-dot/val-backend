@@ -2179,6 +2179,12 @@ router.post('/id/:userId/move-module-to-completed', auth, async (req, res) => {
 
     // Clear user stats cache since module data changed
     clearUserStatsCache(userId);
+    
+    // Also clear complete profile cache
+    const user = await User.findById(userId).select('userNumber');
+    if (user) {
+      clearUserStatsCache(`complete_profile_${user.userNumber}`);
+    }
 
     res.json({ message: 'Module moved to completed successfully' });
   } catch (error) {
@@ -2216,6 +2222,12 @@ router.post('/id/:userId/move-module-to-ongoing', auth, async (req, res) => {
 
     // Clear user stats cache since module data changed
     clearUserStatsCache(userId);
+    
+    // Also clear complete profile cache
+    const user = await User.findById(userId).select('userNumber');
+    if (user) {
+      clearUserStatsCache(`complete_profile_${user.userNumber}`);
+    }
 
     res.json({ message: 'Module moved to ongoing successfully' });
   } catch (error) {
@@ -2344,6 +2356,12 @@ router.put('/id/:userId/interests', auth, async (req, res) => {
 
     // Clear user resolution cache since user data changed
     clearUserResolutionCache(userId);
+    
+    // Also clear complete profile cache
+    const user = await User.findById(userId).select('userNumber');
+    if (user) {
+      clearUserStatsCache(`complete_profile_${user.userNumber}`);
+    }
 
     res.json({ 
       message: 'Interests updated successfully',
@@ -2428,6 +2446,257 @@ router.get('/number/:userNumber/public-profile', async (req, res) => {
     }
   } catch (err) {
     console.error('Error getting user public profile:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Get user's complete profile with stats by userNumber (optimized single call)
+ * @route GET /api/users/number/:userNumber/public-profile-complete
+ */
+router.get('/number/:userNumber/public-profile-complete', async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Check cache first (5 minute cache for profile data)
+    const cacheKey = `complete_profile_${userNumber}`;
+    const cachedProfile = getCachedUserStats(cacheKey);
+    if (cachedProfile) {
+      return res.json(cachedProfile);
+    }
+    
+    // Find user by userNumber
+    const user = await User.findOne({ userNumber }).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Execute all queries in parallel for maximum performance
+    const [
+      userModulesResult,
+      chaptersParticipated,
+      followingCount,
+      commentsCount
+    ] = await Promise.all([
+      // Get user modules with optimized aggregation
+      User.aggregate([
+        { $match: { _id: user._id } },
+        { $addFields: { userId: { $toString: '$_id' } } },
+        
+        // Lookup novels where user has roles
+        {
+          $lookup: {
+            from: 'novels',
+            let: { userId: '$userId' },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $or: [
+                      { $in: ['$$userId', '$active.pj_user'] },
+                      { $in: ['$$userId', '$active.translator'] },
+                      { $in: ['$$userId', '$active.editor'] },
+                      { $in: ['$$userId', '$active.proofreader'] }
+                    ]
+                  }
+                }
+              },
+              { $project: { _id: 1 } }
+            ],
+            as: 'userNovels'
+          }
+        },
+        
+        // Lookup modules from user's novels
+        {
+          $lookup: {
+            from: 'modules',
+            let: { novelIds: '$userNovels._id' },
+            pipeline: [
+              { $match: { $expr: { $in: ['$novelId', '$$novelIds'] } } },
+              {
+                $lookup: {
+                  from: 'novels',
+                  localField: 'novelId',
+                  foreignField: '_id',
+                  as: 'novelId',
+                  pipeline: [{ $project: { title: 1, illustration: 1 } }]
+                }
+              },
+              { $unwind: '$novelId' }
+            ],
+            as: 'roleModules'
+          }
+        },
+        
+        // Lookup existing ongoing modules
+        {
+          $lookup: {
+            from: 'modules',
+            let: { moduleIds: '$ongoingModules.moduleId' },
+            pipeline: [
+              { $match: { $expr: { $in: ['$_id', '$$moduleIds'] } } },
+              {
+                $lookup: {
+                  from: 'novels',
+                  localField: 'novelId',
+                  foreignField: '_id',
+                  as: 'novelId',
+                  pipeline: [{ $project: { title: 1, illustration: 1 } }]
+                }
+              },
+              { $unwind: '$novelId' }
+            ],
+            as: 'existingOngoingModules'
+          }
+        },
+        
+        // Lookup existing completed modules
+        {
+          $lookup: {
+            from: 'modules',
+            let: { moduleIds: '$completedModules.moduleId' },
+            pipeline: [
+              { $match: { $expr: { $in: ['$_id', '$$moduleIds'] } } },
+              {
+                $lookup: {
+                  from: 'novels',
+                  localField: 'novelId',
+                  foreignField: '_id',
+                  as: 'novelId',
+                  pipeline: [{ $project: { title: 1, illustration: 1 } }]
+                }
+              },
+              { $unwind: '$novelId' }
+            ],
+            as: 'existingCompletedModules'
+          }
+        },
+        
+        // Project final result
+        {
+          $project: {
+            _id: 1,
+            ongoingModules: {
+              $map: {
+                input: '$ongoingModules',
+                as: 'ongoing',
+                in: {
+                  moduleId: {
+                    $arrayElemAt: [
+                      {
+                        $filter: {
+                          input: '$existingOngoingModules',
+                          cond: { $eq: ['$$this._id', '$$ongoing.moduleId'] }
+                        }
+                      },
+                      0
+                    ]
+                  },
+                  addedAt: '$$ongoing.addedAt'
+                }
+              }
+            },
+            completedModules: {
+              $map: {
+                input: '$completedModules',
+                as: 'completed',
+                in: {
+                  moduleId: {
+                    $arrayElemAt: [
+                      {
+                        $filter: {
+                          input: '$existingCompletedModules',
+                          cond: { $eq: ['$$this._id', '$$completed.moduleId'] }
+                        }
+                      },
+                      0
+                    ]
+                  },
+                  addedAt: '$$completed.addedAt'
+                }
+              }
+            }
+          }
+        }
+      ]),
+      
+      // Get chapters participated count
+      Chapter.countDocuments({
+        $or: [
+          { translator: { $in: [user._id.toString(), user.username, user.displayName] } },
+          { editor: { $in: [user._id.toString(), user.username, user.displayName] } },
+          { proofreader: { $in: [user._id.toString(), user.username, user.displayName] } }
+        ]
+      }),
+      
+      // Get following count
+      UserNovelInteraction.countDocuments({ 
+        userId: user._id, 
+        followed: true 
+      }),
+      
+      // Get comments count
+      Comment.countDocuments({ 
+        user: user._id, 
+        isDeleted: { $ne: true }, 
+        adminDeleted: { $ne: true }
+      })
+    ]);
+
+    // Process modules data
+    const moduleData = userModulesResult[0] || { ongoingModules: [], completedModules: [] };
+    const ongoingModules = moduleData.ongoingModules.filter(item => item.moduleId);
+    const completedModules = moduleData.completedModules.filter(item => item.moduleId);
+
+    // Return complete profile with all stats
+    const completeProfile = {
+      // User basic info
+      _id: user._id,
+      username: user.username,
+      displayName: user.displayName,
+      userNumber: user.userNumber,
+      avatar: user.avatar,
+      role: user.role,
+      intro: user.intro || '',
+      interests: user.interests || [],
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin,
+      isVerified: user.isVerified || false,
+      visitors: user.visitors || { total: 0 },
+      
+      // User stats
+      stats: {
+        chaptersParticipated: chaptersParticipated || 0,
+        followingCount: followingCount || 0,
+        commentsCount: commentsCount || 0,
+        ongoingModules: ongoingModules,
+        completedModules: completedModules
+      }
+    };
+    
+    // Cache the result for 5 minutes
+    setCachedUserStats(cacheKey, completeProfile);
+    
+    res.json(completeProfile);
+
+    // Increment visitor count after sending response (non-blocking)
+    if (req.query.skipVisitorTracking !== 'true') {
+      User.findById(user._id)
+        .then(fullUser => {
+          if (fullUser) {
+            return fullUser.incrementVisitors();
+          }
+        })
+        .catch(err => console.error('Error updating visitor count:', err));
+    }
+  } catch (err) {
+    console.error('Error getting complete user profile:', err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -2867,7 +3136,7 @@ router.put('/number/:userNumber/intro', auth, async (req, res) => {
 });
 
 /**
- * Get multiple users by their IDs or userNumbers
+ * Get multiple users by their IDs or userNumbers (optimized with caching)
  * @route POST /api/users/by-ids
  */
 router.post('/by-ids', async (req, res) => {
@@ -2881,6 +3150,16 @@ router.post('/by-ids', async (req, res) => {
     // Limit the number of IDs to prevent abuse
     if (ids.length > 50) {
       return res.status(400).json({ message: 'Cannot fetch more than 50 users at once' });
+    }
+    
+    // Create cache key based on sorted IDs for consistent caching
+    const sortedIds = [...ids].sort();
+    const cacheKey = `users_batch_${sortedIds.join('_')}`;
+    
+    // Check cache first
+    const cachedUsers = getCachedUserStats(cacheKey);
+    if (cachedUsers) {
+      return res.json({ users: cachedUsers });
     }
     
     // Separate ObjectIds and userNumbers
@@ -2914,6 +3193,9 @@ router.post('/by-ids', async (req, res) => {
       { $or: queryConditions },
       { displayName: 1, username: 1, userNumber: 1, avatar: 1, role: 1, _id: 1 }
     ).lean();
+    
+    // Cache the result for 5 minutes
+    setCachedUserStats(cacheKey, users);
     
     res.json({ users });
   } catch (error) {

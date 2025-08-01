@@ -4202,4 +4202,97 @@ router.post("/:id/auto-unlock", auth, async (req, res) => {
   }
 });
 
+/**
+ * Get multiple novels by IDs (batch endpoint to reduce duplicate queries)
+ * @route POST /api/novels/batch
+ */
+router.post('/batch', async (req, res) => {
+  try {
+    const { novelIds } = req.body;
+    
+    if (!Array.isArray(novelIds) || novelIds.length === 0) {
+      return res.status(400).json({ message: 'novelIds array is required' });
+    }
+    
+    // Deduplicate first, then check batch size
+    const uniqueIds = [...new Set(novelIds)]; // Remove duplicates
+    
+    // Limit batch size to prevent abuse (after deduplication)
+    if (uniqueIds.length > 20) {
+      return res.status(400).json({ message: 'Cannot fetch more than 20 unique novels at once' });
+    }
+    
+    // Validate all IDs
+    const validIds = uniqueIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+    
+    if (validIds.length === 0) {
+      return res.json({ novels: [] });
+    }
+    
+    // Use the same aggregation pattern as individual novel queries but for multiple novels
+    const novels = await Novel.aggregate([
+      { 
+        $match: {
+          _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) }
+        }
+      },
+      {
+        $lookup: {
+          from: 'modules',
+          localField: '_id',
+          foreignField: 'novelId',
+          pipeline: [{ $sort: { order: 1 } }],
+          as: 'modules'
+        }
+      },
+      {
+        $lookup: {
+          from: 'chapters',
+          localField: '_id',
+          foreignField: 'novelId',
+          pipeline: [
+            {
+              $group: {
+                _id: '$moduleId',
+                count: { $sum: 1 },
+                lastUpdated: { $max: '$updatedAt' }
+              }
+            }
+          ],
+          as: 'chapterCounts'
+        }
+      },
+      {
+        $project: {
+          title: 1,
+          description: 1,
+          alternativeTitles: 1,
+          author: 1,
+          illustrator: 1,
+          illustration: 1,
+          status: 1,
+          active: 1,
+          inactive: 1,
+          genres: 1,
+          note: 1,
+          updatedAt: 1,
+          createdAt: 1,
+          views: 1,
+          ratings: 1,
+          novelBalance: 1,
+          novelBudget: 1,
+          wordCount: 1,
+          modules: 1,
+          chapterCounts: 1
+        }
+      }
+    ]);
+    
+    res.json({ novels });
+  } catch (error) {
+    console.error('Error fetching novels batch:', error);
+    res.status(500).json({ message: 'Failed to fetch novels' });
+  }
+});
+
 export default router;
