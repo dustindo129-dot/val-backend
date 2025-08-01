@@ -194,7 +194,7 @@ router.get('/novel/:novelId', async (req, res) => {
             localField: 'user',
             foreignField: '_id',
             pipeline: [
-              { $project: { username: 1, displayName: 1, avatar: 1, role: 1 } }
+              { $project: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 } }
             ],
             as: 'userInfo'
           }
@@ -396,7 +396,7 @@ router.get('/', async (req, res) => {
             localField: 'user',
             foreignField: '_id',
             pipeline: [
-              { $project: { username: 1, displayName: 1, avatar: 1, role: 1 } }
+              { $project: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 } }
             ],
             as: 'userInfo'
           }
@@ -423,7 +423,8 @@ router.get('/', async (req, res) => {
               username: '$userInfo.username',
               displayName: '$userInfo.displayName',
               avatar: '$userInfo.avatar',
-              role: '$userInfo.role'
+              role: '$userInfo.role',
+              userNumber: '$userInfo.userNumber'
             }
           }
         }
@@ -543,7 +544,7 @@ router.get('/recent', async (req, res) => {
             localField: 'user',
             foreignField: '_id',
             pipeline: [
-              { $project: { username: 1, displayName: 1, avatar: 1, role: 1 } }
+              { $project: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 } }
             ],
             as: 'userInfo'
           }
@@ -673,7 +674,8 @@ router.get('/recent', async (req, res) => {
               username: '$userInfo.username',
               displayName: '$userInfo.displayName',
               avatar: '$userInfo.avatar',
-              role: '$userInfo.role'
+              role: '$userInfo.role',
+              userNumber: '$userInfo.userNumber'
             }
           }
         }
