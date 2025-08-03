@@ -247,6 +247,7 @@ const pendingQueries = new Map();
 // Cache for cleanup operations to avoid running them too frequently
 let lastCleanupTime = 0;
 const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const BACKGROUND_CLEANUP_INTERVAL = 30 * 60 * 1000; // 30 minutes for background cleanup
 
 /**
  * Runs cleanup if enough time has passed since last cleanup
@@ -254,10 +255,40 @@ const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const runCleanupIfNeeded = async () => {
   const now = Date.now();
   if (now - lastCleanupTime > CLEANUP_INTERVAL) {
-    await ModuleRental.cleanupExpiredRentals();
-    lastCleanupTime = now;
+    try {
+      const result = await ModuleRental.cleanupExpiredRentals();
+      lastCleanupTime = now;
+      if (result.modifiedCount > 0) {
+        console.log(`Cleaned up ${result.modifiedCount} expired rentals`);
+      }
+    } catch (error) {
+      console.error('Error during rental cleanup:', error);
+    }
   }
 };
+
+/**
+ * Starts background rental cleanup process
+ * This ensures rentals are cleaned up regularly even without API calls
+ */
+const startBackgroundCleanup = () => {
+  // Run initial cleanup after 1 minute
+  setTimeout(async () => {
+    console.log('Starting initial rental cleanup...');
+    await runCleanupIfNeeded();
+  }, 60000);
+
+  // Then run cleanup every 30 minutes
+  setInterval(async () => {
+    console.log('Running scheduled rental cleanup...');
+    await runCleanupIfNeeded();
+  }, BACKGROUND_CLEANUP_INTERVAL);
+  
+  console.log(`Background rental cleanup started (interval: ${BACKGROUND_CLEANUP_INTERVAL / 60000} minutes)`);
+};
+
+// Start background cleanup when module loads
+startBackgroundCleanup();
 
 /**
  * Search modules with novel information
@@ -1194,27 +1225,33 @@ router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, asyn
     const { novelId, moduleId, chapterId } = req.params;
     const skipUpdateTimestamp = req.query.skipUpdateTimestamp === 'true';
 
-    // Get all chapters for this module
-    const chapters = await Chapter.find({ moduleId }).sort('order');
+    // Get the chapter to move (only fetch necessary fields)
+    const chapterToMove = await Chapter.findById(chapterId, { order: 1, _id: 1 }).session(session);
     
-    // Find the chapter to move and its index
-    const currentIndex = chapters.findIndex(c => c._id.toString() === chapterId);
-    
-    if (currentIndex === -1) {
+    if (!chapterToMove) {
       throw new Error('Chapter not found');
     }
 
-    // Calculate target index
-    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    // Find the adjacent chapter based on direction using targeted queries
+    const isMovingUp = direction === 'up';
+    const adjacentChapterQuery = {
+      moduleId: moduleId,
+      order: isMovingUp 
+        ? { $lt: chapterToMove.order } // Find chapter with order less than current (moving up)
+        : { $gt: chapterToMove.order }  // Find chapter with order greater than current (moving down)
+    };
     
-    // Check if move is possible
-    if (targetIndex < 0 || targetIndex >= chapters.length) {
+    // Get the target chapter (closest by order)
+    const otherChapter = await Chapter.findOne(
+      adjacentChapterQuery, 
+      { order: 1, _id: 1 }
+    )
+    .sort({ order: isMovingUp ? -1 : 1 }) // Sort descending for up, ascending for down
+    .session(session);
+    
+    if (!otherChapter) {
       throw new Error('Cannot move chapter further in that direction');
     }
-
-    // Get current and target chapters
-    const chapterToMove = chapters[currentIndex];
-    const otherChapter = chapters[targetIndex];
 
     // Store original order values
     const originalOrder = chapterToMove.order;
@@ -1241,20 +1278,8 @@ router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, asyn
       { session }
     );
 
-    // Update module's chapters array to reflect new order
-    await Module.findByIdAndUpdate(
-      moduleId,
-      { 
-        $set: { 
-          chapters: chapters.map(c => 
-            c._id.toString() === chapterToMove._id.toString() ? chapterToMove._id :
-            c._id.toString() === otherChapter._id.toString() ? otherChapter._id :
-            c._id
-          )
-        }
-      },
-      { session }
-    );
+    // Note: Module chapters array doesn't need reordering since order is determined by chapter.order field
+    // The array is just a reference list, not positional. Skip expensive array rebuild.
 
     // Chapter reordering is an administrative action - don't update novel timestamp
     // (Novel timestamp should only be updated for new content, not reorganization)
@@ -1265,12 +1290,13 @@ router.put('/:novelId/modules/:moduleId/chapters/:chapterId/reorder', auth, asyn
     // Clear novel caches
     clearNovelCaches();
 
-    // Get updated chapters list
-    const updatedChapters = await Chapter.find({ moduleId }).sort('order');
-    
+    // Return lightweight response with just the swapped chapters
     res.json({
       message: 'Chapters reordered successfully',
-      chapters: updatedChapters
+      swappedChapters: [
+        { _id: chapterToMove._id, order: targetOrder },
+        { _id: otherChapter._id, order: originalOrder }
+      ]
     });
   } catch (err) {
     await session.abortTransaction();
@@ -1555,76 +1581,7 @@ router.get('/:moduleId/rental-status', auth, async (req, res) => {
   }
 });
 
-/**
- * Get active rental counts for modules in a novel (Admin/Moderator/PJ_User only)
- * @route GET /api/modules/:novelId/rental-counts
- */
-router.get('/:novelId/rental-counts', auth, async (req, res) => {
-  try {
-    const { novelId } = req.params;
 
-    // Check if user has permission (admin, moderator, or pj_user managing this novel)
-    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-      if (req.user.role === 'pj_user') {
-        const novel = await Novel.findById(novelId).lean();
-        if (!novel) {
-          return res.status(404).json({ message: 'Novel not found' });
-        }
-        
-        // Check if user is in the novel's active pj_user array
-        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
-                            novel.active?.pj_user?.includes(req.user.username);
-        
-        if (!isAuthorized) {
-          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
-        }
-      } else {
-        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
-      }
-    }
-
-    // Cleanup expired rentals if needed (cached to avoid frequent calls)
-    await runCleanupIfNeeded();
-
-    // Get all modules for this novel
-    const modules = await Module.find({ novelId }).select('_id').lean();
-    const moduleIds = modules.map(m => m._id);
-
-    // Get active rental counts for each module
-    const rentalCounts = await ModuleRental.aggregate([
-      {
-        $match: {
-          moduleId: { $in: moduleIds },
-          isActive: true,
-          endTime: { $gt: new Date() }
-        }
-      },
-      {
-        $group: {
-          _id: '$moduleId',
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-
-    // Create a map of moduleId to count
-    const countsMap = rentalCounts.reduce((acc, item) => {
-      acc[item._id.toString()] = item.count;
-      return acc;
-    }, {});
-
-    // Return counts for all modules (including 0 for modules with no active rentals)
-    const result = {};
-    moduleIds.forEach(moduleId => {
-      result[moduleId.toString()] = countsMap[moduleId.toString()] || 0;
-    });
-
-    res.json(result);
-  } catch (err) {
-    console.error('Error getting module rental counts:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
 
 /**
  * Cleanup expired rentals (utility endpoint, can be called by cron jobs)
@@ -1640,6 +1597,53 @@ router.post('/rentals/cleanup', auth, admin, async (req, res) => {
     });
   } catch (err) {
     console.error('Error cleaning up expired rentals:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Force cleanup of expired rentals regardless of cache (for system maintenance)
+ * @route POST /api/modules/rentals/force-cleanup
+ */
+router.post('/rentals/force-cleanup', auth, admin, async (req, res) => {
+  try {
+    // Reset cleanup timer to force immediate cleanup
+    lastCleanupTime = 0;
+    await runCleanupIfNeeded();
+    
+    // Get the actual cleanup result
+    const result = await ModuleRental.cleanupExpiredRentals();
+    
+    res.json({
+      message: 'Force cleanup completed successfully',
+      modifiedCount: result.modifiedCount,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error('Error during force cleanup:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Get rental cleanup status and next cleanup time
+ * @route GET /api/modules/rentals/cleanup-status
+ */
+router.get('/rentals/cleanup-status', auth, admin, async (req, res) => {
+  try {
+    const now = Date.now();
+    const timeSinceLastCleanup = now - lastCleanupTime;
+    const timeUntilNextCleanup = Math.max(0, CLEANUP_INTERVAL - timeSinceLastCleanup);
+    
+    res.json({
+      lastCleanupTime: lastCleanupTime ? new Date(lastCleanupTime).toISOString() : null,
+      timeSinceLastCleanup: timeSinceLastCleanup,
+      timeUntilNextCleanup: timeUntilNextCleanup,
+      cleanupInterval: CLEANUP_INTERVAL,
+      nextCleanupIn: Math.ceil(timeUntilNextCleanup / 60000) + ' minutes'
+    });
+  } catch (err) {
+    console.error('Error getting cleanup status:', err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -1690,7 +1694,13 @@ router.post('/recalculate-rent-balance', auth, admin, async (req, res) => {
 });
 
 /**
- * Get rental counts for modules in a novel (admin/moderator/pj_user only)
+ * Get rental counts for rent-mode modules in a novel (admin/moderator/pj_user only)
+ * 
+ * Optimizations:
+ * - Only queries modules in 'rent' mode to reduce database load
+ * - Runs rental cleanup before fetching counts to ensure accuracy
+ * - Returns empty object immediately if no rent-mode modules exist
+ * 
  * @route GET /api/modules/:novelId/rental-counts
  */
 router.get('/:novelId/rental-counts', auth, async (req, res) => {
@@ -1746,35 +1756,45 @@ router.get('/:novelId/rental-counts', auth, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to view rental statistics' });
     }
 
-    // Get all modules for this novel
-    const modules = await Module.find({ novelId }).select('_id');
-    const moduleIds = modules.map(m => m._id);
+    // Cleanup expired rentals if needed (cached to avoid frequent calls)
+    await runCleanupIfNeeded();
 
-    // Get active rental counts for each module
+    // Only get modules that are in 'rent' mode for this novel
+    const rentModeModules = await Module.find({ 
+      novelId, 
+      mode: 'rent' 
+    }).select('_id');
+    
+    // If no modules in rent mode, return empty object immediately
+    if (rentModeModules.length === 0) {
+      return res.json({});
+    }
+    
+    const rentModeModuleIds = rentModeModules.map(m => m._id);
+
+    // Get active rental counts only for rent-mode modules
     const rentalCounts = {};
     
-    if (moduleIds.length > 0) {
-      const rentalStats = await ModuleRental.aggregate([
-        {
-          $match: {
-            moduleId: { $in: moduleIds },
-            isActive: true,
-            endTime: { $gt: new Date() }
-          }
-        },
-        {
-          $group: {
-            _id: '$moduleId',
-            count: { $sum: 1 }
-          }
+    const rentalStats = await ModuleRental.aggregate([
+      {
+        $match: {
+          moduleId: { $in: rentModeModuleIds },
+          isActive: true,
+          endTime: { $gt: new Date() }
         }
-      ]);
+      },
+      {
+        $group: {
+          _id: '$moduleId',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
 
-      // Convert to object with moduleId as key
-      rentalStats.forEach(stat => {
-        rentalCounts[stat._id.toString()] = stat.count;
-      });
-    }
+    // Convert to object with moduleId as key
+    rentalStats.forEach(stat => {
+      rentalCounts[stat._id.toString()] = stat.count;
+    });
 
     res.json(rentalCounts);
   } catch (error) {
