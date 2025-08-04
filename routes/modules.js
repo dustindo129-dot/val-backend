@@ -995,21 +995,77 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
       console.log(`Module mode changed manually: ${updatedModule.title} from ${currentModule.mode} to ${req.body.mode}`);
     }
 
-    // Check for auto-unlock if module was changed to paid mode
-    if (req.body.mode === 'paid' && currentModule.mode !== 'paid') {
-      // Import the checkAndUnlockContent function from novels.js
-      const { checkAndUnlockContent } = await import('./novels.js');
-      await checkAndUnlockContent(req.params.novelId);
-    }
-    
-    // Recalculate rent balance if module was changed to rent mode
-    if (req.body.mode === 'rent' && currentModule.mode !== 'rent') {
-      try {
-        await calculateAndUpdateModuleRentBalance(req.params.moduleId);
-        console.log(`Recalculated rent balance for module ${req.params.moduleId} after switching to rent mode`);
-      } catch (rentBalanceError) {
-        console.error('Error recalculating module rent balance after mode change to rent:', rentBalanceError);
-        // Don't fail the module update if rent balance calculation fails
+    // Handle module mode changes
+    if (currentModule.mode !== req.body.mode) {
+      // If module is being switched to paid mode, convert all chapters to published
+      if (req.body.mode === 'paid' && currentModule.mode !== 'paid') {
+        try {
+          // Get all chapters in this module
+          const chapters = await Chapter.find({ moduleId: req.params.moduleId });
+          
+          // Check if any draft chapters exist (for timestamp update logic)
+          const hasDraftChapters = chapters.some(chapter => chapter.mode === 'draft');
+          
+          // Convert all chapters to published mode
+          const chapterUpdatePromises = chapters.map(chapter => {
+            if (chapter.mode !== 'published') {
+              return Chapter.findByIdAndUpdate(
+                chapter._id,
+                { 
+                  mode: 'published',
+                  updatedAt: new Date()
+                }
+              );
+            }
+            return Promise.resolve();
+          });
+          
+          await Promise.all(chapterUpdatePromises);
+          
+          // Update novel timestamp if draft chapters were converted to published
+          if (hasDraftChapters) {
+            await Novel.findByIdAndUpdate(
+              req.params.novelId,
+              { updatedAt: new Date() }
+            );
+            console.log(`Updated novel timestamp due to draft chapters being published in module ${updatedModule.title}`);
+          }
+          
+          console.log(`Converted all chapters in module ${updatedModule.title} to published mode (module switched to paid)`);
+          
+          // Send notification about chapter mode changes
+          const convertedChapters = chapters.filter(chapter => chapter.mode !== 'published');
+          convertedChapters.forEach(chapter => {
+            notifyAllClients('chapter_mode_changed', {
+              novelId: req.params.novelId,
+              moduleId: req.params.moduleId,
+              chapterId: chapter._id,
+              chapterTitle: chapter.title,
+              oldMode: chapter.mode,
+              newMode: 'published',
+              reason: 'module_switched_to_paid'
+            });
+          });
+          
+        } catch (chapterConversionError) {
+          console.error('Error converting chapters to published when module switched to paid:', chapterConversionError);
+          // Don't fail the module update if chapter conversion fails
+        }
+        
+        // Import the checkAndUnlockContent function from novels.js for auto-unlock
+        const { checkAndUnlockContent } = await import('./novels.js');
+        await checkAndUnlockContent(req.params.novelId);
+      }
+      
+      // Recalculate rent balance if module was changed to rent mode
+      if (req.body.mode === 'rent' && currentModule.mode !== 'rent') {
+        try {
+          await calculateAndUpdateModuleRentBalance(req.params.moduleId);
+          console.log(`Recalculated rent balance for module ${req.params.moduleId} after switching to rent mode`);
+        } catch (rentBalanceError) {
+          console.error('Error recalculating module rent balance after mode change to rent:', rentBalanceError);
+          // Don't fail the module update if rent balance calculation fails
+        }
       }
     }
     
