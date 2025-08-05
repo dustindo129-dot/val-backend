@@ -380,7 +380,6 @@ export const createLikedCommentNotification = async (commentOwnerId, commentId, 
     });
 
     await notification.save();
-    console.log(`Liked comment notification created for user ${commentOwnerId}`);
     
     // Broadcast new notification event to specific user only
     broadcastEventToUser('new_notification', {

@@ -842,13 +842,33 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
     const userId = req.user._id;
     const { timestamp, deviceId } = req.body;
 
-    // Single atomic update operation with duplicate prevention
+    // First, get the current state of the comment to check if it's a first-time like
+    const currentComment = await Comment.findById(req.params.commentId, {
+      likes: 1,
+      likeHistory: 1,
+      user: 1,
+      contentType: 1,
+      contentId: 1
+    });
+
+    if (!currentComment) {
+      return res.status(404).json({ message: 'Comment not found' });
+    }
+
+    // Check if this is a first-time like
+    const currentLikes = currentComment.likes || [];
+    const currentLikeHistory = currentComment.likeHistory || [];
+    const isCurrentlyLiked = currentLikes.some(id => id.toString() === userId.toString());
+    const hasLikedBefore = currentLikeHistory.some(id => id.toString() === userId.toString());
+    const isFirstTimeLike = !hasLikedBefore && !isCurrentlyLiked;
+
+    // Now update the comment with simplified logic
     const comment = await Comment.findOneAndUpdate(
       { _id: req.params.commentId },
       [
         {
           $set: {
-            // First ensure likes array exists and has no duplicates
+            // Toggle like status
             likes: {
               $cond: {
                 if: { $in: [userId, "$likes"] },
@@ -894,13 +914,6 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
                 }
               }
             },
-            // Calculate if this is a first-time like
-            isFirstTimeLike: {
-              $and: [
-                { $not: [{ $in: [userId, { $ifNull: ["$likeHistory", []] }] }] },
-                { $not: [{ $in: [userId, { $ifNull: ["$likes", []] }] }] }
-              ]
-            },
             // Store metadata
             lastLikeTimestamp: timestamp || new Date(),
             lastLikeDeviceId: deviceId
@@ -915,7 +928,6 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
           contentType: 1, 
           contentId: 1,
           likeHistory: 1,
-          isFirstTimeLike: 1,
           lastLikeTimestamp: 1
         }
       }
@@ -925,11 +937,11 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
       return res.status(404).json({ message: 'Comment not found' });
     }
 
-    const isLiked = comment.likes.includes(userId);
+    const isLiked = comment.likes.some(id => id.toString() === userId.toString());
     const serverTimestamp = Date.now();
 
     // Create notification only when liking for the FIRST TIME EVER
-    if (comment.isFirstTimeLike && isLiked && comment.user.toString() !== userId.toString()) {
+    if (isFirstTimeLike && isLiked && comment.user.toString() !== userId.toString()) {
       let novelId = null;
       let chapterId = null;
       
@@ -945,7 +957,7 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
           chapterId = comment.contentId;
           // Try to get novelId from the chapter document
           try {
-            const Chapter = require('../models/Chapter.js').default;
+            const Chapter = (await import('../models/Chapter.js')).default;
             const chapterDoc = await Chapter.findById(chapterId);
             if (chapterDoc) {
               novelId = chapterDoc.novelId.toString();
@@ -957,13 +969,17 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
       }
       
       if (novelId) {
-        await createLikedCommentNotification(
-          comment.user.toString(),
-          comment._id.toString(),
-          userId.toString(),
-          novelId,
-          chapterId
-        );
+        try {
+          await createLikedCommentNotification(
+            comment.user.toString(),
+            comment._id.toString(),
+            userId.toString(),
+            novelId,
+            chapterId
+          );
+        } catch (error) {
+          console.error('Error creating like notification:', error);
+        }
       }
     }
 
