@@ -2027,6 +2027,30 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
           as: 'userInteraction'
         }
       }] : []),
+      // Lookup active module rental for authenticated users
+      ...(userId ? [{
+        $lookup: {
+          from: 'modulerentals',
+          let: { moduleId: '$moduleId' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$moduleId', '$$moduleId'] },
+                    { $eq: ['$userId', userId] },
+                    { $eq: ['$isActive', true] },
+                    { $gt: ['$endTime', new Date()] }
+                  ]
+                }
+              }
+            },
+            { $project: { _id: 1, endTime: 1, amountPaid: 1 } },
+            { $limit: 1 }
+          ],
+          as: 'activeRental'
+        }
+      }] : []),
       // Lookup chapter statistics
       {
         $lookup: {
@@ -2136,7 +2160,8 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
           nextChapter: 1,
           userInteraction: 1,
           chapterStats: 1,
-          allModuleChapters: 1 // Include all module chapters for dropdown
+          allModuleChapters: 1, // Include all module chapters for dropdown
+          activeRental: 1 // Include active rental information
         }
       }
     ];
@@ -2156,6 +2181,18 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
     // Also populate the nested novel data if it exists
     if (populatedChapter.novel) {
       populatedChapter.novel = await populateStaffNames(populatedChapter.novel);
+    }
+
+    // Add rental information to the chapter if user has active rental
+    if (chapterData.activeRental && chapterData.activeRental.length > 0) {
+      populatedChapter.rentalInfo = {
+        hasActiveRental: true,
+        rental: chapterData.activeRental[0]
+      };
+    } else {
+      populatedChapter.rentalInfo = {
+        hasActiveRental: false
+      };
     }
 
     // Format the response to match existing structure
