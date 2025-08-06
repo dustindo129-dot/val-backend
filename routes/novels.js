@@ -32,6 +32,68 @@ const router = express.Router();
 const pendingQueries = new Map();
 
 /**
+ * Helper function to check if user can see draft modules
+ * @param {Object} user - The authenticated user
+ * @param {Object} novel - The novel object (if available)
+ * @returns {boolean} Whether user can see draft modules
+ */
+const canSeeDraftModules = (user, novel = null) => {
+  if (!user) return false;
+  
+  // Admin and moderators can see all draft modules
+  if (user.role === 'admin' || user.role === 'moderator') {
+    return true;
+  }
+  
+  // For pj_user, check if they have access to this specific novel
+  if (user.role === 'pj_user' && novel?.active?.pj_user) {
+    return novel.active.pj_user.some(pjUser => {
+      // Handle case where pjUser is an object (new format)
+      if (typeof pjUser === 'object' && pjUser !== null) {
+        return (
+          pjUser._id === user.id ||
+          pjUser._id === user._id ||
+          pjUser.username === user.username ||
+          pjUser.displayName === user.displayName ||
+          pjUser.userNumber === user.userNumber
+        );
+      }
+      // Handle case where pjUser is a primitive value (old format)
+      return (
+        pjUser === user.id ||
+        pjUser === user._id ||
+        pjUser === user.username ||
+        pjUser === user.displayName ||
+        pjUser === user.userNumber
+      );
+    });
+  }
+  
+  return false;
+};
+
+/**
+ * Filter modules based on user permissions and draft visibility
+ * @param {Array} modules - Array of modules to filter
+ * @param {Object} user - The authenticated user
+ * @param {Object} novel - The novel object (if available)
+ * @returns {Array} Filtered modules
+ */
+const filterModulesByVisibility = (modules, user, novel = null) => {
+  const userCanSeeDrafts = canSeeDraftModules(user, novel);
+  
+  return modules.filter(module => {
+    // If module is not draft, it's visible
+    if (module.mode !== 'draft') {
+      return true;
+    }
+    
+    // If module is draft, only show to authorized users
+    return userCanSeeDrafts;
+  });
+};
+
+/**
  * Utility function to validate ObjectId and send error response if invalid
  */
 const validateObjectId = (id, res, fieldName = 'ID') => {
@@ -1698,7 +1760,7 @@ router.post("/", [auth, admin], async (req, res) => {
  * Get single novel and increment view count (OPTIMIZED)
  * @route GET /api/novels/:id
  */
-router.get("/:id", async (req, res) => {
+router.get("/:id", optionalAuth, async (req, res) => {
   try {
     const novelId = req.params.id;
     
@@ -1708,7 +1770,9 @@ router.get("/:id", async (req, res) => {
     }
     
     // Use query deduplication to prevent multiple identical requests
-    const result = await dedupQuery(`novel:${novelId}`, async () => {
+    // Include user role and authorization status in cache key to ensure proper draft module visibility
+    const userCacheKey = req.user ? `${req.user.role}:${req.user._id}` : 'anonymous';
+    const result = await dedupQuery(`novel:${novelId}:${userCacheKey}`, async () => {
       // Use a single aggregation pipeline to get all required data in one query
       const [novelWithData] = await Novel.aggregate([
         // Match the specific novel
@@ -1817,9 +1881,12 @@ router.get("/:id", async (req, res) => {
       // Populate staff ObjectIds with user display names
       const populatedNovel = await populateStaffNames(novel);
       
+      // Filter modules based on user permissions (remove draft modules for unauthorized users)
+      const filteredModules = filterModulesByVisibility(modulesWithChapters, req.user, populatedNovel);
+
       return {
         novel: populatedNovel,
-        modules: modulesWithChapters
+        modules: filteredModules
       };
     });
 
@@ -3899,7 +3966,7 @@ router.get("/homepage", async (req, res) => {
  * Get optimized dashboard data for a novel (eliminates duplicate queries)
  * @route GET /api/novels/:id/dashboard
  */
-router.get("/:id/dashboard", async (req, res) => {
+router.get("/:id/dashboard", optionalAuth, async (req, res) => {
   try {
     const novelId = req.params.id;
     
@@ -3912,7 +3979,9 @@ router.get("/:id/dashboard", async (req, res) => {
     
     // Check if we should bypass cache
     const bypass = shouldBypassCache(req.path, req.query);
-    const cacheKey = `novel-dashboard:${novelId}:${moduleId || 'all'}`;
+    // Include user info in cache key for proper draft module visibility
+    const userCacheKey = req.user ? `${req.user.role}:${req.user._id}` : 'anonymous';
+    const cacheKey = `novel-dashboard:${novelId}:${moduleId || 'all'}:${userCacheKey}`;
     
     // Try to get from cache first (short TTL for dashboard data)
     if (!bypass) {
@@ -3938,6 +4007,7 @@ router.get("/:id/dashboard", async (req, res) => {
             localField: '_id',
             foreignField: 'novelId',
             pipeline: [
+
               { $sort: { order: 1 } }
             ],
             as: 'modules'
@@ -4117,9 +4187,12 @@ router.get("/:id/dashboard", async (req, res) => {
         }));
       }
 
+      // Filter modules based on user permissions (remove draft modules for unauthorized users)
+      const filteredModules = filterModulesByVisibility(modulesWithChapters, req.user, populatedNovel);
+
       return {
         novel: populatedNovel,
-        modules: modulesWithChapters,
+        modules: filteredModules,
         // Only include chapters array if specific module requested
         chapters: moduleId ? (dashboardData.moduleChapters || []) : [],
         selectedModule: dashboardData.selectedModule || null
@@ -4206,7 +4279,7 @@ router.post("/:id/auto-unlock", auth, async (req, res) => {
  * Get multiple novels by IDs (batch endpoint to reduce duplicate queries)
  * @route POST /api/novels/batch
  */
-router.post('/batch', async (req, res) => {
+router.post('/batch', optionalAuth, async (req, res) => {
   try {
     const { novelIds } = req.body;
     
@@ -4288,7 +4361,13 @@ router.post('/batch', async (req, res) => {
       }
     ]);
     
-    res.json({ novels });
+    // Filter modules for each novel based on user permissions
+    const novelsWithFilteredModules = novels.map(novel => ({
+      ...novel,
+      modules: filterModulesByVisibility(novel.modules || [], req.user, novel)
+    }));
+    
+    res.json({ novels: novelsWithFilteredModules });
   } catch (error) {
     console.error('Error fetching novels batch:', error);
     res.status(500).json({ message: 'Failed to fetch novels' });

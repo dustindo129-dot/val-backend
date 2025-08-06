@@ -1,6 +1,6 @@
 import express from 'express';
 import Module from '../models/Module.js';
-import { auth } from '../middleware/auth.js';
+import { auth, optionalAuth } from '../middleware/auth.js';
 import admin from '../middleware/admin.js';
 import Chapter from '../models/Chapter.js';
 import { clearNovelCaches, notifyAllClients } from '../utils/cacheUtils.js';
@@ -243,6 +243,68 @@ const router = express.Router();
 
 // Query deduplication cache to prevent multiple identical requests
 const pendingQueries = new Map();
+
+/**
+ * Helper function to check if user can see draft modules
+ * @param {Object} user - The authenticated user
+ * @param {Object} novel - The novel object (if available)
+ * @returns {boolean} Whether user can see draft modules
+ */
+const canSeeDraftModules = (user, novel = null) => {
+  if (!user) return false;
+  
+  // Admin and moderators can see all draft modules
+  if (user.role === 'admin' || user.role === 'moderator') {
+    return true;
+  }
+  
+  // For pj_user, check if they have access to this specific novel
+  if (user.role === 'pj_user' && novel?.active?.pj_user) {
+    return novel.active.pj_user.some(pjUser => {
+      // Handle case where pjUser is an object (new format)
+      if (typeof pjUser === 'object' && pjUser !== null) {
+        return (
+          pjUser._id === user.id ||
+          pjUser._id === user._id ||
+          pjUser.username === user.username ||
+          pjUser.displayName === user.displayName ||
+          pjUser.userNumber === user.userNumber
+        );
+      }
+      // Handle case where pjUser is a primitive value (old format)
+      return (
+        pjUser === user.id ||
+        pjUser === user._id ||
+        pjUser === user.username ||
+        pjUser === user.displayName ||
+        pjUser === user.userNumber
+      );
+    });
+  }
+  
+  return false;
+};
+
+/**
+ * Filter modules based on user permissions and draft visibility
+ * @param {Array} modules - Array of modules to filter
+ * @param {Object} user - The authenticated user
+ * @param {Object} novel - The novel object (if available)
+ * @returns {Array} Filtered modules
+ */
+const filterModulesByVisibility = (modules, user, novel = null) => {
+  const userCanSeeDrafts = canSeeDraftModules(user, novel);
+  
+  return modules.filter(module => {
+    // If module is not draft, it's visible
+    if (module.mode !== 'draft') {
+      return true;
+    }
+    
+    // If module is draft, only show to authorized users
+    return userCanSeeDrafts;
+  });
+};
 
 // Cache for cleanup operations to avoid running them too frequently
 let lastCleanupTime = 0;
@@ -654,12 +716,21 @@ router.get("/slug/:slug", async (req, res) => {
 });
 
 // New optimized route to get all modules with chapters for a novel
-router.get('/:novelId/modules-with-chapters', async (req, res) => {
+router.get('/:novelId/modules-with-chapters', optionalAuth, async (req, res) => {
   try {
+    // Get novel info for permission checking
+    const novel = await Novel.findById(req.params.novelId).lean();
+    if (!novel) {
+      return res.status(404).json({ message: 'Novel not found' });
+    }
+
     // First get all modules for the novel
-    const modules = await Module.find({ novelId: req.params.novelId })
+    const allModules = await Module.find({ novelId: req.params.novelId })
       .sort('order')
       .lean(); // Use lean() for better performance since we're modifying the objects
+
+    // Filter modules based on user permissions (hide draft modules from unauthorized users)
+    const modules = filterModulesByVisibility(allModules, req.user, novel);
 
     // Get all chapters for this novel in one query
     const chapters = await Chapter.find({ 
@@ -689,14 +760,25 @@ router.get('/:novelId/modules-with-chapters', async (req, res) => {
 });
 
 // Get all modules for a novel (keeping for backward compatibility)
-router.get('/:novelId/modules', async (req, res) => {
+router.get('/:novelId/modules', optionalAuth, async (req, res) => {
   try {
-    const modules = await Module.find({ novelId: req.params.novelId })
+    // Get novel info for permission checking
+    const novel = await Novel.findById(req.params.novelId).lean();
+    if (!novel) {
+      return res.status(404).json({ message: 'Novel not found' });
+    }
+
+    // Get all modules and filter by visibility
+    const allModules = await Module.find({ novelId: req.params.novelId })
       .sort('order')
       .populate({
         path: 'chapters',
         options: { sort: { order: 1 } }
       });
+    
+    // Filter modules based on user permissions (hide draft modules from unauthorized users)
+    const modules = filterModulesByVisibility(allModules, req.user, novel);
+    
     res.json(modules);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -888,12 +970,15 @@ router.post('/:novelId/modules', auth, async (req, res) => {
     const newModule = await module.save();
     
     // Only increment view count, don't update timestamp to avoid affecting latest updates
-    await Novel.findByIdAndUpdate(
-      req.params.novelId,
-      { 
-        $inc: { 'views.total': 1 }
-      }
-    );
+    // For draft modules, don't update novel timestamp at all (same behavior as draft chapters)
+    if (newModule.mode !== 'draft') {
+      await Novel.findByIdAndUpdate(
+        req.params.novelId,
+        { 
+          $inc: { 'views.total': 1 }
+        }
+      );
+    }
     
     // Clear novel caches in one operation
     clearNovelCaches();
@@ -997,6 +1082,15 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
 
     // Handle module mode changes
     if (currentModule.mode !== req.body.mode) {
+      // Update novel timestamp when switching from draft to any other mode (published/paid/rent)
+      if (currentModule.mode === 'draft' && req.body.mode !== 'draft') {
+        await Novel.findByIdAndUpdate(
+          req.params.novelId,
+          { updatedAt: new Date() }
+        );
+        console.log(`Updated novel timestamp due to module ${updatedModule.title} switching from draft to ${req.body.mode}`);
+      }
+      
       // If module is being switched to paid mode, convert all chapters to published
       if (req.body.mode === 'paid' && currentModule.mode !== 'paid') {
         try {
