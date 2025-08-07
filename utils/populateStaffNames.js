@@ -74,21 +74,72 @@ export const populateStaffNames = async (obj) => {
       }
     }
 
-    // If no ObjectIds found, return original object
-    if (allObjectIds.size === 0) {
+    // Collect ObjectIds from author field (for both novels and chapters)
+    if (obj.author) {
+      collectObjectIds(obj.author);
+    }
+
+    // Collect author strings that might match usernames/displayNames (only for Vietnamese novels)
+    const authorStringsToMatch = new Set();
+    if (obj.author && typeof obj.author === 'string' && !isValidObjectId(obj.author)) {
+      // Only perform author matching for Vietnamese novels to avoid unnecessary database queries
+      const isVietnameseNovel = obj.genres && Array.isArray(obj.genres) && 
+        obj.genres.some(genre => typeof genre === 'string' && genre.includes('Vietnamese Novel'));
+      
+      if (isVietnameseNovel) {
+        authorStringsToMatch.add(obj.author.trim());
+      }
+    }
+
+    // If no ObjectIds or author strings found, return original object
+    if (allObjectIds.size === 0 && authorStringsToMatch.size === 0) {
       return obj;
+    }
+
+    // Build query conditions
+    const queryConditions = [];
+    
+    // Add ObjectId conditions
+    if (allObjectIds.size > 0) {
+      queryConditions.push({ _id: { $in: Array.from(allObjectIds) } });
+    }
+    
+    // Add author string matching conditions (case-insensitive)
+    if (authorStringsToMatch.size > 0) {
+      const authorStrings = Array.from(authorStringsToMatch);
+      const regexConditions = authorStrings.map(authorString => ({
+        $or: [
+          { displayName: { $regex: new RegExp(`^${authorString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+          { username: { $regex: new RegExp(`^${authorString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }
+        ]
+      }));
+      
+      if (regexConditions.length === 1) {
+        queryConditions.push(regexConditions[0]);
+      } else {
+        queryConditions.push({ $or: regexConditions });
+      }
     }
 
     // Fetch all users in one batched query
     const users = await User.find(
-      { _id: { $in: Array.from(allObjectIds) } },
+      queryConditions.length === 1 ? queryConditions[0] : { $or: queryConditions },
       { displayName: 1, username: 1, userNumber: 1, avatar: 1, role: 1 }
     ).lean();
 
-    // Create user lookup map
-    const userMap = {};
+    // Create user lookup maps
+    const userMap = {}; // ObjectId -> User
+    const userNameMap = {}; // displayName/username -> User (case-insensitive)
+    
     users.forEach(user => {
       userMap[user._id.toString()] = user;
+      // Also map by displayName and username for string matching (case-insensitive)
+      if (user.displayName) {
+        userNameMap[user.displayName.toLowerCase()] = user;
+      }
+      if (user.username) {
+        userNameMap[user.username.toLowerCase()] = user;
+      }
     });
 
     // Helper function to process a single staff field (for chapters)
@@ -162,6 +213,43 @@ export const populateStaffNames = async (obj) => {
         if (obj.hasOwnProperty(field)) {
           populatedObj[field] = processStaffField(obj[field]);
         }
+      }
+    }
+
+    // Process author field (for both novels and chapters)
+    if (obj.author) {
+      if (isValidObjectId(obj.author)) {
+        const stringId = objectIdToString(obj.author);
+        const userObj = userMap[stringId];
+
+        // Return full user object if available, otherwise fallback to original
+        populatedObj.author = userObj || obj.author;
+      } else if (typeof obj.author === 'string') {
+        // Only try to match by displayName or username for Vietnamese novels
+        const isVietnameseNovel = obj.genres && Array.isArray(obj.genres) && 
+          obj.genres.some(genre => typeof genre === 'string' && genre.includes('Vietnamese Novel'));
+        
+        if (isVietnameseNovel) {
+          // Try to match by displayName or username (case-insensitive)
+          const authorString = obj.author.trim();
+          const userObj = userNameMap[authorString.toLowerCase()];
+          if (userObj) {
+            // Create a hybrid object that preserves the original text but includes user data for linking
+            populatedObj.author = {
+              ...userObj,
+              originalText: authorString // Preserve the original capitalization
+            };
+          } else {
+            // Keep as string if no user found
+            populatedObj.author = obj.author;
+          }
+        } else {
+          // For non-Vietnamese novels, always keep as plain string
+          populatedObj.author = obj.author;
+        }
+      } else {
+        // Keep as is for any other type
+        populatedObj.author = obj.author;
       }
     }
 
