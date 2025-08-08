@@ -1967,8 +1967,6 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
     const chapterId = req.params.chapterId;
     const userId = req.user?._id;
     
-    console.log(`Fetching chapter with ID: ${chapterId}`);
-   
     // Single aggregation pipeline that gets everything INCLUDING all module chapters
     const pipeline = [
       {
@@ -2190,9 +2188,11 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
     const [chapterData] = await Chapter.aggregate(pipeline);
     
     if (!chapterData) {
-      console.log('Chapter not found');
+      console.log(`Chapter not found (ID: ${chapterId})`);
       return res.status(404).json({ message: 'Chapter not found' });
     }
+    
+    console.log(`Fetching chapter with title: ${chapterData.title} (ID: ${chapterId})`);
 
     // CRITICAL: Add access control logic for rental system
     const user = req.user;
