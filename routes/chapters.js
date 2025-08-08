@@ -2192,7 +2192,7 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
       return res.status(404).json({ message: 'Chapter not found' });
     }
     
-    console.log(`Fetching chapter with title: ${chapterData.title} (ID: ${chapterId})`);
+    console.log(`Fetching chapter title: ${chapterData.title}`);
 
     // CRITICAL: Add access control logic for rental system
     const user = req.user;
