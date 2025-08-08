@@ -620,6 +620,10 @@ router.get('/:id', optionalAuth, async (req, res) => {
       return res.status(404).json({ message: 'Chapter not found' });
     }
 
+    console.log(`[Regular endpoint] Found chapter: ${chapterData.title}`);
+    console.log(`[Regular endpoint] Chapter mode: ${chapterData.mode}, Module mode: ${chapterData.module?.mode}`);
+    console.log(`[Regular endpoint] User: ${req.user ? `${req.user.username} (${req.user.role})` : 'anonymous'}`);
+
     // Check if user can access this chapter content
     const user = req.user; // Will be undefined if not authenticated
     let hasAccess = false;
@@ -640,8 +644,30 @@ router.get('/:id', optionalAuth, async (req, res) => {
       }
     }
     
-    // Check mode-based access for regular users
-    if (!hasAccess) {
+    // CRITICAL FIX: Check module-level access FIRST before individual chapter access
+    // If module is paid, user must have rental access regardless of individual chapter mode
+    if (!hasAccess && chapterData.module?.mode === 'paid') {
+      if (user && chapterData.moduleId) {
+        const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapterData.moduleId);
+        
+        if (activeRental && activeRental.isValid()) {
+          hasAccess = true;
+          accessReason = 'module-rental';
+          
+          // Add rental information to the response
+          chapterData.rentalInfo = {
+            hasActiveRental: true,
+            endTime: activeRental.endTime,
+            timeRemaining: Math.max(0, activeRental.endTime - new Date())
+          };
+        }
+      }
+      // If module is paid and user doesn't have rental access, deny access regardless of chapter mode
+      // This prevents published chapters in paid modules from being accessible without payment
+    }
+    
+    // Check mode-based access for regular users ONLY if module is not paid OR user has module access
+    if (!hasAccess && chapterData.module?.mode !== 'paid') {
       switch (chapterData.mode) {
         case 'published':
           hasAccess = true;
@@ -657,6 +683,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
           // Draft is only accessible to admin/mod/assigned pj_user (already checked above)
           break;
         case 'paid':
+          // Individual paid chapters in non-paid modules
           // Check if user has active rental for this module
           if (user && chapterData.moduleId) {
             const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapterData.moduleId);
@@ -676,40 +703,31 @@ router.get('/:id', optionalAuth, async (req, res) => {
           break;
       }
     }
-    
-    // Check if module is paid and user has rental access
-    if (!hasAccess && chapterData.module?.mode === 'paid' && user && chapterData.moduleId) {
-      const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapterData.moduleId);
-      
-      if (activeRental && activeRental.isValid()) {
-        hasAccess = true;
-        accessReason = 'module-rental';
-        
-        // Add rental information to the response
-        chapterData.rentalInfo = {
-          hasActiveRental: true,
-          endTime: activeRental.endTime,
-          timeRemaining: Math.max(0, activeRental.endTime - new Date())
-        };
-      }
-    }
+
+    console.log(`[Regular endpoint] Final access decision - hasAccess: ${hasAccess}, reason: ${accessReason}`);
 
     // If user doesn't have access, return limited chapter info
     if (!hasAccess) {
+      console.log(`[Regular endpoint] Access denied - returning limited chapter info`);
       // Populate staff ObjectIds with user display names for metadata
       const populatedChapter = await populateStaffNames(chapterData);
       
       // Return chapter without content
       const { content, ...chapterWithoutContent } = populatedChapter;
       
-      return res.json({ 
+      const response = { 
         chapter: {
           ...chapterWithoutContent,
           accessDenied: true,
           accessMessage: getAccessMessage(chapterData, user)
         }
-      });
+      };
+      
+      console.log(`[Regular endpoint] Sending access denied response with accessDenied: ${response.chapter.accessDenied}`);
+      return res.json(response);
     }
+
+    console.log(`[Regular endpoint] Access granted - returning full chapter content`);
 
     // Populate staff ObjectIds with user display names
     const populatedChapter = await populateStaffNames(chapterData);
@@ -1673,8 +1691,30 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
       }
     }
     
-    // Check mode-based access for regular users
-    if (!hasAccess) {
+    // CRITICAL FIX: Check module-level access FIRST before individual chapter access
+    // If module is paid, user must have rental access regardless of individual chapter mode
+    if (!hasAccess && chapter.module?.mode === 'paid') {
+      if (user && chapter.moduleId) {
+        const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapter.moduleId);
+        
+        if (activeRental && activeRental.isValid()) {
+          hasAccess = true;
+          accessReason = 'module-rental';
+          
+          // Add rental information to the response
+          chapter.rentalInfo = {
+            hasActiveRental: true,
+            endTime: activeRental.endTime,
+            timeRemaining: Math.max(0, activeRental.endTime - new Date())
+          };
+        }
+      }
+      // If module is paid and user doesn't have rental access, deny access regardless of chapter mode
+      // This prevents published chapters in paid modules from being accessible without payment
+    }
+    
+    // Check mode-based access for regular users ONLY if module is not paid OR user has module access
+    if (!hasAccess && chapter.module?.mode !== 'paid') {
       switch (chapter.mode) {
         case 'published':
           hasAccess = true;
@@ -1690,9 +1730,11 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
           // Draft is only accessible to admin/mod/assigned pj_user (already checked above)
           break;
         case 'paid':
+          // Individual paid chapters in non-paid modules
           // Check if user has active rental for this module
           if (user && chapter.moduleId) {
             const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapter.moduleId);
+            
             if (activeRental && activeRental.isValid()) {
               hasAccess = true;
               accessReason = 'rental';
@@ -1706,22 +1748,6 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
             }
           }
           break;
-      }
-    }
-    
-    // Check if module is paid and user has rental access
-    if (!hasAccess && chapter.module?.mode === 'paid' && user && chapter.moduleId) {
-      const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapter.moduleId);
-      if (activeRental && activeRental.isValid()) {
-        hasAccess = true;
-        accessReason = 'module-rental';
-        
-        // Add rental information to the response
-        chapter.rentalInfo = {
-          hasActiveRental: true,
-          endTime: activeRental.endTime,
-          timeRemaining: Math.max(0, activeRental.endTime - new Date())
-        };
       }
     }
 
@@ -2173,7 +2199,106 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
       return res.status(404).json({ message: 'Chapter not found' });
     }
 
-    console.log(`Found chapter: ${chapterData.title}`);
+    console.log(`[Optimized endpoint] Found chapter: ${chapterData.title}`);
+    console.log(`[Optimized endpoint] Chapter mode: ${chapterData.mode}, Module mode: ${chapterData.module?.mode}`);
+    console.log(`[Optimized endpoint] User: ${req.user ? `${req.user.username} (${req.user.role})` : 'anonymous'}`);
+
+    // CRITICAL: Add access control logic for rental system
+    const user = req.user;
+    let hasAccess = false;
+    let accessReason = '';
+
+    // Admin, moderator always have access
+    if (user && (user.role === 'admin' || user.role === 'moderator')) {
+      hasAccess = true;
+      accessReason = 'admin/moderator';
+    }
+    // PJ_user for their assigned novels
+    else if (user && user.role === 'pj_user' && chapterData.novel?.active?.pj_user) {
+      const isAuthorized = chapterData.novel.active.pj_user.includes(user._id.toString()) || 
+                          chapterData.novel.active.pj_user.includes(user.username);
+      if (isAuthorized) {
+        hasAccess = true;
+        accessReason = 'pj_user';
+      }
+    }
+    
+    console.log(`[Optimized endpoint] After role check - hasAccess: ${hasAccess}, reason: ${accessReason}`);
+    
+    // CRITICAL FIX: Check module-level access FIRST before individual chapter access
+    // If module is paid, user must have rental access regardless of individual chapter mode
+    if (!hasAccess && chapterData.module?.mode === 'paid') {
+      console.log(`[Optimized endpoint] Module is paid, checking rental access for user: ${user?._id}`);
+      if (user && chapterData.moduleId) {
+        const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapterData.moduleId);
+        console.log(`[Optimized endpoint] Active rental found: ${!!activeRental}`);
+        
+        if (activeRental && activeRental.isValid()) {
+          hasAccess = true;
+          accessReason = 'module-rental';
+          console.log(`[Optimized endpoint] Granted access via module rental`);
+          
+          // Add rental information to the response
+          chapterData.rentalInfo = {
+            hasActiveRental: true,
+            endTime: activeRental.endTime,
+            timeRemaining: Math.max(0, activeRental.endTime - new Date())
+          };
+        } else {
+          console.log(`[Optimized endpoint] No valid rental found, access denied for paid module`);
+        }
+      } else {
+        console.log(`[Optimized endpoint] No user or moduleId, access denied for paid module`);
+      }
+      // If module is paid and user doesn't have rental access, deny access regardless of chapter mode
+      // This prevents published chapters in paid modules from being accessible without payment
+    }
+    
+    // Check mode-based access for regular users ONLY if module is not paid OR user has module access
+    if (!hasAccess && chapterData.module?.mode !== 'paid') {
+      console.log(`[Optimized endpoint] Module is not paid, checking chapter mode: ${chapterData.mode}`);
+      switch (chapterData.mode) {
+        case 'published':
+          hasAccess = true;
+          accessReason = 'published';
+          console.log(`[Optimized endpoint] Granted access to published chapter in non-paid module`);
+          break;
+        case 'protected':
+          if (user) {
+            hasAccess = true;
+            accessReason = 'protected-authenticated';
+            console.log(`[Optimized endpoint] Granted access to protected chapter for authenticated user`);
+          }
+          break;
+        case 'draft':
+          console.log(`[Optimized endpoint] Draft chapter, access denied for regular user`);
+          // Draft is only accessible to admin/mod/assigned pj_user (already checked above)
+          break;
+        case 'paid':
+          console.log(`[Optimized endpoint] Individual paid chapter in non-paid module, checking rental`);
+          // Individual paid chapters in non-paid modules
+          // Check if user has active rental for this module
+          if (user && chapterData.moduleId) {
+            const activeRental = await ModuleRental.findActiveRentalForUserModule(user._id, chapterData.moduleId);
+            
+            if (activeRental && activeRental.isValid()) {
+              hasAccess = true;
+              accessReason = 'rental';
+              console.log(`[Optimized endpoint] Granted access via chapter rental`);
+              
+              // Add rental information to the response
+              chapterData.rentalInfo = {
+                hasActiveRental: true,
+                endTime: activeRental.endTime,
+                timeRemaining: Math.max(0, activeRental.endTime - new Date())
+              };
+            }
+          }
+          break;
+      }
+    }
+
+    console.log(`[Optimized endpoint] Final access decision - hasAccess: ${hasAccess}, reason: ${accessReason}`);
 
     // Populate staff ObjectIds with user display names for both chapter and nested novel data
     const populatedChapter = await populateStaffNames(chapterData);
@@ -2194,6 +2319,34 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
         hasActiveRental: false
       };
     }
+
+    // If user doesn't have access, return limited chapter info
+    if (!hasAccess) {
+      console.log(`[Optimized endpoint] Access denied - returning limited chapter info`);
+      // Return chapter without content
+      const { content, ...chapterWithoutContent } = populatedChapter;
+      
+      // Build interaction response
+      const interactions = {
+        totalLikes: chapterData.chapterStats?.totalLikes || 0,
+        userInteraction: chapterData.userInteraction || { liked: false, bookmarked: false }
+      };
+      
+      const response = {
+        chapter: {
+          ...chapterWithoutContent,
+          accessDenied: true,
+          accessMessage: getAccessMessage(chapterData, user)
+        },
+        interactions,
+        moduleChapters: chapterData.allModuleChapters || []
+      };
+      
+      console.log(`[Optimized endpoint] Sending access denied response with accessDenied: ${response.chapter.accessDenied}`);
+      return res.json(response);
+    }
+
+    console.log(`[Optimized endpoint] Access granted - returning full chapter content`);
 
     // Format the response to match existing structure
     const response = {
