@@ -4,6 +4,7 @@ import { auth, optionalAuth } from '../middleware/auth.js';
 import admin from '../middleware/admin.js';
 import Chapter from '../models/Chapter.js';
 import { clearNovelCaches, notifyAllClients } from '../utils/cacheUtils.js';
+import { createNewChapterNotifications } from '../services/notificationService.js';
 import Novel from '../models/Novel.js';
 import mongoose from 'mongoose';
 import ModuleRental from '../models/ModuleRental.js';
@@ -1097,8 +1098,9 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
           // Get all chapters in this module
           const chapters = await Chapter.find({ moduleId: req.params.moduleId });
           
-          // Check if any draft chapters exist (for timestamp update logic)
-          const hasDraftChapters = chapters.some(chapter => chapter.mode === 'draft');
+          // Identify draft chapters that will be converted to published
+          const draftChapters = chapters.filter(chapter => chapter.mode === 'draft');
+          const hasDraftChapters = draftChapters.length > 0;
           
           // Convert all chapters to published mode
           const chapterUpdatePromises = chapters.map(chapter => {
@@ -1127,7 +1129,7 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
           
           console.log(`Converted all chapters in module ${updatedModule.title} to published mode (module switched to paid)`);
           
-          // Send notification about chapter mode changes
+          // Send real-time notification about chapter mode changes
           const convertedChapters = chapters.filter(chapter => chapter.mode !== 'published');
           convertedChapters.forEach(chapter => {
             notifyAllClients('chapter_mode_changed', {
@@ -1140,6 +1142,19 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
               reason: 'module_switched_to_paid'
             });
           });
+          
+          // Create new_chapter notifications for draft chapters that were converted to published
+          if (draftChapters.length > 0) {
+            console.log(`Creating new_chapter notifications for ${draftChapters.length} draft chapters converted to published in module ${updatedModule.title}`);
+            
+            // Create notifications for each draft chapter that was converted
+            const notificationPromises = draftChapters.map(chapter => 
+              createNewChapterNotifications(req.params.novelId, chapter._id, chapter.title)
+            );
+            
+            await Promise.all(notificationPromises);
+            console.log(`Successfully created new_chapter notifications for converted draft chapters in module ${updatedModule.title}`);
+          }
           
         } catch (chapterConversionError) {
           console.error('Error converting chapters to published when module switched to paid:', chapterConversionError);
