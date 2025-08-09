@@ -1224,6 +1224,19 @@ router.put('/:id', auth, async (req, res) => {
       
       const shouldRecalculateWordCount = contentChanged || finalWordCount !== existingChapter.wordCount;
 
+      // Check if chapter mode is changing from draft to any other mode (for timestamp update)
+      const isDraftModeChanging = existingChapter.mode === 'draft' && 
+        mode && mode !== 'draft';
+
+      // Always update chapter timestamp when switching from draft to any other mode
+      // This ensures the chapter shows the correct "published" date rather than creation date
+      const shouldForceChapterTimestampUpdate = isDraftModeChanging;
+      
+      // Log timestamp update for tracking
+      if (shouldForceChapterTimestampUpdate) {
+        console.log(`Updating chapter timestamp for "${existingChapter.title}" due to mode change from draft to ${mode}`);
+      }
+
       // Determine the timestamp to use - force update if switching from draft
       const updateTimestamp = shouldForceChapterTimestampUpdate ? new Date() : new Date();
 
@@ -1267,10 +1280,6 @@ router.put('/:id', auth, async (req, res) => {
         mode && (mode === 'published' || mode === 'protected' || mode === 'paid') &&
         existingChapter.originallyDraft === true; // Only for chapters originally created as drafts
 
-      // Check if chapter mode is changing from draft to any other mode (for timestamp update)
-      const isDraftModeChanging = existingChapter.mode === 'draft' && 
-        mode && mode !== 'draft';
-
       // Only update novel's timestamp for significant changes that should affect "latest updates"
       // Don't update for simple content edits, administrative balance changes, etc.
       // Novel timestamp will be updated automatically when paid content is unlocked via contributions
@@ -1278,15 +1287,6 @@ router.put('/:id', auth, async (req, res) => {
       // 1. When manually switching a chapter from paid to published/protected
       // 2. When switching a chapter from draft to any public mode (but ONLY if originally created as draft)
       const shouldUpdateNovelTimestamp = isUnlockingPaidContent || isDraftBecomingPublic;
-
-      // Always update chapter timestamp when switching from draft to any other mode
-      // This ensures the chapter shows the correct "published" date rather than creation date
-      const shouldForceChapterTimestampUpdate = isDraftModeChanging;
-      
-      // Log timestamp update for tracking
-      if (shouldForceChapterTimestampUpdate) {
-        console.log(`Updating chapter timestamp for "${existingChapter.title}" due to mode change from draft to ${mode}`);
-      }
 
       if (shouldUpdateNovelTimestamp) {
         await Novel.findByIdAndUpdate(
