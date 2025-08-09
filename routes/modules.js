@@ -1102,14 +1102,21 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
           const draftChapters = chapters.filter(chapter => chapter.mode === 'draft');
           const hasDraftChapters = draftChapters.length > 0;
           
-          // Convert all chapters to published mode
+          // Get current timestamp for consistent updates
+          const conversionTimestamp = new Date();
+          
+          // Convert all chapters to published mode with proper timestamp updates
           const chapterUpdatePromises = chapters.map(chapter => {
             if (chapter.mode !== 'published') {
               return Chapter.findByIdAndUpdate(
                 chapter._id,
                 { 
                   mode: 'published',
-                  updatedAt: new Date()
+                  updatedAt: conversionTimestamp // Use consistent timestamp for all conversions
+                },
+                { 
+                  new: true,
+                  maxTimeMS: 5000 
                 }
               );
             }
@@ -1118,16 +1125,22 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
           
           await Promise.all(chapterUpdatePromises);
           
+          // Log the timestamp updates for tracking
+          const nonPublishedChapters = chapters.filter(c => c.mode !== 'published');
+          if (nonPublishedChapters.length > 0) {
+            console.log(`Updated timestamps for ${nonPublishedChapters.length} chapters during module conversion to paid mode at ${conversionTimestamp.toISOString()}`);
+          }
+          
           // Update novel timestamp if draft chapters were converted to published
           if (hasDraftChapters) {
             await Novel.findByIdAndUpdate(
               req.params.novelId,
-              { updatedAt: new Date() }
+              { updatedAt: conversionTimestamp } // Use same timestamp for consistency
             );
-            console.log(`Updated novel timestamp due to draft chapters being published in module ${updatedModule.title}`);
+            console.log(`Updated novel timestamp due to ${draftChapters.length} draft chapters being published in module ${updatedModule.title}`);
           }
           
-          console.log(`Converted all chapters in module ${updatedModule.title} to published mode (module switched to paid)`);
+          console.log(`Converted ${chapters.filter(c => c.mode !== 'published').length} chapters in module ${updatedModule.title} to published mode (module switched to paid)`);
           
           // Send real-time notification about chapter mode changes
           const convertedChapters = chapters.filter(chapter => chapter.mode !== 'published');
@@ -1139,7 +1152,8 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
               chapterTitle: chapter.title,
               oldMode: chapter.mode,
               newMode: 'published',
-              reason: 'module_switched_to_paid'
+              reason: 'module_switched_to_paid',
+              timestamp: conversionTimestamp.toISOString() // Use consistent conversion timestamp
             });
           });
           
