@@ -497,18 +497,85 @@ router.get('/:id', optionalAuth, async (req, res) => {
           }
         },
         
-        // Lookup the user who created this chapter
-        {
-          $lookup: {
-            from: 'users',
-            localField: 'createdBy',
-            foreignField: '_id',
-            pipeline: [
-              { $project: { displayName: 1, username: 1 } }
-            ],
-            as: 'createdByUser'
-          }
-        },
+      // Lookup the user who created this chapter (avoid post-processing populate)
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'createdBy',
+          foreignField: '_id',
+          pipeline: [
+            { $project: { displayName: 1, username: 1, userNumber: 1 } }
+          ],
+          as: 'createdByUser'
+        }
+      },
+      // Staff resolution via $lookup
+      {
+        $lookup: {
+          from: 'users',
+          let: { staffVal: '$translator' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $or: [
+                    { $eq: ['$_id', '$$staffVal'] },
+                    { $eq: [{ $toString: '$_id' }, '$$staffVal'] },
+                    { $eq: ['$username', '$$staffVal'] },
+                    { $eq: ['$userNumber', '$$staffVal'] }
+                  ]
+                }
+              }
+            },
+            { $project: { displayName: 1, username: 1, userNumber: 1 } }
+          ],
+          as: 'translatorUser'
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          let: { staffVal: '$editor' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $or: [
+                    { $eq: ['$_id', '$$staffVal'] },
+                    { $eq: [{ $toString: '$_id' }, '$$staffVal'] },
+                    { $eq: ['$username', '$$staffVal'] },
+                    { $eq: ['$userNumber', '$$staffVal'] }
+                  ]
+                }
+              }
+            },
+            { $project: { displayName: 1, username: 1, userNumber: 1 } }
+          ],
+          as: 'editorUser'
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          let: { staffVal: '$proofreader' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $or: [
+                    { $eq: ['$_id', '$$staffVal'] },
+                    { $eq: [{ $toString: '$_id' }, '$$staffVal'] },
+                    { $eq: ['$username', '$$staffVal'] },
+                    { $eq: ['$userNumber', '$$staffVal'] }
+                  ]
+                }
+              }
+            },
+            { $project: { displayName: 1, username: 1, userNumber: 1 } }
+          ],
+          as: 'proofreaderUser'
+        }
+      },
         
         // Then, lookup all chapters from the same module
         {
@@ -584,7 +651,15 @@ router.get('/:id', optionalAuth, async (req, res) => {
           }
         },
         
-        // Include only the fields we need (excluding siblingChapters)
+        // Map staff users and include only necessary fields
+        {
+          $addFields: {
+            translator: { $ifNull: [ { $arrayElemAt: ['$translatorUser', 0] }, '$translator' ] },
+            editor: { $ifNull: [ { $arrayElemAt: ['$editorUser', 0] }, '$editor' ] },
+            proofreader: { $ifNull: [ { $arrayElemAt: ['$proofreaderUser', 0] }, '$proofreader' ] },
+            createdByUser: { $arrayElemAt: ['$createdByUser', 0] }
+          }
+        },
         {
           $project: {
             _id: 1,
@@ -724,8 +799,8 @@ router.get('/:id', optionalAuth, async (req, res) => {
 
 
 
-    // Populate staff ObjectIds with user display names
-    const populatedChapter = await populateStaffNames(chapterData);
+      // Chapter is already populated via aggregation above
+      const populatedChapter = chapterData;
 
     // Handle view counting asynchronously (fire-and-forget) with cooldown
     // Count views for all users (both authenticated and anonymous) but with 4-hour cooldown
@@ -1762,8 +1837,34 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
       }
     }
 
-    // Populate staff ObjectIds with user display names
-    const populatedChapter = await populateStaffNames(chapter);
+    // Replace populateStaffNames with $lookup-based resolution
+    const staffIds = [];
+    ['translator','editor','proofreader'].forEach(k => {
+      if (chapter[k]) staffIds.push(chapter[k]);
+    });
+    const uniqueStaff = [...new Set(staffIds.filter(Boolean))];
+    let staffMap = {};
+    if (uniqueStaff.length > 0) {
+      const User = mongoose.model('User');
+      const users = await User.find({
+        $or: [
+          { _id: { $in: uniqueStaff.filter(v => mongoose.Types.ObjectId.isValid(v)).map(v => mongoose.Types.ObjectId.createFromHexString(v.toString())) } },
+          { userNumber: { $in: uniqueStaff.filter(v => typeof v === 'number') } },
+          { username: { $in: uniqueStaff.filter(v => typeof v === 'string') } }
+        ]
+      }).select('_id username displayName userNumber').lean();
+      users.forEach(u => {
+        staffMap[u._id.toString()] = u;
+        if (u.userNumber) staffMap[u.userNumber] = u;
+        if (u.username) staffMap[u.username] = u;
+      });
+    }
+    const populatedChapter = {
+      ...chapter,
+      translator: chapter.translator ? (staffMap[chapter.translator] || chapter.translator) : null,
+      editor: chapter.editor ? (staffMap[chapter.editor] || chapter.editor) : null,
+      proofreader: chapter.proofreader ? (staffMap[chapter.proofreader] || chapter.proofreader) : null
+    };
 
     // If user doesn't have access, return limited chapter info
     if (!hasAccess) {

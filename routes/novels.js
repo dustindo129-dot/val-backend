@@ -412,82 +412,134 @@ router.get("/slug/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
     
-    // Extract the short ID from the slug (last 8 characters after final hyphen)
-    const parts = slug.split('-');
-    const shortId = parts[parts.length - 1];
-    
-    // If it's already a full MongoDB ID, return it
+    // Fast paths: full ObjectId, full slug, or shortId8
     if (/^[0-9a-fA-F]{24}$/.test(slug)) {
       const novel = await Novel.findById(slug).select('_id title').lean();
-      if (novel) {
-        return res.json({ id: novel._id, title: novel.title });
-      }
-      return res.status(404).json({ message: "Novel not found" });
+      if (novel) return res.json({ id: novel._id, title: novel.title });
+      return res.status(404).json({ message: 'Novel not found' });
     }
-    
-    // If we have a short ID (8 hex characters), find the novel using ObjectId range query
+
+    // Try exact slug match first (requires schema field and index)
+    const bySlug = await Novel.findOne({ slug: slug.toLowerCase() })
+      .select('_id title')
+      .lean();
+    if (bySlug) {
+      return res.json({ id: bySlug._id, title: bySlug.title });
+    }
+
+    // Fallback: last 8 characters may be shortId8
+    const parts = slug.split('-');
+    const shortId = parts[parts.length - 1];
     if (/^[0-9a-fA-F]{8}$/.test(shortId)) {
       const shortIdLower = shortId.toLowerCase();
-      
-      try {
-        // Use targeted aggregation for efficient lookup
-        const [novel] = await Novel.aggregate([
-          {
-            $addFields: {
-              idString: { $toString: "$_id" }
-            }
-          },
-          {
-            $match: {
-              idString: { $regex: new RegExp(shortIdLower + '$', 'i') }
-            }
-          },
-          {
-            $project: {
-              _id: 1,
-              title: 1
-            }
-          },
-          {
-            $limit: 1
-          }
-        ]);
-        
-        if (novel) {
-          return res.json({ id: novel._id, title: novel.title });
-        }
-      } catch (aggregationError) {
-        console.warn('Aggregation failed, falling back to alternative method:', aggregationError);
-        
-        // Fallback: fetch novels in batches and check suffix
-        let skip = 0;
-        const batchSize = 100;
-        let found = false;
-        
-        while (!found) {
-          const novels = await Novel.find({}, { _id: 1, title: 1 })
-            .lean()
-            .skip(skip)
-            .limit(batchSize);
-          
-          if (novels.length === 0) break; // No more novels to check
-          
-          const matchingNovel = novels.find(novel => 
-            novel._id.toString().toLowerCase().endsWith(shortIdLower)
+      const byShort = await Novel.findOne({ shortId8: shortIdLower })
+        .select('_id title')
+        .lean();
+      if (byShort) {
+        return res.json({ id: byShort._id, title: byShort.title });
+      }
+
+      // Backward-compat fallback: locate by ObjectId suffix then backfill slug/shortId8
+      const [foundBySuffix] = await Novel.aggregate([
+        { $addFields: { idString: { $toString: '$_id' } } },
+        { $match: { idString: { $regex: new RegExp(shortIdLower + '$', 'i') } } },
+        { $project: { _id: 1, title: 1 } },
+        { $limit: 1 }
+      ]);
+      if (foundBySuffix) {
+        // best-effort backfill so subsequent lookups are O(1)
+        const makeSlug = (title) => {
+          const base = (title || 'novel')
+            .toLowerCase()
+            .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .substring(0, 80) || 'novel';
+          return `${base}-${shortIdLower}`;
+        };
+        try {
+          await Novel.updateOne(
+            { _id: foundBySuffix._id },
+            { $set: { shortId8: shortIdLower, slug: makeSlug(foundBySuffix.title) } }
           );
-          
-          if (matchingNovel) {
-            return res.json({ id: matchingNovel._id, title: matchingNovel.title });
+        } catch (e) {
+          // ignore backfill errors
+        }
+        return res.json({ id: foundBySuffix._id, title: foundBySuffix.title });
+      }
+    }
+
+    return res.status(404).json({ message: 'Novel not found' });
+  } catch (err) {
+    console.error('Error in novel slug lookup:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Admin-only: Backfill slug and shortId8 for all existing novels
+ * Usage:
+ * POST /api/novels/backfill-slugs?dryRun=true|false
+ */
+router.post('/backfill-slugs', [auth, admin], async (req, res) => {
+  try {
+    const dryRun = String(req.query.dryRun || 'false') === 'true';
+
+    const slugifyTitle = (title) => {
+      const base = (title || 'novel')
+        .toLowerCase()
+        .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .substring(0, 80) || 'novel';
+      return base;
+    };
+
+    const cursor = Novel.find({}).select('_id title slug shortId8').lean().cursor();
+    let total = 0;
+    let updated = 0;
+    let skipped = 0;
+    const errors = [];
+
+    for await (const doc of cursor) {
+      total++;
+      const idStr = doc._id.toString();
+      const shortId8 = idStr.slice(-8).toLowerCase();
+      const desiredSlug = `${slugifyTitle(doc.title)}-${shortId8}`;
+
+      const needsUpdate = (doc.shortId8 !== shortId8) || (doc.slug !== desiredSlug);
+      if (!needsUpdate) {
+        skipped++;
+        continue;
+      }
+
+      if (dryRun) {
+        updated++;
+        continue;
+      }
+
+      try {
+        await Novel.updateOne({ _id: doc._id }, { $set: { shortId8, slug: desiredSlug } });
+        updated++;
+      } catch (e) {
+        // In the unlikely case of a slug collision, append last 4 of ObjectId to guarantee uniqueness
+        if (e && e.code === 11000) {
+          const fallbackSlug = `${slugifyTitle(doc.title)}-${shortId8}-${idStr.slice(-4).toLowerCase()}`;
+          try {
+            await Novel.updateOne({ _id: doc._id }, { $set: { shortId8, slug: fallbackSlug } });
+            updated++;
+          } catch (e2) {
+            errors.push({ id: doc._id, error: e2.message });
           }
-          
-          skip += batchSize;
+        } else {
+          errors.push({ id: doc._id, error: e.message });
         }
       }
     }
-    
-    res.status(404).json({ message: "Novel not found" });
+
+    res.json({ total, updated, skipped, dryRun, errorsCount: errors.length, errors });
   } catch (err) {
-    console.error('Error in novel slug lookup:', err);
+    console.error('Error backfilling slugs:', err);
     res.status(500).json({ message: err.message });
   }
 });

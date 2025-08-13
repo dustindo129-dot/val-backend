@@ -10,6 +10,9 @@ const novelSchema = new mongoose.Schema({
   alternativeTitles: [{ type: String }],
   author: { type: String, required: true },
   illustrator: { type: String },
+  // SEO-friendly slug and short id suffix for fast lookups
+  slug: { type: String, unique: true, index: true, trim: true, lowercase: true },
+  shortId8: { type: String, index: true, trim: true, lowercase: true },
   active: {
     pj_user: [{ type: mongoose.Schema.Types.Mixed }],
     translator: [{ type: mongoose.Schema.Types.Mixed }],
@@ -61,6 +64,43 @@ const novelSchema = new mongoose.Schema({
 }, {
   toJSON: { getters: true },
   toObject: { getters: true }
+});
+
+// Indexes are defined via field options above (slug unique, shortId8 indexed)
+
+// Helper to build a URL-friendly slug base from a title
+function slugifyTitle(title) {
+  if (!title || typeof title !== 'string') return 'novel';
+  return title
+    .toLowerCase()
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .substring(0, 80) || 'novel';
+}
+
+// Ensure slug and shortId8 are set consistently
+novelSchema.pre('save', function(next) {
+  try {
+    const idStr = this._id ? this._id.toString() : '';
+    if (!this.shortId8 && idStr.length === 24) {
+      this.shortId8 = idStr.slice(-8).toLowerCase();
+    }
+    if (!this.slug && idStr.length === 24) {
+      const base = slugifyTitle(this.title);
+      const suffix = this.shortId8 || idStr.slice(-8).toLowerCase();
+      this.slug = `${base}-${suffix}`;
+    }
+    if (this.slug) {
+      this.slug = this.slug.toLowerCase();
+    }
+    if (this.shortId8) {
+      this.shortId8 = this.shortId8.toLowerCase();
+    }
+    next();
+  } catch (e) {
+    next(e);
+  }
 });
 
 /**
