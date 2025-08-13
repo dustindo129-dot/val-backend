@@ -3264,6 +3264,12 @@ async function performAutoUnlockInTransaction(novelId, session) {
 router.get("/:id/contribution-history", async (req, res) => {
   try {
     const novelId = req.params.id;
+    const pageParam = parseInt(req.query.page, 10);
+    const limitParam = parseInt(req.query.limit, 10);
+    const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
+    const limitRaw = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 50;
+    const limit = Math.min(limitRaw, 100); // hard cap to avoid excessive loads
+    const skip = (page - 1) * limit;
 
     // Check if novel exists
     const novel = await Novel.findById(novelId);
@@ -3271,10 +3277,14 @@ router.get("/:id/contribution-history", async (req, res) => {
       return res.status(404).json({ message: "Novel not found" });
     }
 
+    // Count total for pagination
+    const totalItems = await ContributionHistory.countDocuments({ novelId });
+
     // Find contribution history for this novel (without populate to avoid individual queries)
     const contributions = await ContributionHistory.find({ novelId })
       .sort({ createdAt: -1 })
-      .limit(50) // Limit to last 50 contributions
+      .skip(skip)
+      .limit(limit)
       .lean();
 
     // Extract unique user IDs
@@ -3312,7 +3322,18 @@ router.get("/:id/contribution-history", async (req, res) => {
       updatedAt: contribution.updatedAt
     }));
 
-    res.json({ contributions: formattedContributions });
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+    res.json({ 
+      contributions: formattedContributions,
+      pagination: {
+        page,
+        limit,
+        totalItems,
+        totalPages,
+        hasPrev: page > 1,
+        hasNext: page < totalPages
+      }
+    });
 
   } catch (err) {
     console.error("Error fetching contribution history:", err);

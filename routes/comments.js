@@ -129,26 +129,15 @@ router.get('/novel/:novelId', async (req, res) => {
     const cacheKey = `novel_comments_${novelId}_${sort}_${req.user?._id || 'anonymous'}`;
     
     const comments = await dedupCommentsQuery(cacheKey, async () => {
-      // Quick check: see if there are any comments for this novel at all
-      const hasAnyComments = await Comment.countDocuments({
-        $or: [
-          { contentType: 'novels', contentId: novelId },
-          { contentType: 'chapters', contentId: { $regex: `^${novelId}-` } }
-        ],
-        adminDeleted: { $ne: true }
-      });
+      // Remove separate count query; rely on aggregation below for single round-trip
 
-      // If no comments exist, return empty array immediately
-      if (hasAnyComments === 0) {
-        return [];
-      }
-
-      // Get all chapter IDs for this novel only if we have comments
+      // Get all chapter IDs for this novel (used in aggregation match)
       const Chapter = (await import('../models/Chapter.js')).default;
       const chapters = await Chapter.find({ novelId }, '_id');
       const chapterIds = chapters.map(ch => ch._id.toString());
 
       // Build the aggregation pipeline with proper sorting
+      // Build aggregation pipeline. One request handles filter/sort + lookups
       const pipeline = [
         {
           $match: {
@@ -228,7 +217,7 @@ router.get('/novel/:novelId', async (req, res) => {
         }
       });
 
-      // Add chapter info lookup only if we have chapter comments
+      // Add chapter info lookup only if we have chapter IDs
       if (chapterIds.length > 0) {
         pipeline.push({
           $lookup: {
@@ -349,17 +338,7 @@ router.get('/', async (req, res) => {
     const cacheKey = `comments_${contentType}_${contentId}_${sort}_${req.user?._id || 'anonymous'}`;
     
     const comments = await dedupCommentsQuery(cacheKey, async () => {
-      // Quick check: see if there are any comments for this content
-      const hasAnyComments = await Comment.countDocuments({
-        contentType,
-        contentId,
-        adminDeleted: { $ne: true }
-      });
-
-      // If no comments exist, return empty array immediately
-      if (hasAnyComments === 0) {
-        return [];
-      }
+      // Remove separate count query; rely on aggregation below for single round-trip
 
       // Build the aggregation pipeline with proper sorting
       const pipeline = [
