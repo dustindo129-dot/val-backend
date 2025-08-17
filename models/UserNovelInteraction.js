@@ -37,16 +37,9 @@ const userNovelInteractionSchema = new mongoose.Schema({
   followed: {
     type: Boolean,
     default: false
-  },
-  createdAt: { 
-    type: Date, 
-    default: Date.now 
-  },
-  updatedAt: { 
-    type: Date, 
-    default: Date.now 
   }
 }, {
+  timestamps: true, // This automatically manages createdAt and updatedAt
   toJSON: { getters: true },
   toObject: { getters: true }
 });

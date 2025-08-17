@@ -2179,7 +2179,6 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
     if (req.headers['user-agent']?.toLowerCase().includes('mobile') || 
         req.headers['user-agent']?.toLowerCase().includes('android') || 
         req.headers['user-agent']?.toLowerCase().includes('iphone')) {
-      console.log(`Mobile chapter request: chapterId=${chapterId}, userId=${userId}`);
     }
     
     // OPTIMIZATION: Use deduplication for the complex chapter query

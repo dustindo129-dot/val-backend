@@ -275,6 +275,7 @@ router.post('/rate', auth, async (req, res) => {
       if (review !== undefined) {
         interaction.review = review;
       }
+      // updatedAt will be automatically updated by Mongoose timestamps
     }
     await interaction.save();
 
@@ -652,7 +653,9 @@ router.get('/reviews/:novelId', async (req, res) => {
         user: review.userId,
         rating: review.rating,
         review: review.review,
-        date: review.updatedAt
+        date: review.updatedAt,
+        createdAt: review.createdAt,
+        updatedAt: review.updatedAt
       })),
       pagination: {
         currentPage: page,
