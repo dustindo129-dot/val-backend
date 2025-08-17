@@ -83,7 +83,7 @@ const userSchema = new mongoose.Schema({
   intro: {
     type: String,
     default: '',
-    maxlength: 2000
+    maxlength: 10000
   },
   ongoingModules: [{
     moduleId: {

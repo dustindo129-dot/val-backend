@@ -332,8 +332,8 @@ router.put('/:displayNameSlug/intro', auth, async (req, res) => {
     const { intro } = req.body;
 
     // Validate intro length
-    if (intro && intro.length > 2000) {
-      return res.status(400).json({ message: 'Introduction cannot exceed 2000 characters' });
+    if (intro && intro.length > 10000) {
+      return res.status(400).json({ message: 'Introduction cannot exceed 10000 characters' });
     }
 
     // Get user
@@ -3112,8 +3112,8 @@ router.put('/number/:userNumber/intro', auth, async (req, res) => {
     const { intro } = req.body;
 
     // Validate intro length
-    if (intro && intro.length > 2000) {
-      return res.status(400).json({ message: 'Introduction cannot exceed 2000 characters' });
+    if (intro && intro.length > 10000) {
+      return res.status(400).json({ message: 'Introduction cannot exceed 10000 characters' });
     }
 
     // Get user
