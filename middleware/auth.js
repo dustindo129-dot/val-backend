@@ -45,27 +45,37 @@ export const auth = async (req, res, next) => {
         return res.status(401).json({ message: 'User not found' });
       }
 
-      // Enhanced session validation with device fingerprinting
+      // MOBILE-FRIENDLY: Enhanced session validation with device fingerprinting
       if (decoded.sessionId && user.currentSessionId) {
-        // Extract device fingerprint from current request
+        // MOBILE FIX: Use User-Agent + Connection type instead of just IP for fingerprinting
+        // This is more stable on mobile devices that frequently switch networks
+        const userAgent = req.headers['user-agent'] || 'unknown';
+        const acceptLanguage = req.headers['accept-language'] || 'unknown';
         const currentDeviceFingerprint = require('crypto')
           .createHash('sha256')
-          .update(`${req.ip || 'unknown'}`)
+          .update(`${userAgent.substring(0, 100)}-${acceptLanguage.substring(0, 20)}`)
           .digest('hex')
           .substring(0, 16);
         
-        // Check if this is the same device (now based on IP only)
+        // Check if this is the same device (now based on browser fingerprint, not IP)
         const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
         const isSameDevice = tokenDeviceFingerprint === currentDeviceFingerprint;
         
-        // MODIFIED: Allow multiple device logins - only check session age, not device matching
-        // This allows users to be logged in from multiple devices simultaneously
+        // MOBILE FIX: Allow multiple device logins and be lenient with mobile network switches
+        // Detect likely mobile scenarios to be more forgiving
+        const isLikelyMobileNetworkSwitch = !isSameDevice && 
+          (userAgent.toLowerCase().includes('mobile') || 
+           userAgent.toLowerCase().includes('android') || 
+           userAgent.toLowerCase().includes('iphone'));
         
-        // Check if the session is reasonably recent (within last 24 hours)
+        // Check if the session is reasonably recent (be more lenient for mobile)
         const tokenIssueTime = decoded.iat * 1000; // Convert to milliseconds
         const now = Date.now();
         const sessionAge = now - tokenIssueTime;
-        const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
+        // Extend max session age for mobile devices
+        const maxSessionAge = isLikelyMobileNetworkSwitch ? 
+          48 * 60 * 60 * 1000 : // 48 hours for mobile
+          24 * 60 * 60 * 1000;  // 24 hours for desktop
         
         if (sessionAge > maxSessionAge) {
           return res.status(401).json({ 
@@ -75,7 +85,7 @@ export const auth = async (req, res, next) => {
         }
         
         // Optional: Log multi-device usage for monitoring (but don't block)
-        if (!isSameDevice) {
+        if (!isSameDevice && !isLikelyMobileNetworkSwitch) {
           const logKey = `multi_device_${user._id}_${decoded.sessionId}`;
           if (!global.multiDeviceLogs) {
             global.multiDeviceLogs = new Map();
@@ -194,31 +204,44 @@ export const optionalAuth = async (req, res, next) => {
         return next();
       }
 
-      // Enhanced session validation for optional auth - more lenient
+      // MOBILE-FRIENDLY: Enhanced session validation for optional auth - much more lenient
       if (decoded.sessionId && user.currentSessionId) {
-        // Extract device fingerprint from current request
+        // MOBILE FIX: Use User-Agent + Connection type instead of just IP for fingerprinting
+        // This is more stable on mobile devices that frequently switch networks
+        const userAgent = req.headers['user-agent'] || 'unknown';
+        const acceptLanguage = req.headers['accept-language'] || 'unknown';
         const currentDeviceFingerprint = require('crypto')
           .createHash('sha256')
-          .update(`${req.ip || 'unknown'}`)
+          .update(`${userAgent.substring(0, 100)}-${acceptLanguage.substring(0, 20)}`)
           .digest('hex')
           .substring(0, 16);
         
-        // Check if this is the same device
+        // Check if this is the same device (now based on browser fingerprint, not IP)
         const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
         const isSameDevice = tokenDeviceFingerprint === currentDeviceFingerprint;
         
-        // For optional auth, only invalidate if it's a different device AND session mismatch
-        if (!isSameDevice && user.currentSessionId !== decoded.sessionId) {
+        // MOBILE FIX: For optional auth, be much more lenient - only invalidate for very obvious violations
+        // Allow session mismatches on mobile due to network switching and background app behavior
+        const isLikelyMobileNetworkSwitch = !isSameDevice && 
+          (userAgent.toLowerCase().includes('mobile') || 
+           userAgent.toLowerCase().includes('android') || 
+           userAgent.toLowerCase().includes('iphone'));
+        
+        // Only invalidate if it's clearly a different device AND not a mobile network switch scenario
+        if (!isSameDevice && user.currentSessionId !== decoded.sessionId && !isLikelyMobileNetworkSwitch) {
           req.user = null;
           return next();
         }
         
-        // If same device but different session, check age for optional auth
-        if (isSameDevice && user.currentSessionId !== decoded.sessionId) {
+        // MOBILE FIX: For session age checks, be more lenient on mobile
+        if (user.currentSessionId !== decoded.sessionId) {
           const tokenIssueTime = decoded.iat * 1000;
           const currentTime = Date.now();
           const sessionAge = currentTime - tokenIssueTime;
-          const maxSessionAge = 24 * 60 * 60 * 1000; // 24 hours
+          // Extend max session age for mobile devices
+          const maxSessionAge = isLikelyMobileNetworkSwitch ? 
+            48 * 60 * 60 * 1000 : // 48 hours for mobile
+            24 * 60 * 60 * 1000;  // 24 hours for desktop
           
           if (sessionAge > maxSessionAge) {
             req.user = null;
