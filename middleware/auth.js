@@ -45,10 +45,10 @@ export const auth = async (req, res, next) => {
         return res.status(401).json({ message: 'User not found' });
       }
 
-      // MOBILE-FRIENDLY: Enhanced session validation with device fingerprinting
+      // Enhanced session validation with improved device fingerprinting
       if (decoded.sessionId && user.currentSessionId) {
-        // MOBILE FIX: Use User-Agent + Connection type instead of just IP for fingerprinting
-        // This is more stable on mobile devices that frequently switch networks
+        // Use User-Agent + Accept-Language instead of just IP for fingerprinting
+        // This is more stable for users that frequently switch networks (VPNs, mobile, etc.)
         const userAgent = req.headers['user-agent'] || 'unknown';
         const acceptLanguage = req.headers['accept-language'] || 'unknown';
         const currentDeviceFingerprint = require('crypto')
@@ -61,8 +61,8 @@ export const auth = async (req, res, next) => {
         const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
         const isSameDevice = tokenDeviceFingerprint === currentDeviceFingerprint;
         
-        // MOBILE FIX: Allow multiple device logins and be lenient with mobile network switches
-        // Detect likely mobile scenarios to be more forgiving
+        // Allow multiple device logins and be lenient with network switches
+        // Detect likely mobile scenarios to be more forgiving (applies to mobile users)
         const isLikelyMobileNetworkSwitch = !isSameDevice && 
           (userAgent.toLowerCase().includes('mobile') || 
            userAgent.toLowerCase().includes('android') || 
@@ -72,10 +72,9 @@ export const auth = async (req, res, next) => {
         const tokenIssueTime = decoded.iat * 1000; // Convert to milliseconds
         const now = Date.now();
         const sessionAge = now - tokenIssueTime;
-        // Extend max session age for mobile devices
-        const maxSessionAge = isLikelyMobileNetworkSwitch ? 
-          48 * 60 * 60 * 1000 : // 48 hours for mobile
-          24 * 60 * 60 * 1000;  // 24 hours for desktop
+        // Use unified session age for better UX across all devices
+        // 36 hours provides good balance between security and user experience
+        const maxSessionAge = 36 * 60 * 60 * 1000; // 36 hours for all devices
         
         if (sessionAge > maxSessionAge) {
           return res.status(401).json({ 
@@ -204,10 +203,10 @@ export const optionalAuth = async (req, res, next) => {
         return next();
       }
 
-      // MOBILE-FRIENDLY: Enhanced session validation for optional auth - much more lenient
+      // Enhanced session validation for optional auth - more lenient than strict auth
       if (decoded.sessionId && user.currentSessionId) {
-        // MOBILE FIX: Use User-Agent + Connection type instead of just IP for fingerprinting
-        // This is more stable on mobile devices that frequently switch networks
+        // Use User-Agent + Accept-Language instead of just IP for fingerprinting
+        // This is more stable for users that frequently switch networks (VPNs, mobile, etc.)
         const userAgent = req.headers['user-agent'] || 'unknown';
         const acceptLanguage = req.headers['accept-language'] || 'unknown';
         const currentDeviceFingerprint = require('crypto')
@@ -220,8 +219,8 @@ export const optionalAuth = async (req, res, next) => {
         const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
         const isSameDevice = tokenDeviceFingerprint === currentDeviceFingerprint;
         
-        // MOBILE FIX: For optional auth, be much more lenient - only invalidate for very obvious violations
-        // Allow session mismatches on mobile due to network switching and background app behavior
+        // For optional auth, be much more lenient - only invalidate for very obvious violations
+        // Allow session mismatches due to network switching and background app behavior
         const isLikelyMobileNetworkSwitch = !isSameDevice && 
           (userAgent.toLowerCase().includes('mobile') || 
            userAgent.toLowerCase().includes('android') || 
@@ -233,15 +232,14 @@ export const optionalAuth = async (req, res, next) => {
           return next();
         }
         
-        // MOBILE FIX: For session age checks, be more lenient on mobile
+        // For session age checks, use unified approach with reasonable timeout
         if (user.currentSessionId !== decoded.sessionId) {
           const tokenIssueTime = decoded.iat * 1000;
           const currentTime = Date.now();
           const sessionAge = currentTime - tokenIssueTime;
-          // Extend max session age for mobile devices
-          const maxSessionAge = isLikelyMobileNetworkSwitch ? 
-            48 * 60 * 60 * 1000 : // 48 hours for mobile
-            24 * 60 * 60 * 1000;  // 24 hours for desktop
+          // Use unified session age for better UX across all devices
+          // 36 hours provides good balance between security and user experience
+          const maxSessionAge = 36 * 60 * 60 * 1000; // 36 hours for all devices
           
           if (sessionAge > maxSessionAge) {
             req.user = null;

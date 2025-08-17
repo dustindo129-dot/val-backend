@@ -449,7 +449,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
   try {
 
     
-    // MOBILE FIX: Include user ID in deduplication key to prevent stale user context
+    // FIX: Include user ID in deduplication key to prevent stale user context
     // This prevents authenticated and unauthenticated requests from sharing cached results
     const userId = req.user?._id?.toString() || 'anonymous';
     const chapterData = await dedupQuery(`chapter:${req.params.id}:user:${userId}`, async () => {
@@ -2086,11 +2086,11 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
     const chapterId = req.params.chapterId;
     const userId = req.user?._id;
     
-    // MOBILE FIX: Add logging for debugging mobile auth issues
+    // Auth debug info for protected chapters
     if (req.headers['user-agent']?.toLowerCase().includes('mobile') || 
         req.headers['user-agent']?.toLowerCase().includes('android') || 
         req.headers['user-agent']?.toLowerCase().includes('iphone')) {
-      console.log(`Mobile chapter request: chapterId=${chapterId}, userId=${userId}, userAgent=${req.headers['user-agent']?.substring(0, 50)}`);
+      console.log(`Mobile chapter request: chapterId=${chapterId}, userId=${userId}`);
     }
     
     // Single aggregation pipeline that gets everything INCLUDING all module chapters
