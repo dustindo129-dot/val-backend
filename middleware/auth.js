@@ -203,48 +203,20 @@ export const optionalAuth = async (req, res, next) => {
         return next();
       }
 
-      // Enhanced session validation for optional auth - more lenient than strict auth
-      if (decoded.sessionId && user.currentSessionId) {
-        // Use User-Agent + Accept-Language instead of just IP for fingerprinting
-        // This is more stable for users that frequently switch networks (VPNs, mobile, etc.)
-        const userAgent = req.headers['user-agent'] || 'unknown';
-        const acceptLanguage = req.headers['accept-language'] || 'unknown';
-        const currentDeviceFingerprint = require('crypto')
-          .createHash('sha256')
-          .update(`${userAgent.substring(0, 100)}-${acceptLanguage.substring(0, 20)}`)
-          .digest('hex')
-          .substring(0, 16);
+      // CRITICAL FIX: For optionalAuth, skip complex session validation that causes false rejections
+      // The main security checks should be in the strict `auth` middleware
+      // For optional auth, just check basic token validity and age
+      
+      if (decoded.iat) {
+        const tokenIssueTime = decoded.iat * 1000;
+        const currentTime = Date.now();
+        const sessionAge = currentTime - tokenIssueTime;
+        // Use a generous timeout for optional auth - 7 days
+        const maxSessionAge = 7 * 24 * 60 * 60 * 1000; // 7 days
         
-        // Check if this is the same device (now based on browser fingerprint, not IP)
-        const tokenDeviceFingerprint = decoded.deviceFingerprint || decoded.sessionId.split('-')[0];
-        const isSameDevice = tokenDeviceFingerprint === currentDeviceFingerprint;
-        
-        // For optional auth, be much more lenient - only invalidate for very obvious violations
-        // Allow session mismatches due to network switching and background app behavior
-        const isLikelyMobileNetworkSwitch = !isSameDevice && 
-          (userAgent.toLowerCase().includes('mobile') || 
-           userAgent.toLowerCase().includes('android') || 
-           userAgent.toLowerCase().includes('iphone'));
-        
-        // Only invalidate if it's clearly a different device AND not a mobile network switch scenario
-        if (!isSameDevice && user.currentSessionId !== decoded.sessionId && !isLikelyMobileNetworkSwitch) {
+        if (sessionAge > maxSessionAge) {
           req.user = null;
           return next();
-        }
-        
-        // For session age checks, use unified approach with reasonable timeout
-        if (user.currentSessionId !== decoded.sessionId) {
-          const tokenIssueTime = decoded.iat * 1000;
-          const currentTime = Date.now();
-          const sessionAge = currentTime - tokenIssueTime;
-          // Use unified session age for better UX across all devices
-          // 36 hours provides good balance between security and user experience
-          const maxSessionAge = 36 * 60 * 60 * 1000; // 36 hours for all devices
-          
-          if (sessionAge > maxSessionAge) {
-            req.user = null;
-            return next();
-          }
         }
       }
 

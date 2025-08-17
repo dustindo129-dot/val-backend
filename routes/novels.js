@@ -104,8 +104,17 @@ const validateObjectId = (id, res, fieldName = 'ID') => {
   return true;
 };
 
-// Query deduplication helper
-const dedupQuery = async (key, queryFn) => {
+// Enhanced query deduplication with caching
+const queryCacheMap = new Map();
+const QUERY_CACHE_TTL = 1000 * 60 * 5; // 5 minutes cache
+
+const dedupQuery = async (key, queryFn, cacheTtl = QUERY_CACHE_TTL) => {
+  // Check cache first
+  const cached = queryCacheMap.get(key);
+  if (cached && Date.now() - cached.timestamp < cacheTtl) {
+    return cached.data;
+  }
+  
   // If query is already pending, wait for it
   if (pendingQueries.has(key)) {
     return await pendingQueries.get(key);
@@ -117,6 +126,23 @@ const dedupQuery = async (key, queryFn) => {
   
   try {
     const result = await queryPromise;
+    
+    // Cache the result
+    queryCacheMap.set(key, {
+      data: result,
+      timestamp: Date.now()
+    });
+    
+    // Clean up old cache entries periodically
+    if (queryCacheMap.size > 1000) {
+      const cutoff = Date.now() - (cacheTtl * 2);
+      for (const [k, v] of queryCacheMap.entries()) {
+        if (v.timestamp < cutoff) {
+          queryCacheMap.delete(k);
+        }
+      }
+    }
+    
     return result;
   } finally {
     // Clean up pending query
@@ -405,27 +431,29 @@ const setCacheControlHeaders = (req, res, next) => {
 router.use(setCacheControlHeaders);
 
 /**
- * Lookup novel ID by slug
+ * Lookup novel ID by slug - OPTIMIZED VERSION
  * @route GET /api/novels/slug/:slug
  */
 router.get("/slug/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
     
-    // Fast paths: full ObjectId, full slug, or shortId8
-    if (/^[0-9a-fA-F]{24}$/.test(slug)) {
-      const novel = await Novel.findById(slug).select('_id title').lean();
-      if (novel) return res.json({ id: novel._id, title: novel.title });
-      return res.status(404).json({ message: 'Novel not found' });
-    }
+    // Use query deduplication to prevent multiple slug lookups
+    const result = await dedupQuery(`novel_slug_${slug}`, async () => {
+      // Fast paths: full ObjectId, full slug, or shortId8
+      if (/^[0-9a-fA-F]{24}$/.test(slug)) {
+        const novel = await Novel.findById(slug).select('_id title').lean();
+        if (novel) return { id: novel._id, title: novel.title };
+        return null;
+      }
 
-    // Try exact slug match first (requires schema field and index)
-    const bySlug = await Novel.findOne({ slug: slug.toLowerCase() })
-      .select('_id title')
-      .lean();
-    if (bySlug) {
-      return res.json({ id: bySlug._id, title: bySlug.title });
-    }
+      // Try exact slug match first (requires schema field and index)
+      const bySlug = await Novel.findOne({ slug: slug.toLowerCase() })
+        .select('_id title')
+        .lean();
+      if (bySlug) {
+        return { id: bySlug._id, title: bySlug.title };
+      }
 
     // Fallback: last 8 characters may be shortId8
     const parts = slug.split('-');
@@ -436,7 +464,7 @@ router.get("/slug/:slug", async (req, res) => {
         .select('_id title')
         .lean();
       if (byShort) {
-        return res.json({ id: byShort._id, title: byShort.title });
+        return { id: byShort._id, title: byShort.title };
       }
 
       // Backward-compat fallback: locate by ObjectId suffix then backfill slug/shortId8
@@ -465,11 +493,18 @@ router.get("/slug/:slug", async (req, res) => {
         } catch (e) {
           // ignore backfill errors
         }
-        return res.json({ id: foundBySuffix._id, title: foundBySuffix.title });
+        return { id: foundBySuffix._id, title: foundBySuffix.title };
       }
     }
 
-    return res.status(404).json({ message: 'Novel not found' });
+    return null; // Not found
+    }, 1000 * 60 * 10); // Cache for 10 minutes
+    
+    if (!result) {
+      return res.status(404).json({ message: 'Novel not found' });
+    }
+    
+    return res.json(result);
   } catch (err) {
     console.error('Error in novel slug lookup:', err);
     res.status(500).json({ message: err.message });

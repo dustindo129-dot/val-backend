@@ -37,6 +37,28 @@ import { populateStaffNames } from '../utils/populateStaffNames.js';
 
 const router = express.Router();
 
+// Route to clear user-specific caches (called after login)
+router.post('/clear-user-cache/:userId', auth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    // Only allow users to clear their own cache or allow admins
+    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    
+    const clearedCount = clearUserCaches(userId);
+    
+    res.json({ 
+      message: 'User caches cleared successfully',
+      clearedCount 
+    });
+  } catch (error) {
+    console.error('Error clearing user caches:', error);
+    res.status(500).json({ message: 'Failed to clear caches' });
+  }
+});
+
 // Simple in-memory cache for slug lookups to avoid repeated DB queries
 const slugCache = new Map();
 const CACHE_TTL = 1000 * 60 * 10; // 10 minutes
@@ -44,6 +66,57 @@ const MAX_CACHE_SIZE = 1000;
 
 // Query deduplication cache to prevent multiple identical requests
 const pendingQueries = new Map();
+
+// User lookup cache to prevent duplicate user queries
+const userCache = new Map();
+const USER_CACHE_TTL = 1000 * 60 * 5; // 5 minutes
+
+// Optimized user lookup with caching
+const getCachedUsers = async (userIds) => {
+  if (!userIds || userIds.length === 0) return [];
+  
+  const results = [];
+  const uncachedIds = [];
+  
+  // Check cache first
+  for (const userId of userIds) {
+    const cached = userCache.get(userId);
+    if (cached && Date.now() - cached.timestamp < USER_CACHE_TTL) {
+      results.push(cached.data);
+    } else {
+      uncachedIds.push(userId);
+    }
+  }
+  
+  // Fetch uncached users
+  if (uncachedIds.length > 0) {
+    const User = mongoose.model('User');
+    const freshUsers = await User.find({
+      _id: { $in: uncachedIds.map(id => mongoose.Types.ObjectId.createFromHexString(id)) }
+    }).select('displayName username userNumber avatar role').lean();
+    
+    // Cache the fresh results
+    for (const user of freshUsers) {
+      userCache.set(user._id.toString(), {
+        data: user,
+        timestamp: Date.now()
+      });
+      results.push(user);
+    }
+    
+    // Clean up cache periodically
+    if (userCache.size > 500) {
+      const cutoff = Date.now() - (USER_CACHE_TTL * 2);
+      for (const [key, value] of userCache.entries()) {
+        if (value.timestamp < cutoff) {
+          userCache.delete(key);
+        }
+      }
+    }
+  }
+  
+  return results;
+};
 
 /**
  * Server-side word counting function that replicates TinyMCE's algorithm
@@ -135,6 +208,28 @@ const dedupQuery = async (key, queryFn) => {
     // Clean up pending query
     pendingQueries.delete(key);
   }
+};
+
+// Helper function to clear user-specific caches
+const clearUserCaches = (userId) => {
+  let clearedCount = 0;
+  
+  // Clear pending queries for this user AND anonymous queries (critical for login transition)
+  for (const [key, promise] of pendingQueries.entries()) {
+    if (key.includes(`:user:${userId}`) || key.includes(`:user:anonymous`)) {
+      pendingQueries.delete(key);
+      clearedCount++;
+    }
+  }
+  
+  // Clear user cache
+  if (userCache.has(userId)) {
+    userCache.delete(userId);
+    clearedCount++;
+  }
+  
+  console.log(`Cleared ${clearedCount} chapter cache entries for user ${userId}`);
+  return clearedCount;
 };
 
 /**
@@ -449,8 +544,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
   try {
 
     
-    // FIX: Include user ID in deduplication key to prevent stale user context
-    // This prevents authenticated and unauthenticated requests from sharing cached results
+    // OPTIMIZATION: Enhanced deduplication with user context and 2-minute caching for frequently accessed chapters
     const userId = req.user?._id?.toString() || 'anonymous';
     const chapterData = await dedupQuery(`chapter:${req.params.id}:user:${userId}`, async () => {
       // Get chapter and its siblings in a single aggregation pipeline
@@ -691,7 +785,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
       ]);
 
       return chapter;
-    });
+    }, 1000 * 60 * 2); // Cache for 2 minutes for frequently accessed chapters
 
     if (!chapterData) {
       return res.status(404).json({ message: 'Chapter not found' });
@@ -1839,34 +1933,29 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
       }
     }
 
-    // Replace populateStaffNames with $lookup-based resolution
+    // OPTIMIZATION: Use cached user lookup for staff names
     const staffIds = [];
     ['translator','editor','proofreader'].forEach(k => {
-      if (chapter[k]) staffIds.push(chapter[k]);
+      if (chapter[k] && mongoose.Types.ObjectId.isValid(chapter[k])) {
+        staffIds.push(chapter[k].toString());
+      }
     });
-    const uniqueStaff = [...new Set(staffIds.filter(Boolean))];
-    let staffMap = {};
-    if (uniqueStaff.length > 0) {
-      const User = mongoose.model('User');
-      const users = await User.find({
-        $or: [
-          { _id: { $in: uniqueStaff.filter(v => mongoose.Types.ObjectId.isValid(v)).map(v => mongoose.Types.ObjectId.createFromHexString(v.toString())) } },
-          { userNumber: { $in: uniqueStaff.filter(v => typeof v === 'number') } },
-          { username: { $in: uniqueStaff.filter(v => typeof v === 'string') } }
-        ]
-      }).select('_id username displayName userNumber').lean();
+    
+    let populatedChapter = chapter;
+    if (staffIds.length > 0) {
+      const users = await getCachedUsers(staffIds);
+      const staffMap = {};
       users.forEach(u => {
         staffMap[u._id.toString()] = u;
-        if (u.userNumber) staffMap[u.userNumber] = u;
-        if (u.username) staffMap[u.username] = u;
       });
+      
+      populatedChapter = {
+        ...chapter,
+        translator: chapter.translator && staffMap[chapter.translator] ? staffMap[chapter.translator] : chapter.translator,
+        editor: chapter.editor && staffMap[chapter.editor] ? staffMap[chapter.editor] : chapter.editor,
+        proofreader: chapter.proofreader && staffMap[chapter.proofreader] ? staffMap[chapter.proofreader] : chapter.proofreader
+      };
     }
-    const populatedChapter = {
-      ...chapter,
-      translator: chapter.translator ? (staffMap[chapter.translator] || chapter.translator) : null,
-      editor: chapter.editor ? (staffMap[chapter.editor] || chapter.editor) : null,
-      proofreader: chapter.proofreader ? (staffMap[chapter.proofreader] || chapter.proofreader) : null
-    };
 
     // If user doesn't have access, return limited chapter info
     if (!hasAccess) {
@@ -2093,8 +2182,18 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
       console.log(`Mobile chapter request: chapterId=${chapterId}, userId=${userId}`);
     }
     
-    // Single aggregation pipeline that gets everything INCLUDING all module chapters
-    const pipeline = [
+    // OPTIMIZATION: Use deduplication for the complex chapter query
+    // For authenticated users, ensure we're not using stale anonymous cache
+    const cacheKey = `chapter_full_optimized:${chapterId}:user:${userId || 'anonymous'}`;
+    
+    // If user just logged in, clear any anonymous cache for this chapter
+    if (userId && pendingQueries.has(`chapter_full_optimized:${chapterId}:user:anonymous`)) {
+      pendingQueries.delete(`chapter_full_optimized:${chapterId}:user:anonymous`);
+    }
+    
+    const chapterData = await dedupQuery(cacheKey, async () => {
+      // Single aggregation pipeline that gets everything INCLUDING all module chapters
+      const pipeline = [
       {
         $match: { _id: new mongoose.Types.ObjectId(chapterId) }
       },
@@ -2311,7 +2410,9 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
       }
     ];
 
-    const [chapterData] = await Chapter.aggregate(pipeline);
+      const [result] = await Chapter.aggregate(pipeline);
+      return result;
+    }, 1000 * 60 * 1); // Cache for 1 minute for this complex query
     
     if (!chapterData) {
       console.log(`Chapter not found (ID: ${chapterId})`);

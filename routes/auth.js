@@ -83,7 +83,7 @@ router.post('/register-admin', async (req, res) => {
       token, 
       refreshToken,
       user: { 
-        id: user._id, 
+        _id: user._id, 
         username: user.username, 
         displayName: user.displayName, 
         userNumber: user.userNumber,
@@ -184,7 +184,7 @@ router.post('/signup', async (req, res) => {
       token,
       refreshToken,
       user: { 
-        id: user._id, 
+        _id: user._id, 
         username: user.username,
         displayName: user.displayName,
         userNumber: user.userNumber,
@@ -289,7 +289,7 @@ router.post('/login', async (req, res) => {
       token,
       refreshToken,
       user: { 
-        id: user._id, 
+        _id: user._id, 
         username: user.username,
         displayName: user.displayName,
         userNumber: user.userNumber,
@@ -442,7 +442,7 @@ router.post('/refresh', async (req, res) => {
       token,
       refreshToken: newRefreshToken,
       user: {
-        id: user._id,
+        _id: user._id,
         username: user.username,
         displayName: user.displayName,
         email: user.email,
@@ -490,7 +490,7 @@ router.post('/refresh-token', auth, async (req, res) => {
     res.json({ 
       token,
       user: {
-        id: user._id,
+        _id: user._id,
         username: user.username,
         displayName: user.displayName,
         email: user.email,
