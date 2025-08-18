@@ -1472,6 +1472,27 @@ router.put('/:id', auth, async (req, res) => {
 
       // Clear novel caches
       clearNovelCaches();
+      
+      // Clear chapter-specific caches to ensure updated content is served immediately
+      clearChapterCaches(updatedChapter._id.toString());
+      
+      // Clear slug cache entries for this chapter to prevent stale data
+      const chapterIdString = updatedChapter._id.toString();
+      const keysToDelete = [];
+      for (const [key, value] of slugCache.entries()) {
+        if (value.data && value.data.id && value.data.id.toString() === chapterIdString) {
+          keysToDelete.push(key);
+        }
+      }
+      keysToDelete.forEach(key => slugCache.delete(key));
+      
+      // Clear query deduplication cache for this chapter (all user contexts)
+      for (const [key, promise] of pendingQueries.entries()) {
+        if (key.includes(`chapter:${chapterIdString}`) || 
+            key.includes(`chapter_full_optimized:${chapterIdString}`)) {
+          pendingQueries.delete(key);
+        }
+      }
 
       // Send notifications and SSE updates for draft chapters becoming public
       if (isDraftBecomingPublic) {
@@ -1686,6 +1707,26 @@ router.delete('/:id', auth, async (req, res) => {
 
       // Clear novel caches
       clearNovelCaches();
+      
+      // Clear chapter-specific caches for the deleted chapter
+      clearChapterCaches(chapterId);
+      
+      // Clear slug cache entries for this chapter
+      const keysToDelete = [];
+      for (const [key, value] of slugCache.entries()) {
+        if (value.data && value.data.id && value.data.id.toString() === chapterId) {
+          keysToDelete.push(key);
+        }
+      }
+      keysToDelete.forEach(key => slugCache.delete(key));
+      
+      // Clear query deduplication cache for this chapter (all user contexts)
+      for (const [key, promise] of pendingQueries.entries()) {
+        if (key.includes(`chapter:${chapterId}`) || 
+            key.includes(`chapter_full_optimized:${chapterId}`)) {
+          pendingQueries.delete(key);
+        }
+      }
 
       // Notify clients of the chapter deletion
       notifyAllClients('update', {
