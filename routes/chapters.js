@@ -1409,7 +1409,7 @@ router.put('/:id', auth, async (req, res) => {
       }
 
       // Determine the timestamp to use - force update if switching from draft
-      const updateTimestamp = shouldForceChapterTimestampUpdate ? new Date() : new Date();
+      const updateTimestamp = shouldForceChapterTimestampUpdate ? new Date() : existingChapter.updatedAt;
 
       // Update the chapter
       const updatedChapter = await Chapter.findByIdAndUpdate(

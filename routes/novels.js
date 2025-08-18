@@ -1426,7 +1426,8 @@ router.get("/", optionalAuth, async (req, res) => {
                       $project: {
                         _id: 1,
                         title: 1,
-                        createdAt: 1
+                        createdAt: 1,
+                        updatedAt: 1
                       }
                     }
                   ],
