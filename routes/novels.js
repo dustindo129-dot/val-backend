@@ -4,7 +4,7 @@ import { auth, optionalAuth } from "../middleware/auth.js";
 import admin from "../middleware/admin.js";
 import Chapter from "../models/Chapter.js";
 import Module from "../models/Module.js";
-import { cache, clearNovelCaches, notifyAllClients, shouldBypassCache } from '../utils/cacheUtils.js';
+import { cache, clearNovelCaches, notifyAllClients, shouldBypassCache, registerCacheMap } from '../utils/cacheUtils.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
 import { addClient, removeClient, sseClients, broadcastEvent, listConnectedClients, performHealthCheck, analyzeTabBehavior, getTabConnectionHistory, isTabBlocked, trackIgnoredDuplicate } from '../services/sseService.js';
 import Request from '../models/Request.js';
@@ -107,6 +107,9 @@ const validateObjectId = (id, res, fieldName = 'ID') => {
 // Enhanced query deduplication with caching
 const queryCacheMap = new Map();
 const QUERY_CACHE_TTL = 1000 * 60 * 5; // 5 minutes cache
+
+// Register the cache map so it can be cleared by cacheUtils
+registerCacheMap(queryCacheMap);
 
 const dedupQuery = async (key, queryFn, cacheTtl = QUERY_CACHE_TTL) => {
   // Check cache first

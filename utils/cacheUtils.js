@@ -12,6 +12,17 @@ export const cache = new NodeCache({ stdTTL: 600 });
 // Set of active SSE clients
 export const sseClients = new Set();
 
+// Store reference to external cache maps that need to be cleared
+let externalCacheMaps = [];
+
+/**
+ * Register an external cache map for clearing
+ * @param {Map} cacheMap - The cache map to register
+ */
+export const registerCacheMap = (cacheMap) => {
+  externalCacheMaps.push(cacheMap);
+};
+
 /**
  * Clear all novel-related caches
  */
@@ -23,6 +34,19 @@ export const clearNovelCaches = () => {
   keys.forEach(key => {
     if (key.startsWith('novels_page_') || key.startsWith('novel_') || key.startsWith('chapter_')) {
       cache.del(key);
+    }
+  });
+  
+  // Clear external cache maps (like queryCacheMap from novels route)
+  externalCacheMaps.forEach(cacheMap => {
+    if (cacheMap && typeof cacheMap.keys === 'function') {
+      const cacheKeys = Array.from(cacheMap.keys());
+      cacheKeys.forEach(key => {
+        // Clear novel fetch cache entries (format: 'novel:novelId:userRole:userId')
+        if (key.startsWith('novel:') || key.startsWith('novel-complete:') || key.startsWith('hot_novels')) {
+          cacheMap.delete(key);
+        }
+      });
     }
   });
 };
