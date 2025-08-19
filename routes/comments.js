@@ -358,6 +358,8 @@ router.get('/novel/:novelId', async (req, res) => {
             adminDeleted: { $ne: true }
           }
         },
+        // CRITICAL: Filter to root comments BEFORE sorting to ensure pinned root comments appear first
+        { $match: { parentId: null } },
         {
           $addFields: {
             likesCount: { $size: "$likes" }
@@ -365,17 +367,23 @@ router.get('/novel/:novelId', async (req, res) => {
         }
       ];
 
-      // Add sorting to the pipeline for better performance
-      // IMPORTANT: Always sort pinned comments first, then by selected criteria
+      // Add proper isPinned field handling and sorting
+      // IMPORTANT: Handle null/undefined isPinned values and always sort pinned comments first
+      pipeline.push({
+        $addFields: {
+          isPinnedSort: { $ifNull: ["$isPinned", false] } // Convert null/undefined to false
+        }
+      });
+      
       switch (sort) {
         case 'likes':
-          pipeline.push({ $sort: { isPinned: -1, likesCount: -1, createdAt: -1 } });
+          pipeline.push({ $sort: { isPinnedSort: -1, likesCount: -1, createdAt: -1 } });
           break;
         case 'oldest':
-          pipeline.push({ $sort: { isPinned: -1, createdAt: 1 } });
+          pipeline.push({ $sort: { isPinnedSort: -1, createdAt: 1 } });
           break;
         default: // newest
-          pipeline.push({ $sort: { isPinned: -1, createdAt: -1 } });
+          pipeline.push({ $sort: { isPinnedSort: -1, createdAt: -1 } });
       }
 
       // Optimized: Don't do user lookup in aggregation - we'll do it separately with caching
@@ -423,15 +431,13 @@ router.get('/novel/:novelId', async (req, res) => {
         });
       }
 
-      // Get total count first - but only count ROOT comments for pagination
+      // Get total count first - parentId filter already applied in pipeline
       const rootCountPipeline = [...pipeline];
-      rootCountPipeline.push({ $match: { parentId: null } }); // Only count root comments
       rootCountPipeline.push({ $count: "totalComments" });
       const countResult = await Comment.aggregate(rootCountPipeline);
       const totalComments = countResult.length > 0 ? countResult[0].totalComments : 0;
 
-      // Add root comment filter and pagination to main pipeline
-      pipeline.push({ $match: { parentId: null } }); // Only get root comments for pagination
+      // Add pagination to main pipeline (parentId filter already applied)
       pipeline.push({ $skip: skip });
       pipeline.push({ $limit: limitNum });
 
@@ -471,16 +477,35 @@ router.get('/novel/:novelId', async (req, res) => {
         };
       }
 
-      // Now fetch all replies for the paginated root comments
+      // Fetch ALL replies recursively (including nested replies)
       const rootCommentIds = rootComments.map(comment => comment._id);
       
+      // Get all comment IDs that belong to this thread (root + all nested replies)
+      const getAllRepliesRecursively = async (parentIds, allReplies = []) => {
+        if (parentIds.length === 0) return allReplies;
+        
+        const directReplies = await Comment.find({
+          parentId: { $in: parentIds },
+          adminDeleted: { $ne: true }
+        }).select('_id parentId').lean();
+        
+        if (directReplies.length === 0) return allReplies;
+        
+        // Add these replies to our collection
+        allReplies.push(...directReplies);
+        
+        // Get replies to these replies (recursive)
+        const nextLevelParentIds = directReplies.map(r => r._id);
+        return await getAllRepliesRecursively(nextLevelParentIds, allReplies);
+      };
+      
+      // Get all nested reply IDs
+      const allReplyIds = await getAllRepliesRecursively(rootCommentIds);
+      const allReplyObjectIds = allReplyIds.map(r => r._id);
+      
+     // Now fetch all the reply data
       const repliesPipeline = [
-        {
-          $match: {
-            parentId: { $in: rootCommentIds },
-            adminDeleted: { $ne: true }
-          }
-        },
+        { $match: { _id: { $in: allReplyObjectIds }, adminDeleted: { $ne: true } } },
         {
           $addFields: {
             likesCount: { $size: "$likes" }
@@ -551,20 +576,12 @@ router.get('/novel/:novelId', async (req, res) => {
 
       const novelRoles = novel ? await getNovelRoles(novel, userIds) : {};
 
-      // Organize comments: attach replies to their parent root comments
+      // Organize comments: build nested reply structure with user info
       const repliesByParent = new Map();
+      const allCommentsById = new Map();
       
-      // Group replies by parent ID
-      replies.forEach(reply => {
-        const parentId = reply.parentId.toString();
-        if (!repliesByParent.has(parentId)) {
-          repliesByParent.set(parentId, []);
-        }
-        repliesByParent.get(parentId).push(reply);
-      });
-      
-      // Attach replies to root comments and apply user info
-      const organizedComments = rootComments.map(comment => {
+      // First, add user info to all comments and index them by ID
+      const processCommentUser = (comment) => {
         const userIdStr = comment.user.toString();
         const userInfo = cachedUsers[userIdStr];
         
@@ -573,7 +590,8 @@ router.get('/novel/:novelId', async (req, res) => {
           user: {
             ...userInfo,
             novelRoles: novelRoles[userIdStr] || []
-          }
+          },
+          replies: []
         };
 
         // Add liked status if user is authenticated
@@ -581,32 +599,75 @@ router.get('/novel/:novelId', async (req, res) => {
           commentWithUser.liked = comment.likes.includes(userId);
         }
 
-        // Attach replies to this root comment
-        const commentReplies = repliesByParent.get(comment._id.toString()) || [];
-        commentWithUser.replies = commentReplies.map(reply => {
-          const replyUserIdStr = reply.user.toString();
-          const replyUserInfo = cachedUsers[replyUserIdStr];
-          
-          const replyWithUser = {
-            ...reply,
-            user: {
-              ...replyUserInfo,
-              novelRoles: novelRoles[replyUserIdStr] || []
-            }
-          };
-
-          // Add liked status if user is authenticated
-          if (userId) {
-            replyWithUser.liked = reply.likes.includes(userId);
-          }
-
-          return replyWithUser;
-        });
-
         return commentWithUser;
+      };
+      
+      // Index all comments by ID with user info
+      rootComments.forEach(comment => {
+        const processedComment = processCommentUser(comment);
+        allCommentsById.set(comment._id.toString(), processedComment);
       });
+      replies.forEach(reply => {
+        const processedReply = processCommentUser(reply);
+        allCommentsById.set(reply._id.toString(), processedReply);
+      });
+      
+      // Group replies by parent
+      replies.forEach(reply => {
+        const parentId = reply.parentId.toString();
+        if (!repliesByParent.has(parentId)) {
+          repliesByParent.set(parentId, []);
+        }
+        repliesByParent.get(parentId).push(allCommentsById.get(reply._id.toString()));
+      });
+      
+      // Recursively attach replies to their parents
+      const attachReplies = (comment) => {
+        const commentId = comment._id.toString();
+        const directReplies = repliesByParent.get(commentId) || [];
+        
+        // Recursively attach replies to each direct reply
+        comment.replies = directReplies.map(reply => {
+          return attachReplies(reply);
+        });
+        
+        return comment;
+      };
+      
+      // Build the final organized structure
+      const organizedComments = rootComments.map(comment => {
+        const processedComment = allCommentsById.get(comment._id.toString());
+        return attachReplies(processedComment);
+      });
+      
+      // Helper function to count nested replies recursively
+      const countNestedReplies = (comment) => {
+        let count = comment.replies ? comment.replies.length : 0;
+        if (comment.replies) {
+          comment.replies.forEach(reply => {
+            count += countNestedReplies(reply);
+          });
+        }
+        return count;
+      };
+      
 
-      // Calculate pagination info
+      // For novel detail pages, we need to count ALL comments + replies in the entire novel, not just current page
+      // Get ALL comments for this novel to calculate the true total including nested replies
+      const allNovelCommentsPipeline = [
+        {
+          $match: {
+            $or: matchConditions,
+            adminDeleted: { $ne: true }
+          }
+        }
+        // No parentId filter - get ALL comments (root + replies)
+      ];
+      
+      const allNovelComments = await Comment.aggregate(allNovelCommentsPipeline);
+      const totalCommentsIncludingAllReplies = allNovelComments.length; // This includes root + ALL nested replies
+      
+      // Calculate pagination info (still use root comment count for pagination logic)
       const totalPages = Math.ceil(totalComments / limitNum);
       const hasNext = pageNum < totalPages;
       const hasPrev = pageNum > 1;
@@ -616,7 +677,7 @@ router.get('/novel/:novelId', async (req, res) => {
         pagination: {
           currentPage: pageNum,
           totalPages,
-          totalComments,
+          totalComments: totalCommentsIncludingAllReplies, // Show TOTAL including ALL nested replies across entire novel
           hasNext,
           hasPrev,
           limit: limitNum
@@ -641,19 +702,44 @@ router.get('/novel/:novelId', async (req, res) => {
  */
 router.get('/', async (req, res) => {
   try {
-    const { contentType, contentId, sort = 'newest' } = req.query;
+    const { contentType, contentId, sort = 'newest', page = 1, limit = 10 } = req.query;
 
     if (!contentType || !contentId) {
       return res.status(400).json({ message: 'contentType and contentId are required' });
     }
 
-    // Use query deduplication to prevent multiple identical requests
-    const cacheKey = `comments_${contentType}_${contentId}_${sort}_${req.user?._id || 'anonymous'}`;
-    
-    const comments = await dedupCommentsQuery(cacheKey, async () => {
-      // Remove separate count query; rely on aggregation below for single round-trip
+    // Processing comments request
 
-      // Build the aggregation pipeline with proper sorting
+    // Parse pagination parameters
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit))); // Max 50 comments per page
+    const skip = (pageNum - 1) * limitNum;
+
+    // Use query deduplication to prevent multiple identical requests
+    const cacheKey = `comments_${contentType}_${contentId}_${sort}_${pageNum}_${limitNum}_${req.user?._id || 'anonymous'}`;
+    
+    const result = await dedupCommentsQuery(cacheKey, async () => {
+      // DEBUG: Check what comments exist for this contentId
+      const allCommentsForContent = await Comment.find({
+        contentType,
+        contentId,
+        adminDeleted: { $ne: true }
+      }).select('_id parentId text createdAt').sort({ createdAt: -1 }).lean();
+      
+      // Also check if there are comments with alternate contentId formats (for chapters)
+      let alternateComments = [];
+      if (contentType === 'chapters' && contentId.includes('-')) {
+        // Check if there are comments stored with just the chapterId (without novelId prefix)
+        const chapterId = contentId.split('-')[1];
+        alternateComments = await Comment.find({
+          contentType,
+          contentId: chapterId,
+          adminDeleted: { $ne: true }
+        }).select('_id parentId text createdAt').sort({ createdAt: -1 }).lean();
+      }
+      
+     
+      // Build the aggregation pipeline with proper sorting and pagination
       const pipeline = [
         {
           $match: {
@@ -662,25 +748,37 @@ router.get('/', async (req, res) => {
             adminDeleted: { $ne: true }
           }
         },
+        // CRITICAL: Filter to root comments BEFORE sorting to ensure pinned root comments appear first
+        { $match: { parentId: null } },
         {
           $addFields: {
-            likesCount: { $size: "$likes" }
+            likesCount: { $size: "$likes" },
+            isPinnedSort: { $ifNull: ["$isPinned", false] } // Convert null/undefined to false
           }
         }
       ];
 
-      // Add sorting to the pipeline for better performance
-      // IMPORTANT: Always sort pinned comments first, then by selected criteria
+      // Add sorting - IMPORTANT: Always sort pinned comments first, then by selected criteria
       switch (sort) {
         case 'likes':
-          pipeline.push({ $sort: { isPinned: -1, likesCount: -1, createdAt: -1 } });
+          pipeline.push({ $sort: { isPinnedSort: -1, likesCount: -1, createdAt: -1 } });
           break;
         case 'oldest':
-          pipeline.push({ $sort: { isPinned: -1, createdAt: 1 } });
+          pipeline.push({ $sort: { isPinnedSort: -1, createdAt: 1 } });
           break;
         default: // newest
-          pipeline.push({ $sort: { isPinned: -1, createdAt: -1 } });
+          pipeline.push({ $sort: { isPinnedSort: -1, createdAt: -1 } });
       }
+
+      // Get total count of ROOT comments for pagination
+      const rootCountPipeline = [...pipeline];
+      rootCountPipeline.push({ $count: "totalComments" });
+      const countResult = await Comment.aggregate(rootCountPipeline);
+      const totalComments = countResult.length > 0 ? countResult[0].totalComments : 0;
+
+      // Add pagination to main pipeline
+      pipeline.push({ $skip: skip });
+      pipeline.push({ $limit: limitNum });
 
       // Add user lookup and projection
       pipeline.push(
@@ -724,7 +822,146 @@ router.get('/', async (req, res) => {
         }
       );
 
-      const allComments = await Comment.aggregate(pipeline);
+      const rootComments = await Comment.aggregate(pipeline);
+
+      if (rootComments.length === 0) {
+        return {
+          comments: [],
+          pagination: {
+            currentPage: pageNum,
+            totalPages: Math.ceil(totalComments / limitNum),
+            totalComments: totalComments,
+            hasNext: false,
+            hasPrev: pageNum > 1
+          }
+        };
+      }
+
+              // Fetch ALL replies recursively (including nested replies)
+        const rootCommentIds = rootComments.map(comment => comment._id);
+        
+        // Get all comment IDs that belong to this thread (root + all nested replies)
+        const getAllRepliesRecursively = async (parentIds, allReplies = []) => {
+          if (parentIds.length === 0) return allReplies;
+          
+          const directReplies = await Comment.find({
+            parentId: { $in: parentIds },
+            adminDeleted: { $ne: true }
+          }).select('_id parentId').lean();
+          
+          if (directReplies.length === 0) return allReplies;
+          
+          // Add these replies to our collection
+          allReplies.push(...directReplies);
+          
+          // Get replies to these replies (recursive)
+          const nextLevelParentIds = directReplies.map(r => r._id);
+          return await getAllRepliesRecursively(nextLevelParentIds, allReplies);
+        };
+        
+        // Get all nested reply IDs
+        const allReplyIds = await getAllRepliesRecursively(rootCommentIds);
+        const allReplyObjectIds = allReplyIds.map(r => r._id);
+        
+        // Now fetch all the reply data
+        const repliesPipeline = [
+          { $match: { _id: { $in: allReplyObjectIds }, adminDeleted: { $ne: true } } },
+          { $addFields: { likesCount: { $size: "$likes" } } },
+          { $sort: { createdAt: 1 } }, // Replies sorted by oldest first
+          {
+            $lookup: {
+              from: 'users',
+              localField: 'user',
+              foreignField: '_id',
+              pipeline: [
+                { $project: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 } }
+              ],
+              as: 'userInfo'
+            }
+          },
+          {
+            $unwind: '$userInfo'
+          },
+          {
+            $project: {
+              _id: 1,
+              text: 1,
+              contentType: 1,
+              contentId: 1,
+              parentId: 1,
+              createdAt: 1,
+              isDeleted: 1,
+              adminDeleted: 1,
+              likes: 1,
+              likesCount: 1,
+              isPinned: 1,
+              isEdited: 1,
+              user: {
+                _id: '$userInfo._id',
+                username: '$userInfo.username',
+                displayName: '$userInfo.displayName',
+                avatar: '$userInfo.avatar',
+                role: '$userInfo.role',
+                userNumber: '$userInfo.userNumber'
+              }
+            }
+          }
+        ];
+
+        const replies = await Comment.aggregate(repliesPipeline);
+
+
+           // Organize comments: build nested reply structure
+        const repliesByParent = new Map();
+        const allCommentsById = new Map();
+        
+        // Index all comments by ID
+        rootComments.forEach(comment => {
+          allCommentsById.set(comment._id.toString(), { ...comment, replies: [] });
+        });
+        replies.forEach(reply => {
+          allCommentsById.set(reply._id.toString(), { ...reply, replies: [] });
+        });
+        
+        // Group replies by parent
+        replies.forEach(reply => {
+          const parentId = reply.parentId.toString();
+          if (!repliesByParent.has(parentId)) {
+            repliesByParent.set(parentId, []);
+          }
+          repliesByParent.get(parentId).push(reply);
+        });
+        
+        // Recursively attach replies to their parents
+        const attachReplies = (comment) => {
+          const commentId = comment._id.toString();
+          const directReplies = repliesByParent.get(commentId) || [];
+          
+          // Recursively attach replies to each direct reply
+          comment.replies = directReplies.map(reply => {
+            const replyWithReplies = { ...reply, replies: [] };
+            return attachReplies(replyWithReplies);
+          });
+          
+          return comment;
+        };
+        
+        // Build the final organized structure
+        const organizedComments = rootComments.map(comment => {
+          const commentWithReplies = { ...comment, replies: [] };
+          return attachReplies(commentWithReplies);
+        });
+        
+        // Helper function to count nested replies recursively
+        function countNestedReplies(comment) {
+          let count = comment.replies ? comment.replies.length : 0;
+          if (comment.replies) {
+            comment.replies.forEach(reply => {
+              count += countNestedReplies(reply);
+            });
+          }
+          return count;
+        }
 
       // Get novel information for role checking
       let novel = null;
@@ -746,28 +983,71 @@ router.get('/', async (req, res) => {
         novel = chapter?.novelId;
       }
       
-      // Get novel-specific roles for comment authors
+      // Get novel-specific roles for comment authors (including replies)
+      const allComments = [...organizedComments];
+      organizedComments.forEach(comment => {
+        if (comment.replies) {
+          allComments.push(...comment.replies);
+        }
+      });
+      
       const userIds = [...new Set(allComments.map(comment => comment.user._id))];
       const novelRoles = novel ? await getNovelRoles(novel, userIds) : {};
 
-      // Add liked status if user is authenticated
+      // Add liked status and novel-specific roles if user is authenticated
       if (req.user) {
         const userId = req.user._id;
-        allComments.forEach(comment => {
+        
+        // Process root comments
+        organizedComments.forEach(comment => {
           comment.liked = comment.likes.includes(userId);
+          const userIdStr = comment.user._id.toString();
+          comment.user.novelRoles = novelRoles[userIdStr] || [];
+          
+          // Process replies
+          if (comment.replies) {
+            comment.replies.forEach(reply => {
+              reply.liked = reply.likes.includes(userId);
+              const replyUserIdStr = reply.user._id.toString();
+              reply.user.novelRoles = novelRoles[replyUserIdStr] || [];
+            });
+          }
+        });
+      } else {
+        // Add novel roles even for non-authenticated users
+        organizedComments.forEach(comment => {
+          const userIdStr = comment.user._id.toString();
+          comment.user.novelRoles = novelRoles[userIdStr] || [];
+          
+          if (comment.replies) {
+            comment.replies.forEach(reply => {
+              const replyUserIdStr = reply.user._id.toString();
+              reply.user.novelRoles = novelRoles[replyUserIdStr] || [];
+            });
+          }
         });
       }
 
-      // Add novel-specific roles to each comment
-      allComments.forEach(comment => {
-        const userIdStr = comment.user._id.toString();
-        comment.user.novelRoles = novelRoles[userIdStr] || [];
-      });
-
-      return allComments;
+      // Calculate the REAL total including all nested replies for display count (CURRENT PAGE ONLY for chapter pages)
+      const totalCommentsIncludingReplies = organizedComments.length + organizedComments.reduce((sum, c) => sum + countNestedReplies(c), 0);
+      
+      const finalResult = {
+        comments: organizedComments,
+        pagination: {
+          currentPage: pageNum,
+          totalPages: Math.ceil(totalComments / limitNum),
+          totalComments: totalCommentsIncludingReplies, // Show total including nested replies
+          hasNext: pageNum < Math.ceil(totalComments / limitNum),
+          hasPrev: pageNum > 1
+        }
+      };
+      
+      // Returning organized comments with pagination
+      
+      return finalResult;
     });
 
-    res.json(comments);
+    res.json(result);
   } catch (err) {
     console.error('Error fetching comments:', err);
     res.status(500).json({ message: err.message });
