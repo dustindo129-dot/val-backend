@@ -1399,33 +1399,34 @@ router.put('/:id', auth, async (req, res) => {
       const isDraftModeChanging = existingChapter.mode === 'draft' && 
         mode && mode !== 'draft';
 
-      // Always update chapter timestamp when switching from draft to any other mode
+      // Only update chapter timestamp when switching from draft to any other mode
       // This ensures the chapter shows the correct "published" date rather than creation date
-      const shouldForceChapterTimestampUpdate = isDraftModeChanging;
+      // For all other updates, preserve the existing timestamp
       
       // Log timestamp update for tracking
-      if (shouldForceChapterTimestampUpdate) {
+      if (isDraftModeChanging) {
         console.log(`Updating chapter timestamp for "${existingChapter.title}" due to mode change from draft to ${mode}`);
       }
 
-      // Determine the timestamp to use - force update if switching from draft
-      const updateTimestamp = shouldForceChapterTimestampUpdate ? new Date() : existingChapter.updatedAt;
+      // Build update object conditionally
+      const updateFields = {
+        ...(title && { title }),
+        ...(content && { content }),
+        ...(translator !== undefined && { translator }),
+        ...(editor !== undefined && { editor }),
+        ...(proofreader !== undefined && { proofreader }),
+        ...(mode && { mode }),
+        chapterBalance: finalChapterBalance,
+        footnotes,
+        wordCount: finalWordCount, // Use calculated or provided word count
+        // ONLY update timestamp if mode is changing from draft to another mode
+        ...(isDraftModeChanging && { updatedAt: new Date() })
+      };
 
       // Update the chapter
       const updatedChapter = await Chapter.findByIdAndUpdate(
         chapterId,
-        {
-          ...(title && { title }),
-          ...(content && { content }),
-          ...(translator !== undefined && { translator }),
-          ...(editor !== undefined && { editor }),
-          ...(proofreader !== undefined && { proofreader }),
-          ...(mode && { mode }),
-          chapterBalance: finalChapterBalance,
-          footnotes,
-          wordCount: finalWordCount, // Use calculated or provided word count
-          updatedAt: updateTimestamp // Always update timestamp, especially when mode changes from draft
-        },
+        updateFields,
         { 
           new: true, 
           session,
@@ -2086,7 +2087,7 @@ router.post('/batch-update-wordcount', auth, async (req, res) => {
             bulkOps.push({
               updateOne: {
                 filter: { _id: chapter._id },
-                update: { $set: { wordCount: wordCount, updatedAt: new Date() } }
+                update: { $set: { wordCount: wordCount } }
               }
             });
           }
