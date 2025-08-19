@@ -12,8 +12,23 @@ const userStatsCache = new Map();
 const USER_STATS_CACHE_TTL = 1000 * 60 * 5; // 5 minutes
 const MAX_USER_STATS_CACHE_SIZE = 100;
 
+// Enhanced caching for novel stats to prevent duplicate aggregations
+const novelStatsCache = new Map();
+const NOVEL_STATS_CACHE_TTL = 1000 * 60 * 10; // 10 minutes - longer since stats don't change frequently
+const MAX_NOVEL_STATS_CACHE_SIZE = 500;
+
 // Query deduplication cache for user interactions
 const pendingUserQueries = new Map();
+
+// Cache for user interactions to avoid repeated lookups
+const userInteractionCache = new Map();
+const USER_INTERACTION_CACHE_TTL = 1000 * 60 * 3; // 3 minutes - balance between freshness and performance
+const MAX_USER_INTERACTION_CACHE_SIZE = 200;
+
+// Cache for novel reviews to avoid repeated queries
+const reviewsCache = new Map();
+const REVIEWS_CACHE_TTL = 1000 * 60 * 5; // 5 minutes - reviews don't change very frequently
+const MAX_REVIEWS_CACHE_SIZE = 100;
 
 // Helper function to manage user stats cache
 const getCachedUserStats = (userId) => {
@@ -31,6 +46,27 @@ const setCachedUserStats = (userId, data) => {
   }
   
   userStatsCache.set(userId, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+// Novel stats cache helpers
+const getCachedNovelStats = (novelId) => {
+  const cached = novelStatsCache.get(novelId);
+  if (cached && Date.now() - cached.timestamp < NOVEL_STATS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedNovelStats = (novelId, data) => {
+  if (novelStatsCache.size >= MAX_NOVEL_STATS_CACHE_SIZE) {
+    const oldestKey = novelStatsCache.keys().next().value;
+    novelStatsCache.delete(oldestKey);
+  }
+  
+  novelStatsCache.set(novelId, {
     data,
     timestamp: Date.now()
   });
@@ -62,6 +98,90 @@ const clearUserStatsCache = (userId = null) => {
   }
 };
 
+// Clear novel stats cache
+const clearNovelStatsCache = (novelId = null) => {
+  if (novelId) {
+    novelStatsCache.delete(novelId);
+  } else {
+    novelStatsCache.clear();
+  }
+};
+
+// User interaction cache helpers
+const getCachedUserInteraction = (userId, novelId) => {
+  const cacheKey = `user_${userId}_novel_${novelId}`;
+  const cached = userInteractionCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < USER_INTERACTION_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedUserInteraction = (userId, novelId, data) => {
+  if (userInteractionCache.size >= MAX_USER_INTERACTION_CACHE_SIZE) {
+    const oldestKey = userInteractionCache.keys().next().value;
+    userInteractionCache.delete(oldestKey);
+  }
+  
+  const cacheKey = `user_${userId}_novel_${novelId}`;
+  userInteractionCache.set(cacheKey, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+const clearUserInteractionCache = (userId = null, novelId = null) => {
+  if (userId && novelId) {
+    const cacheKey = `user_${userId}_novel_${novelId}`;
+    userInteractionCache.delete(cacheKey);
+  } else if (novelId) {
+    // Clear all user interactions for a specific novel
+    for (const key of userInteractionCache.keys()) {
+      if (key.includes(`novel_${novelId}`)) {
+        userInteractionCache.delete(key);
+      }
+    }
+  } else {
+    userInteractionCache.clear();
+  }
+};
+
+// Reviews cache helpers
+const getCachedReviews = (novelId, page, limit, userId) => {
+  const cacheKey = `reviews_${novelId}_${page}_${limit}_${userId || 'anonymous'}`;
+  const cached = reviewsCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < REVIEWS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedReviews = (novelId, page, limit, userId, data) => {
+  if (reviewsCache.size >= MAX_REVIEWS_CACHE_SIZE) {
+    const oldestKey = reviewsCache.keys().next().value;
+    reviewsCache.delete(oldestKey);
+  }
+  
+  const cacheKey = `reviews_${novelId}_${page}_${limit}_${userId || 'anonymous'}`;
+  reviewsCache.set(cacheKey, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+const clearReviewsCache = (novelId = null) => {
+  if (novelId) {
+    // Clear all reviews for a specific novel
+    for (const key of reviewsCache.keys()) {
+      if (key.includes(`reviews_${novelId}`)) {
+        reviewsCache.delete(key);
+      }
+    }
+  } else {
+    reviewsCache.clear();
+  }
+};
+
 /**
  * Get novel interaction statistics
  * @route GET /api/usernovelinteractions/stats/:novelId
@@ -70,11 +190,17 @@ router.get('/stats/:novelId', async (req, res) => {
   try {
     const novelId = req.params.novelId;
     
+    // First check cache
+    const cachedStats = getCachedNovelStats(novelId);
+    if (cachedStats) {
+      return res.json(cachedStats);
+    }
+       
     // Use query deduplication to prevent multiple identical requests
     const cacheKey = `novel_stats_${novelId}`;
     
     const stats = await dedupUserQuery(cacheKey, async () => {
-      // Aggregate interactions data
+      // Aggregate interactions data with optimized pipeline
       const [result] = await UserNovelInteraction.aggregate([
         {
           $match: { novelId: new mongoose.Types.ObjectId(novelId) }
@@ -112,12 +238,17 @@ router.get('/stats/:novelId', async (req, res) => {
         ? (result.ratingSum / result.totalRatings).toFixed(1) 
         : '0.0';
 
-      return {
+      const statsData = {
         totalLikes: result.totalLikes,
         totalRatings: result.totalRatings,
         totalBookmarks: result.totalBookmarks,
         averageRating
       };
+
+      // Cache the results
+      setCachedNovelStats(novelId, statsData);
+      
+      return statsData;
     });
 
     res.json(stats);
@@ -136,6 +267,12 @@ router.get('/user/:novelId', auth, async (req, res) => {
     const novelId = req.params.novelId;
     const userId = req.user._id;
 
+    // First check cache
+    const cachedInteraction = getCachedUserInteraction(userId, novelId);
+    if (cachedInteraction) {
+      return res.json(cachedInteraction);
+    }
+    
     // Use query deduplication to prevent multiple identical requests
     const cacheKey = `user_interaction_${userId}_${novelId}`;
     
@@ -143,25 +280,26 @@ router.get('/user/:novelId', auth, async (req, res) => {
       // Get user's interaction
       const result = await UserNovelInteraction.findOne({ userId, novelId });
       
-      if (!result) {
-        return {
-          liked: false,
-          rating: null,
-          review: null,
-          bookmarked: false,
-          followed: false
-        };
-      }
-
-      return {
+      const interactionData = !result ? {
+        liked: false,
+        rating: null,
+        review: null,
+        bookmarked: false,
+        followed: false
+      } : {
         liked: result.liked || false,
         rating: result.rating || null,
         review: result.review || null,
         bookmarked: result.bookmarked || false,
         followed: result.followed || false
       };
+      
+      return interactionData;
     });
 
+    // Cache the result for future requests
+    setCachedUserInteraction(userId, novelId, interaction);
+    
     res.json(interaction);
   } catch (err) {
     console.error("Error getting user interaction:", err);
@@ -206,6 +344,9 @@ router.post('/like', auth, async (req, res) => {
 
     // Clear caches for this user and novel
     clearUserStatsCache(userId);
+    clearNovelStatsCache(novelId); // Clear novel stats cache
+    clearUserInteractionCache(userId, novelId); // Clear user interaction cache
+    clearReviewsCache(novelId); // Clear reviews cache since a rating/review was added/updated
     pendingUserQueries.delete(`novel_stats_${novelId}`);
     pendingUserQueries.delete(`user_interaction_${userId}_${novelId}`);
     
@@ -281,6 +422,9 @@ router.post('/rate', auth, async (req, res) => {
 
     // Clear caches for this user and novel
     clearUserStatsCache(userId);
+    clearNovelStatsCache(novelId); // Clear novel stats cache
+    clearUserInteractionCache(userId, novelId); // Clear user interaction cache
+    clearReviewsCache(novelId); // Clear reviews cache since a rating/review was added/updated
     pendingUserQueries.delete(`novel_stats_${novelId}`);
     pendingUserQueries.delete(`user_interaction_${userId}_${novelId}`);
     
@@ -350,6 +494,9 @@ router.delete('/rate/:novelId', auth, async (req, res) => {
 
     // Clear caches for this user and novel
     clearUserStatsCache(userId);
+    clearNovelStatsCache(novelId); // Clear novel stats cache
+    clearUserInteractionCache(userId, novelId); // Clear user interaction cache
+    clearReviewsCache(novelId); // Clear reviews cache since a rating/review was added/updated
     pendingUserQueries.delete(`novel_stats_${novelId}`);
     pendingUserQueries.delete(`user_interaction_${userId}_${novelId}`);
     
@@ -427,6 +574,9 @@ router.post('/bookmark', auth, async (req, res) => {
 
     // Clear caches for this user and novel
     clearUserStatsCache(userId);
+    clearNovelStatsCache(novelId); // Clear novel stats cache
+    clearUserInteractionCache(userId, novelId); // Clear user interaction cache
+    clearReviewsCache(novelId); // Clear reviews cache since a rating/review was added/updated
     pendingUserQueries.delete(`novel_stats_${novelId}`);
     pendingUserQueries.delete(`user_interaction_${userId}_${novelId}`);
     
@@ -624,7 +774,14 @@ router.get('/reviews/:novelId', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
+    const userId = req.user?._id;
 
+    // First check cache
+    const cachedReviews = getCachedReviews(novelId, page, limit, userId);
+    if (cachedReviews) {
+      return res.json(cachedReviews);
+    }
+    
     // Check if novel exists
     const novel = await Novel.findById(novelId);
     if (!novel) {
@@ -647,24 +804,92 @@ router.get('/reviews/:novelId', async (req, res) => {
       review: { $exists: true, $ne: null }
     });
 
-    return res.json({
-      reviews: reviews.map(review => ({
-        id: review._id,
-        user: review.userId,
-        rating: review.rating,
-        review: review.review,
-        date: review.updatedAt,
-        createdAt: review.createdAt,
-        updatedAt: review.updatedAt
-      })),
+    // Add like information for authenticated users
+    const reviewsWithLikes = reviews.map(review => ({
+      id: review._id,
+      user: review.userId,
+      rating: review.rating,
+      review: review.review,
+      date: review.updatedAt,
+      createdAt: review.createdAt,
+      updatedAt: review.updatedAt,
+      reviewLikes: review.reviewLikes || [],
+      likesCount: (review.reviewLikes || []).length,
+      isLikedByCurrentUser: req.user ? (review.reviewLikes || []).includes(req.user._id) : false
+    }));
+
+    const reviewsResponse = {
+      reviews: reviewsWithLikes,
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(totalReviews / limit),
         totalItems: totalReviews
       }
-    });
+    };
+    
+    // Cache the result for future requests
+    setCachedReviews(novelId, page, limit, userId, reviewsResponse);
+    
+    return res.json(reviewsResponse);
   } catch (err) {
     console.error("Error getting reviews:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Like/unlike a review
+ * @route POST /api/usernovelinteractions/reviews/:reviewId/like
+ */
+router.post('/reviews/:reviewId/like', auth, async (req, res) => {
+  try {
+    const reviewId = req.params.reviewId;
+    const userId = req.user._id;
+
+    // Find the review (UserNovelInteraction)
+    const reviewInteraction = await UserNovelInteraction.findById(reviewId);
+    if (!reviewInteraction) {
+      return res.status(404).json({ message: 'Review not found' });
+    }
+
+    if (!reviewInteraction.review) {
+      return res.status(400).json({ message: 'This interaction does not contain a review' });
+    }
+
+    // Check if user already liked this review
+    const reviewLikes = reviewInteraction.reviewLikes || [];
+    const isCurrentlyLiked = reviewLikes.some(id => id.toString() === userId.toString());
+
+    // Toggle like status using direct MongoDB update to avoid updating updatedAt
+    let updateOperation;
+    if (isCurrentlyLiked) {
+      // Remove like
+      updateOperation = {
+        $pull: { reviewLikes: userId }
+      };
+    } else {
+      // Add like
+      updateOperation = {
+        $addToSet: { reviewLikes: userId }
+      };
+    }
+
+    // Use updateOne to avoid triggering updatedAt timestamp
+    await UserNovelInteraction.updateOne(
+      { _id: reviewId },
+      updateOperation
+    );
+
+    // Get updated count for response
+    const updatedReview = await UserNovelInteraction.findById(reviewId, 'reviewLikes');
+    const finalLikesCount = (updatedReview.reviewLikes || []).length;
+
+    res.json({
+      liked: !isCurrentlyLiked,
+      likesCount: finalLikesCount
+    });
+  } catch (err) {
+    console.error('Error liking review:', err);
     res.status(500).json({ message: err.message });
   }
 });

@@ -7,6 +7,7 @@ import { createTransaction } from './userTransaction.js';
 import { createNovelTransaction } from './novelTransactions.js';
 import ContributionHistory from '../models/ContributionHistory.js';
 import { clearUserCache } from '../utils/userCache.js';
+import { clearContributionHistoryCache } from './novels.js';
 
 const router = express.Router();
 
@@ -406,6 +407,9 @@ router.post('/:requestId/approve', auth, async (req, res) => {
     
     // Clear requests cache since request was approved
     clearRequestsCache();
+    
+    // Clear contribution history cache since new contributions were added to the novel
+    clearContributionHistoryCache(matchingNovel._id);
     
     // Record the transaction in UserTransaction ledger - no balance change since deposit was already deducted
     await createTransaction({

@@ -7,6 +7,7 @@ import Novel from '../models/Novel.js';
 import User from '../models/User.js';
 import ContributionHistory from '../models/ContributionHistory.js';
 import { createGiftTransactions } from './novelTransactions.js';
+import { clearContributionHistoryCache } from './novels.js';
 import mongoose from 'mongoose';
 
 const router = express.Router();
@@ -258,6 +259,9 @@ router.post('/send', auth, async (req, res) => {
 
     // Clear gifts cache for this novel since counts have changed
     clearGiftsCache(novelId);
+    
+    // Clear contribution history cache since a gift contribution was made
+    clearContributionHistoryCache(novelId);
 
     res.json({
       message: `Đã tặng ${gift.icon} ${gift.name} thành công!`,

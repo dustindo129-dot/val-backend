@@ -43,6 +43,21 @@ const recentCommentsCache = new Map();
 const RECENT_COMMENTS_CACHE_TTL = 1000 * 60 * 2; // 2 minutes
 const MAX_RECENT_COMMENTS_CACHE_SIZE = 50;
 
+// Cache for chapter IDs to avoid repeated queries
+const chapterIdsCache = new Map();
+const CHAPTER_IDS_CACHE_TTL = 1000 * 60 * 15; // 15 minutes - chapters don't change frequently
+const MAX_CHAPTER_IDS_CACHE_SIZE = 100;
+
+// Cache for novel comments (main caching for performance)
+const novelCommentsCache = new Map();
+const NOVEL_COMMENTS_CACHE_TTL = 1000 * 60 * 5; // 5 minutes - balance between freshness and performance
+const MAX_NOVEL_COMMENTS_CACHE_SIZE = 100;
+
+// Cache for user basic info to avoid repeated user lookups
+const userBasicInfoCache = new Map();
+const USER_BASIC_INFO_CACHE_TTL = 1000 * 60 * 10; // 10 minutes
+const MAX_USER_BASIC_INFO_CACHE_SIZE = 500;
+
 // Query deduplication cache
 const pendingCommentsQueries = new Map();
 
@@ -65,6 +80,88 @@ const setCachedRecentComments = (limit, data) => {
     data,
     timestamp: Date.now()
   });
+};
+
+// Helper functions to manage novel comments cache
+const getCachedNovelComments = (novelId, sort, userId, page = 1, limit = 10, hideChapterComments = false) => {
+  const cacheKey = `novel_${novelId}_${sort}_${userId || 'anonymous'}_${page}_${limit}_${hideChapterComments}`;
+  const cached = novelCommentsCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < NOVEL_COMMENTS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedNovelComments = (novelId, sort, userId, page, limit, hideChapterComments, data) => {
+  if (novelCommentsCache.size >= MAX_NOVEL_COMMENTS_CACHE_SIZE) {
+    const oldestKey = novelCommentsCache.keys().next().value;
+    novelCommentsCache.delete(oldestKey);
+  }
+  
+  const cacheKey = `novel_${novelId}_${sort}_${userId || 'anonymous'}_${page}_${limit}_${hideChapterComments}`;
+  novelCommentsCache.set(cacheKey, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+const clearNovelCommentsCache = (novelId = null) => {
+  if (novelId) {
+    // Clear all cached versions for this novel (different sorts, users, pages, and limits)
+    for (const [key] of novelCommentsCache) {
+      if (key.startsWith(`novel_${novelId}_`)) {
+        novelCommentsCache.delete(key);
+      }
+    }
+  } else {
+    novelCommentsCache.clear();
+  }
+};
+
+// Helper functions to manage user basic info cache
+const getCachedUserBasicInfo = (userIds) => {
+  const results = {};
+  const missingIds = [];
+  
+  userIds.forEach(userId => {
+    const cached = userBasicInfoCache.get(userId.toString());
+    if (cached && Date.now() - cached.timestamp < USER_BASIC_INFO_CACHE_TTL) {
+      results[userId.toString()] = cached.data;
+    } else {
+      missingIds.push(userId);
+    }
+  });
+  
+  return { results, missingIds };
+};
+
+const setCachedUserBasicInfo = (users) => {
+  users.forEach(user => {
+    if (userBasicInfoCache.size >= MAX_USER_BASIC_INFO_CACHE_SIZE) {
+      const oldestKey = userBasicInfoCache.keys().next().value;
+      userBasicInfoCache.delete(oldestKey);
+    }
+    
+    userBasicInfoCache.set(user._id.toString(), {
+      data: {
+        _id: user._id,
+        username: user.username,
+        displayName: user.displayName,
+        avatar: user.avatar,
+        role: user.role,
+        userNumber: user.userNumber
+      },
+      timestamp: Date.now()
+    });
+  });
+};
+
+const clearUserBasicInfoCache = (userId = null) => {
+  if (userId) {
+    userBasicInfoCache.delete(userId.toString());
+  } else {
+    userBasicInfoCache.clear();
+  }
 };
 
 // Query deduplication helper for comments
@@ -90,8 +187,40 @@ const clearRecentCommentsCache = () => {
 };
 
 // Clear all comment-related caches
+// Chapter IDs cache helpers
+const getCachedChapterIds = (novelId) => {
+  const cached = chapterIdsCache.get(novelId);
+  if (cached && Date.now() - cached.timestamp < CHAPTER_IDS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedChapterIds = (novelId, data) => {
+  if (chapterIdsCache.size >= MAX_CHAPTER_IDS_CACHE_SIZE) {
+    const oldestKey = chapterIdsCache.keys().next().value;
+    chapterIdsCache.delete(oldestKey);
+  }
+  
+  chapterIdsCache.set(novelId, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+const clearChapterIdsCache = (novelId = null) => {
+  if (novelId) {
+    chapterIdsCache.delete(novelId);
+  } else {
+    chapterIdsCache.clear();
+  }
+};
+
 const clearAllCommentCaches = () => {
   recentCommentsCache.clear();
+  chapterIdsCache.clear();
+  novelCommentsCache.clear();
+  userBasicInfoCache.clear();
   pendingCommentsQueries.clear();
 };
 
@@ -109,50 +238,123 @@ const clearUserStatsCache = async (userId) => {
   }
 };
 
-// Export the cache clearing functions for use in other routes
-export { clearRecentCommentsCache, clearAllCommentCaches, clearUserStatsCache };
+/**
+ * Helper function to extract novel ID from comment and clear relevant caches
+ * @param {Object} comment - The comment object
+ */
+const clearCachesForComment = async (comment) => {
+  let novelId = null;
+
+  try {
+    if (comment.contentType === 'novels') {
+      novelId = comment.contentId;
+    } else if (comment.contentType === 'chapters') {
+      // For chapters, contentId might be in format "novelId-chapterId"
+      const parts = comment.contentId.split('-');
+      if (parts.length === 2) {
+        novelId = parts[0];
+      } else {
+        // Direct chapter ID, need to lookup novelId
+        const Chapter = (await import('../models/Chapter.js')).default;
+        const chapterDoc = await Chapter.findById(comment.contentId).select('novelId').lean();
+        if (chapterDoc) {
+          novelId = chapterDoc.novelId.toString();
+        }
+      }
+    }
+
+    // Clear caches for the specific novel
+    if (novelId) {
+      clearNovelCommentsCache(novelId);
+      console.log(`Cleared novel comments cache for novel ${novelId}`);
+    }
+
+    // Also clear recent comments cache since comments have changed
+    clearRecentCommentsCache();
+    
+  } catch (error) {
+    console.warn('Error clearing caches for comment:', error);
+    // Fallback to clearing all caches if specific clearing fails
+    clearAllCommentCaches();
+  }
+};
+
+// Export the cache clearing functions and user cache utilities for use in other routes
+export { 
+  clearRecentCommentsCache, 
+  clearAllCommentCaches, 
+  clearUserStatsCache, 
+  clearChapterIdsCache, 
+  clearNovelCommentsCache, 
+  clearUserBasicInfoCache, 
+  clearCachesForComment,
+  getCachedUserBasicInfo,
+  setCachedUserBasicInfo
+};
 
 /**
- * Get all comments for a novel (including chapter comments)
+ * Get all comments for a novel (including chapter comments) with pagination and filtering
  * @route GET /api/comments/novel/:novelId
  */
 router.get('/novel/:novelId', async (req, res) => {
   try {
     const { novelId } = req.params;
-    const { sort = 'newest' } = req.query;
+    const { sort = 'newest', page = 1, limit = 10, hideChapterComments = 'false' } = req.query;
+    const userId = req.user?._id;
 
     if (!novelId) {
       return res.status(400).json({ message: 'novelId is required' });
     }
 
+    // Convert parameters to proper types
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit))); // Max 50 comments per page
+    const skip = (pageNum - 1) * limitNum;
+    const hideChapters = hideChapterComments === 'true';
+
+    // Check cache first (include all parameters in cache key)
+    const cachedComments = getCachedNovelComments(novelId, sort, userId, pageNum, limitNum, hideChapters);
+    if (cachedComments) {
+      return res.json(cachedComments);
+    }
+
     // Use query deduplication to prevent multiple identical requests
-    const cacheKey = `novel_comments_${novelId}_${sort}_${req.user?._id || 'anonymous'}`;
+    const cacheKey = `novel_comments_${novelId}_${sort}_${userId || 'anonymous'}_${pageNum}_${limitNum}_${hideChapters}`;
     
-    const comments = await dedupCommentsQuery(cacheKey, async () => {
-      // Remove separate count query; rely on aggregation below for single round-trip
+    const result = await dedupCommentsQuery(cacheKey, async () => {
 
-      // Get all chapter IDs for this novel (used in aggregation match)
-      const Chapter = (await import('../models/Chapter.js')).default;
-      const chapters = await Chapter.find({ novelId }, '_id');
-      const chapterIds = chapters.map(ch => ch._id.toString());
+      // Get all chapter IDs for this novel (with caching)
+      let chapterIds = getCachedChapterIds(novelId);
+      if (!chapterIds) {
+        const Chapter = (await import('../models/Chapter.js')).default;
+        const chapters = await Chapter.find({ novelId }, '_id').lean();
+        chapterIds = chapters.map(ch => ch._id.toString());
+        setCachedChapterIds(novelId, chapterIds);
+      }
 
-      // Build the aggregation pipeline with proper sorting
+      // Build the aggregation pipeline with proper sorting and filtering
       // Build aggregation pipeline. One request handles filter/sort + lookups
+      let matchConditions = [
+        // Direct novel comments (always included)
+        { contentType: 'novels', contentId: novelId }
+      ];
+
+      // Add chapter comments when showing them (hideChapters = false)
+      if (!hideChapters) {
+        matchConditions.push({
+          contentType: 'chapters', 
+          $or: [
+            { contentId: { $regex: `^${novelId}-` } },
+            ...(chapterIds.length > 0 ? [{ contentId: { $in: chapterIds } }] : [])
+          ]
+        });
+      }
+      // When hideChapters = true, only novel page comments are included (no chapter comments added)
+
       const pipeline = [
         {
           $match: {
-            $or: [
-              // Direct novel comments
-              { contentType: 'novels', contentId: novelId },
-              // Chapter comments
-              { 
-                contentType: 'chapters', 
-                $or: [
-                  { contentId: { $regex: `^${novelId}-` } },
-                  ...(chapterIds.length > 0 ? [{ contentId: { $in: chapterIds } }] : [])
-                ]
-              }
-            ],
+            $or: matchConditions,
             adminDeleted: { $ne: true }
           }
         },
@@ -164,61 +366,21 @@ router.get('/novel/:novelId', async (req, res) => {
       ];
 
       // Add sorting to the pipeline for better performance
+      // IMPORTANT: Always sort pinned comments first, then by selected criteria
       switch (sort) {
         case 'likes':
-          pipeline.push({ $sort: { likesCount: -1, createdAt: -1 } });
+          pipeline.push({ $sort: { isPinned: -1, likesCount: -1, createdAt: -1 } });
           break;
         case 'oldest':
-          pipeline.push({ $sort: { createdAt: 1 } });
+          pipeline.push({ $sort: { isPinned: -1, createdAt: 1 } });
           break;
         default: // newest
-          pipeline.push({ $sort: { createdAt: -1 } });
+          pipeline.push({ $sort: { isPinned: -1, createdAt: -1 } });
       }
 
-      // Add user lookup
-      pipeline.push(
-        {
-          $lookup: {
-            from: 'users',
-            localField: 'user',
-            foreignField: '_id',
-            pipeline: [
-              { $project: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 } }
-            ],
-            as: 'userInfo'
-          }
-        },
-        {
-          $unwind: '$userInfo'
-        }
-      );
-
-      // Add novel lookup for role checking
-      pipeline.push({
-        $lookup: {
-          from: 'novels',
-          let: { contentId: '$contentId' },
-          pipeline: [
-            {
-              $match: {
-                $expr: { $eq: [{ $toString: '$_id' }, novelId] }
-              }
-            },
-            {
-              $project: {
-                'active.pj_user': 1,
-                'active.translator': 1,
-                'active.editor': 1,
-                'active.proofreader': 1
-              }
-            }
-          ],
-          as: 'novelInfo'
-        }
-      });
-
-      // Add chapter info lookup only if we have chapter IDs
-      if (chapterIds.length > 0) {
+      // Optimized: Don't do user lookup in aggregation - we'll do it separately with caching
+      // Only add chapter info lookup if we have chapter IDs and we're not hiding chapters
+      if (chapterIds.length > 0 && !hideChapters) {
         pipeline.push({
           $lookup: {
             from: 'chapters',
@@ -261,7 +423,19 @@ router.get('/novel/:novelId', async (req, res) => {
         });
       }
 
-      // Final projection
+      // Get total count first - but only count ROOT comments for pagination
+      const rootCountPipeline = [...pipeline];
+      rootCountPipeline.push({ $match: { parentId: null } }); // Only count root comments
+      rootCountPipeline.push({ $count: "totalComments" });
+      const countResult = await Comment.aggregate(rootCountPipeline);
+      const totalComments = countResult.length > 0 ? countResult[0].totalComments : 0;
+
+      // Add root comment filter and pagination to main pipeline
+      pipeline.push({ $match: { parentId: null } }); // Only get root comments for pagination
+      pipeline.push({ $skip: skip });
+      pipeline.push({ $limit: limitNum });
+
+      // Final projection - exclude user lookup from aggregation
       pipeline.push({
         $project: {
           _id: 1,
@@ -276,45 +450,184 @@ router.get('/novel/:novelId', async (req, res) => {
           likesCount: 1,
           isPinned: 1,
           isEdited: 1,
-          chapterInfo: { $arrayElemAt: ['$chapterInfo', 0] },
-                      user: {
-              _id: '$userInfo._id',
-              username: '$userInfo.username',
-              displayName: '$userInfo.displayName',
-              avatar: '$userInfo.avatar',
-              role: '$userInfo.role',
-              userNumber: '$userInfo.userNumber'
-            },
-          novelInfo: { $arrayElemAt: ['$novelInfo', 0] }
+          user: 1, // Keep user ID for separate lookup
+          chapterInfo: { $arrayElemAt: ['$chapterInfo', 0] }
         }
       });
 
-      const allComments = await Comment.aggregate(pipeline);
+      const rootComments = await Comment.aggregate(pipeline);
 
-      // Get novel-specific roles for comment authors using the novel data from aggregation
-      const userIds = [...new Set(allComments.map(comment => comment.user._id))];
-      const novelRoles = allComments[0]?.novelInfo ? await getNovelRoles(allComments[0].novelInfo, userIds) : {};
+      if (rootComments.length === 0) {
+        return {
+          comments: [],
+          pagination: {
+            currentPage: pageNum,
+            totalPages: Math.ceil(totalComments / limitNum),
+            totalComments,
+            hasNext: false,
+            hasPrev: pageNum > 1,
+            limit: limitNum
+          }
+        };
+      }
 
-      // Add liked status and novel-specific roles if user is authenticated
-      if (req.user) {
-        const userId = req.user._id;
-        allComments.forEach(comment => {
-          comment.liked = comment.likes.includes(userId);
+      // Now fetch all replies for the paginated root comments
+      const rootCommentIds = rootComments.map(comment => comment._id);
+      
+      const repliesPipeline = [
+        {
+          $match: {
+            parentId: { $in: rootCommentIds },
+            adminDeleted: { $ne: true }
+          }
+        },
+        {
+          $addFields: {
+            likesCount: { $size: "$likes" }
+          }
+        },
+        { $sort: { createdAt: 1 } }, // Replies sorted by oldest first
+        {
+          $project: {
+            _id: 1,
+            text: 1,
+            contentType: 1,
+            contentId: 1,
+            parentId: 1,
+            createdAt: 1,
+            isDeleted: 1,
+            adminDeleted: 1,
+            likes: 1,
+            likesCount: 1,
+            isPinned: 1,
+            isEdited: 1,
+            user: 1
+          }
+        }
+      ];
+
+      const replies = await Comment.aggregate(repliesPipeline);
+      
+      // Combine root comments and replies for unified user lookup
+      const allComments = [...rootComments, ...replies];
+
+      // OPTIMIZED: Batch user lookups with caching
+      const userIds = [...new Set(allComments.map(comment => comment.user))];
+      const { results: cachedUsers, missingIds } = getCachedUserBasicInfo(userIds);
+      
+      // Fetch missing users from database
+      let freshUsers = [];
+      if (missingIds.length > 0) {
+        const User = (await import('../models/User.js')).default;
+        freshUsers = await User.find(
+          { _id: { $in: missingIds } },
+          { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 }
+        ).lean();
+        
+        // Cache the fresh users
+        setCachedUserBasicInfo(freshUsers);
+        
+        // Add to results
+        freshUsers.forEach(user => {
+          cachedUsers[user._id.toString()] = {
+            _id: user._id,
+            username: user.username,
+            displayName: user.displayName,
+            avatar: user.avatar,
+            role: user.role,
+            userNumber: user.userNumber
+          };
         });
       }
 
-      // Add novel-specific roles to each comment
-      allComments.forEach(comment => {
-        const userIdStr = comment.user._id.toString();
-        comment.user.novelRoles = novelRoles[userIdStr] || [];
-        // Clean up the novelInfo since we don't need to send it to client
-        delete comment.novelInfo;
+      // OPTIMIZED: Single novel lookup for roles (instead of in aggregation)
+      const Novel = (await import('../models/Novel.js')).default;
+      const novel = await Novel.findById(novelId, {
+        'active.pj_user': 1,
+        'active.translator': 1,
+        'active.editor': 1,
+        'active.proofreader': 1
+      }).lean();
+
+      const novelRoles = novel ? await getNovelRoles(novel, userIds) : {};
+
+      // Organize comments: attach replies to their parent root comments
+      const repliesByParent = new Map();
+      
+      // Group replies by parent ID
+      replies.forEach(reply => {
+        const parentId = reply.parentId.toString();
+        if (!repliesByParent.has(parentId)) {
+          repliesByParent.set(parentId, []);
+        }
+        repliesByParent.get(parentId).push(reply);
+      });
+      
+      // Attach replies to root comments and apply user info
+      const organizedComments = rootComments.map(comment => {
+        const userIdStr = comment.user.toString();
+        const userInfo = cachedUsers[userIdStr];
+        
+        const commentWithUser = {
+          ...comment,
+          user: {
+            ...userInfo,
+            novelRoles: novelRoles[userIdStr] || []
+          }
+        };
+
+        // Add liked status if user is authenticated
+        if (userId) {
+          commentWithUser.liked = comment.likes.includes(userId);
+        }
+
+        // Attach replies to this root comment
+        const commentReplies = repliesByParent.get(comment._id.toString()) || [];
+        commentWithUser.replies = commentReplies.map(reply => {
+          const replyUserIdStr = reply.user.toString();
+          const replyUserInfo = cachedUsers[replyUserIdStr];
+          
+          const replyWithUser = {
+            ...reply,
+            user: {
+              ...replyUserInfo,
+              novelRoles: novelRoles[replyUserIdStr] || []
+            }
+          };
+
+          // Add liked status if user is authenticated
+          if (userId) {
+            replyWithUser.liked = reply.likes.includes(userId);
+          }
+
+          return replyWithUser;
+        });
+
+        return commentWithUser;
       });
 
-      return allComments;
+      // Calculate pagination info
+      const totalPages = Math.ceil(totalComments / limitNum);
+      const hasNext = pageNum < totalPages;
+      const hasPrev = pageNum > 1;
+
+      return {
+        comments: organizedComments,
+        pagination: {
+          currentPage: pageNum,
+          totalPages,
+          totalComments,
+          hasNext,
+          hasPrev,
+          limit: limitNum
+        }
+      };
     });
 
-    res.json(comments);
+    // Cache the result for future requests
+    setCachedNovelComments(novelId, sort, userId, pageNum, limitNum, hideChapters, result);
+    
+    res.json(result);
   } catch (err) {
     console.error('Error fetching novel comments:', err);
     res.status(500).json({ message: err.message });
@@ -357,15 +670,16 @@ router.get('/', async (req, res) => {
       ];
 
       // Add sorting to the pipeline for better performance
+      // IMPORTANT: Always sort pinned comments first, then by selected criteria
       switch (sort) {
         case 'likes':
-          pipeline.push({ $sort: { likesCount: -1, createdAt: -1 } });
+          pipeline.push({ $sort: { isPinned: -1, likesCount: -1, createdAt: -1 } });
           break;
         case 'oldest':
-          pipeline.push({ $sort: { createdAt: 1 } });
+          pipeline.push({ $sort: { isPinned: -1, createdAt: 1 } });
           break;
         default: // newest
-          pipeline.push({ $sort: { createdAt: -1 } });
+          pipeline.push({ $sort: { isPinned: -1, createdAt: -1 } });
       }
 
       // Add user lookup and projection
@@ -705,8 +1019,8 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     // Save the reply
     await reply.save();
     
-    // Clear all comment caches since a new comment was added
-    clearAllCommentCaches();
+    // Clear targeted caches for this comment (using parent comment to determine novel)
+    await clearCachesForComment(parentComment);
     
     // Clear user stats cache for the comment author
     clearUserStatsCache(req.user._id.toString());
@@ -962,6 +1276,9 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
       }
     }
 
+    // Clear targeted caches for this comment since like count changed
+    await clearCachesForComment(comment);
+
     // Broadcast real-time update to all connected clients
     broadcastEvent('comment_like_update', {
       commentId: comment._id.toString(),
@@ -1053,8 +1370,8 @@ router.post('/:commentId/pin', auth, async (req, res) => {
       comment.isPinned = false;
       await comment.save();
       
-      // Clear all comment caches since pin status changed
-      clearAllCommentCaches();
+      // Clear targeted caches for this comment
+      await clearCachesForComment(comment);
       
       res.json({
         isPinned: false,
@@ -1078,8 +1395,8 @@ router.post('/:commentId/pin', auth, async (req, res) => {
       comment.isPinned = true;
       await comment.save();
       
-      // Clear all comment caches since pin status changed
-      clearAllCommentCaches();
+      // Clear targeted caches for this comment
+      await clearCachesForComment(comment);
       
       res.json({
         isPinned: true,
@@ -1110,8 +1427,8 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
 
     await comment.save();
     
-    // Clear all comment caches since a new comment was added
-    clearAllCommentCaches();
+    // Clear targeted caches for this comment
+    await clearCachesForComment(comment);
     
     // Clear user stats cache for the comment author
     clearUserStatsCache(req.user._id.toString());
@@ -1192,8 +1509,8 @@ router.patch('/:commentId', auth, checkBan, async (req, res) => {
 
     await comment.save();
     
-    // Clear all comment caches since a comment was edited
-    clearAllCommentCaches();
+    // Clear targeted caches for this comment
+    await clearCachesForComment(comment);
     
     // Populate user info before returning
     await comment.populate('user', 'username displayName avatar role userNumber');
@@ -1307,6 +1624,9 @@ router.delete('/:commentId', auth, async (req, res) => {
     }
 
     await comment.save();
+    
+    // Clear targeted caches for this comment
+    await clearCachesForComment(comment);
     
     // Clear user stats cache for the comment author
     clearUserStatsCache(comment.user.toString());

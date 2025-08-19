@@ -30,6 +30,10 @@ const userNovelInteractionSchema = new mongoose.Schema({
     default: null,
     maxlength: 1000
   },
+  reviewLikes: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
   bookmarked: {
     type: Boolean,
     default: false
@@ -52,5 +56,16 @@ userNovelInteractionSchema.index({ novelId: 1, rating: 1 });
 userNovelInteractionSchema.index({ novelId: 1, bookmarked: 1 });
 userNovelInteractionSchema.index({ userId: 1, bookmarked: 1 });
 userNovelInteractionSchema.index({ novelId: 1, review: 1, updatedAt: -1 });
+userNovelInteractionSchema.index({ novelId: 1, reviewLikes: 1 });
+
+// Optimized compound index for stats aggregation
+userNovelInteractionSchema.index({ 
+  novelId: 1, 
+  liked: 1, 
+  rating: 1, 
+  bookmarked: 1 
+}, { 
+  name: 'novel_stats_compound_idx' 
+});
 
 export default mongoose.model('UserNovelInteraction', userNovelInteractionSchema); 

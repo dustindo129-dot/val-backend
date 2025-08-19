@@ -4,6 +4,7 @@ import { auth, optionalAuth } from '../middleware/auth.js';
 import admin from '../middleware/admin.js';
 import Chapter from '../models/Chapter.js';
 import { clearNovelCaches, notifyAllClients } from '../utils/cacheUtils.js';
+import { clearContributionHistoryCache } from './novels.js';
 import { createNewChapterNotifications } from '../services/notificationService.js';
 import Novel from '../models/Novel.js';
 import mongoose from 'mongoose';
@@ -1650,6 +1651,9 @@ router.post('/:moduleId/rent', auth, async (req, res) => {
 
     // Clear novel caches
     clearNovelCaches();
+    
+    // Clear contribution history cache since rental income affects novel budget
+    clearContributionHistoryCache(novel._id);
 
     // Check for auto-unlock since rental increases novelBudget
     try {

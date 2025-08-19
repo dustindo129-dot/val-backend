@@ -5,7 +5,26 @@ import admin from "../middleware/admin.js";
 import Chapter from "../models/Chapter.js";
 import Module from "../models/Module.js";
 import { cache, clearNovelCaches, notifyAllClients, shouldBypassCache, registerCacheMap } from '../utils/cacheUtils.js';
+import { clearNovelCommentsCache, getCachedUserBasicInfo, setCachedUserBasicInfo, clearUserBasicInfoCache } from './comments.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
+
+// Import cache clearing function for user novel interaction caches
+const clearUserNovelInteractionCaches = (() => {
+  try {
+    // Dynamic import to avoid circular dependency
+    return {
+      clearNovelStatsCache: null,
+      clearUserInteractionCache: null,
+      clearReviewsCache: null
+    };
+  } catch {
+    return {
+      clearNovelStatsCache: () => console.warn('Could not clear novel stats cache'),
+      clearUserInteractionCache: () => console.warn('Could not clear user interaction cache'), 
+      clearReviewsCache: () => console.warn('Could not clear reviews cache')
+    };
+  }
+})();
 import { addClient, removeClient, sseClients, broadcastEvent, listConnectedClients, performHealthCheck, analyzeTabBehavior, getTabConnectionHistory, isTabBlocked, trackIgnoredDuplicate } from '../services/sseService.js';
 import Request from '../models/Request.js';
 import Contribution from '../models/Contribution.js';
@@ -110,6 +129,50 @@ const QUERY_CACHE_TTL = 1000 * 60 * 5; // 5 minutes cache
 
 // Register the cache map so it can be cleared by cacheUtils
 registerCacheMap(queryCacheMap);
+
+// Cache for contribution history to reduce database queries
+const contributionHistoryCache = new Map();
+const CONTRIBUTION_HISTORY_CACHE_TTL = 1000 * 60 * 5; // 5 minutes - balance between freshness and performance
+const MAX_CONTRIBUTION_HISTORY_CACHE_SIZE = 100;
+
+// Register contribution history cache so it can be cleared
+registerCacheMap(contributionHistoryCache);
+
+// Helper functions for contribution history caching
+const getCachedContributionHistory = (novelId, page, limit) => {
+  const cacheKey = `contribution_history_${novelId}_${page}_${limit}`;
+  const cached = contributionHistoryCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < CONTRIBUTION_HISTORY_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedContributionHistory = (novelId, page, limit, data) => {
+  if (contributionHistoryCache.size >= MAX_CONTRIBUTION_HISTORY_CACHE_SIZE) {
+    const oldestKey = contributionHistoryCache.keys().next().value;
+    contributionHistoryCache.delete(oldestKey);
+  }
+  
+  const cacheKey = `contribution_history_${novelId}_${page}_${limit}`;
+  contributionHistoryCache.set(cacheKey, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+const clearContributionHistoryCache = (novelId = null) => {
+  if (novelId) {
+    // Clear all cached versions for this novel (different pages/limits)
+    for (const [key] of contributionHistoryCache) {
+      if (key.startsWith(`contribution_history_${novelId}_`)) {
+        contributionHistoryCache.delete(key);
+      }
+    }
+  } else {
+    contributionHistoryCache.clear();
+  }
+};
 
 const dedupQuery = async (key, queryFn, cacheTtl = QUERY_CACHE_TTL) => {
   // Check cache first
@@ -1371,7 +1434,6 @@ router.get("/", optionalAuth, async (req, res) => {
       const cachedData = bypass ? null : cache.get(cacheKey);
       
       if (cachedData && !bypass) {
-        console.log('Serving novel list from cache');
         return res.json(cachedData);
       }
 
@@ -1508,7 +1570,6 @@ router.get("/", optionalAuth, async (req, res) => {
     const cachedData = bypass ? null : cache.get(cacheKey);
     
     if (cachedData && !bypass) {
-      console.log('Serving novel list from cache');
       return res.json(cachedData);
     }
 
@@ -2211,10 +2272,13 @@ router.put("/:id", [auth, admin], async (req, res) => {
     // Save the updated novel
     const updatedNovel = await novel.save();
 
-    // Clear novel caches
-    clearNovelCaches();
+          // Clear novel caches
+      clearNovelCaches();
+      
+      // Clear contribution history cache since a contribution was made
+      clearContributionHistoryCache(novelId);
 
-    // Notify SSE clients about the update
+      // Notify SSE clients about the update
     notifyAllClients({
       type: 'novel-updated',
       data: {
@@ -2395,6 +2459,12 @@ router.delete("/:id", auth, async (req, res) => {
     // Clear all novel-related caches after deletion
     clearNovelCaches();
     
+    // Clear comments cache for this novel
+    clearNovelCommentsCache(novelId);
+    
+    // Clear contribution history cache for this novel
+    clearContributionHistoryCache(novelId);
+    
     // Send special notification about novel deletion
     notifyAllClients('novel_deleted', { 
       id: novelId,
@@ -2494,6 +2564,11 @@ router.patch("/:id/balance", auth, async (req, res) => {
     }
     
     await session.commitTransaction();
+    
+    // Clear contribution history cache since novel balance was manually adjusted
+    if (change !== 0) {
+      clearContributionHistoryCache(novelId);
+    }
     
     // Remove the temporary oldBalance field from response
     const { oldBalance: _, ...responseNovel } = result.toObject();
@@ -3042,8 +3117,10 @@ router.post("/:id/contribute", auth, async (req, res) => {
       await session.commitTransaction();
 
       // Clear caches and notify clients after successful transaction
+      clearNovelCaches();
+      clearContributionHistoryCache(novelId);
+      
       if (autoUnlockResult.unlockedContent.length > 0 || autoUnlockResult.switchedModules.length > 0) {
-        clearNovelCaches();
         
         // Send notifications for unlocked content
         autoUnlockResult.unlockedContent.forEach(content => {
@@ -3297,7 +3374,7 @@ async function performAutoUnlockInTransaction(novelId, session) {
 }
 
 /**
- * Get contribution history for a novel
+ * Get contribution history for a novel (OPTIMIZED WITH CACHING)
  * @route GET /api/novels/:id/contribution-history
  */
 router.get("/:id/contribution-history", async (req, res) => {
@@ -3310,69 +3387,113 @@ router.get("/:id/contribution-history", async (req, res) => {
     const limit = Math.min(limitRaw, 100); // hard cap to avoid excessive loads
     const skip = (page - 1) * limit;
 
-    // Check if novel exists
-    const novel = await Novel.findById(novelId);
-    if (!novel) {
-      return res.status(404).json({ message: "Novel not found" });
+    // Check cache first
+    const cachedData = getCachedContributionHistory(novelId, page, limit);
+    if (cachedData) {
+      return res.json(cachedData);
     }
 
-    // Count total for pagination
-    const totalItems = await ContributionHistory.countDocuments({ novelId });
+    // Use query deduplication to prevent multiple identical requests
+    const cacheKey = `contribution_history_${novelId}_${page}_${limit}`;
+    
+    const result = await dedupQuery(cacheKey, async () => {
 
-    // Find contribution history for this novel (without populate to avoid individual queries)
-    const contributions = await ContributionHistory.find({ novelId })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
-
-    // Extract unique user IDs
-    const userIds = [...new Set(contributions
-      .map(contribution => contribution.userId)
-      .filter(userId => userId) // Filter out null/undefined userIds (system contributions)
-    )];
-
-    // Batch fetch users to avoid individual queries
-    const User = mongoose.model('User');
-    const users = await User.find({ _id: { $in: userIds } })
-      .select('_id username avatar displayName')
-      .lean();
-
-    // Create user lookup map
-    const userMap = users.reduce((map, user) => {
-      map[user._id.toString()] = {
-        _id: user._id,
-        username: user.username,
-        avatar: user.avatar,
-        displayName: user.displayName
-      };
-      return map;
-    }, {});
-
-    // Format the response with batched user data
-    const formattedContributions = contributions.map(contribution => ({
-      _id: contribution._id,
-      user: contribution.userId ? userMap[contribution.userId.toString()] : null,
-      amount: contribution.amount,
-      note: contribution.note,
-      budgetAfter: contribution.budgetAfter,
-      type: contribution.type,
-      createdAt: contribution.createdAt,
-      updatedAt: contribution.updatedAt
-    }));
-
-    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
-    res.json({ 
-      contributions: formattedContributions,
-      pagination: {
-        page,
-        limit,
-        totalItems,
-        totalPages,
-        hasPrev: page > 1,
-        hasNext: page < totalPages
+      // Check if novel exists
+      const novel = await Novel.findById(novelId);
+      if (!novel) {
+        return { error: "Novel not found", status: 404 };
       }
+
+      // Count total for pagination
+      const totalItems = await ContributionHistory.countDocuments({ novelId });
+
+      // Find contribution history for this novel (without populate to avoid individual queries)
+      const contributions = await ContributionHistory.find({ novelId })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean();
+
+      if (contributions.length === 0) {
+        return {
+          contributions: [],
+          pagination: {
+            page,
+            limit,
+            totalItems: 0,
+            totalPages: 1,
+            hasPrev: false,
+            hasNext: false
+          }
+        };
+      }
+
+      // OPTIMIZED: Use cached user lookups
+      const userIds = [...new Set(contributions
+        .map(contribution => contribution.userId)
+        .filter(userId => userId) // Filter out null/undefined userIds (system contributions)
+      )];
+
+      const { results: cachedUsers, missingIds } = getCachedUserBasicInfo(userIds);
+      
+      // Fetch missing users from database
+      let freshUsers = [];
+      if (missingIds.length > 0) {
+        const User = mongoose.model('User');
+        freshUsers = await User.find(
+          { _id: { $in: missingIds } },
+          { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 }
+        ).lean();
+        
+        // Cache the fresh users
+        setCachedUserBasicInfo(freshUsers);
+        
+        // Add to results
+        freshUsers.forEach(user => {
+          cachedUsers[user._id.toString()] = {
+            _id: user._id,
+            username: user.username,
+            displayName: user.displayName,
+            avatar: user.avatar
+          };
+        });
+      }
+
+      // Format the response with cached user data
+      const formattedContributions = contributions.map(contribution => ({
+        _id: contribution._id,
+        user: contribution.userId ? cachedUsers[contribution.userId.toString()] : null,
+        amount: contribution.amount,
+        note: contribution.note,
+        budgetAfter: contribution.budgetAfter,
+        type: contribution.type,
+        createdAt: contribution.createdAt,
+        updatedAt: contribution.updatedAt
+      }));
+
+      const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+      return { 
+        contributions: formattedContributions,
+        pagination: {
+          page,
+          limit,
+          totalItems,
+          totalPages,
+          hasPrev: page > 1,
+          hasNext: page < totalPages
+        }
+      };
     });
+
+    // Handle deduplication errors
+    if (result.error) {
+      return res.status(result.status).json({ message: result.error });
+    }
+
+    // Cache the result for future requests
+    setCachedContributionHistory(novelId, page, limit, result);
+
+    res.json(result);
 
   } catch (err) {
     console.error("Error fetching contribution history:", err);
@@ -4485,5 +4606,8 @@ router.post('/batch', optionalAuth, async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch novels' });
   }
 });
+
+// Export cache clearing function for use in other routes
+export { clearContributionHistoryCache };
 
 export default router;
