@@ -411,9 +411,16 @@ router.post('/rate', auth, async (req, res) => {
         review: review || null
       });
     } else {
+      const oldRating = interaction.rating;
+      const oldReview = interaction.review;
+      
       interaction.rating = rating;
       // Only update review if provided
       if (review !== undefined) {
+        // Check if review content has changed
+        if (oldReview !== null && oldReview !== review) {
+          interaction.reviewIsEdited = true;
+        }
         interaction.review = review;
       }
       // updatedAt will be automatically updated by Mongoose timestamps
@@ -813,6 +820,7 @@ router.get('/reviews/:novelId', async (req, res) => {
       date: review.updatedAt,
       createdAt: review.createdAt,
       updatedAt: review.updatedAt,
+      reviewIsEdited: review.reviewIsEdited || false,
       reviewLikes: review.reviewLikes || [],
       likesCount: (review.reviewLikes || []).length,
       isLikedByCurrentUser: req.user ? (review.reviewLikes || []).includes(req.user._id) : false

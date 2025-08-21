@@ -30,6 +30,10 @@ const userNovelInteractionSchema = new mongoose.Schema({
     default: null,
     maxlength: 1000
   },
+  reviewIsEdited: {
+    type: Boolean,
+    default: false
+  },
   reviewLikes: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
