@@ -1367,7 +1367,6 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
         await createCommentReplyNotification(
           parentComment.user.toString(),
           reply._id.toString(),
-          req.user.username,
           novelId,
           chapterId
         );

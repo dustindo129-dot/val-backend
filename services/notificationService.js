@@ -82,11 +82,10 @@ export const createReportFeedbackNotification = async (reporterId, reportId, res
  * Create a notification for comment reply
  * @param {string} originalCommenterId - ID of the user who made the original comment
  * @param {string} replyCommentId - ID of the reply comment
- * @param {string} replierUsername - Username of the person who replied (deprecated, now using display name from user object)
  * @param {string} novelId - ID of the novel where the comment was made
  * @param {string} chapterId - ID of the chapter where the comment was made (optional)
  */
-export const createCommentReplyNotification = async (originalCommenterId, replyCommentId, replierUsername, novelId, chapterId = null) => {
+export const createCommentReplyNotification = async (originalCommenterId, replyCommentId, novelId, chapterId = null) => {
   try {
     // Don't notify if user is replying to themselves
     const replyComment = await Comment.findById(replyCommentId).populate('user');
