@@ -8,6 +8,7 @@ import User from '../models/User.js';
 import ContributionHistory from '../models/ContributionHistory.js';
 import { createGiftTransactions } from './novelTransactions.js';
 import { clearContributionHistoryCache } from './novels.js';
+import { clearNovelCaches } from '../utils/cacheUtils.js';
 import mongoose from 'mongoose';
 
 const router = express.Router();
@@ -257,6 +258,9 @@ router.post('/send', auth, async (req, res) => {
 
     await session.commitTransaction();
 
+    // Clear all novel-related caches since gift data affects complete novel response
+    clearNovelCaches();
+    
     // Clear gifts cache for this novel since counts have changed
     clearGiftsCache(novelId);
     

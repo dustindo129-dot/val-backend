@@ -4,6 +4,7 @@ import { auth } from '../middleware/auth.js';
 import UserNovelInteraction from '../models/UserNovelInteraction.js';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import Novel from '../models/Novel.js';
+import { validateNovelExists } from '../utils/novelValidation.js';
 
 const router = express.Router();
 
@@ -320,8 +321,8 @@ router.post('/like', auth, async (req, res) => {
       return res.status(400).json({ message: 'Novel ID is required' });
     }
 
-    // Check if novel exists
-    const novel = await Novel.findById(novelId);
+    // Check if novel exists using optimized validation
+    const novel = await validateNovelExists(novelId);
     if (!novel) {
       return res.status(404).json({ message: "Novel not found" });
     }
@@ -394,8 +395,8 @@ router.post('/rate', auth, async (req, res) => {
       return res.status(400).json({ message: "Rating must be between 1 and 5" });
     }
 
-    // Check if novel exists
-    const novel = await Novel.findById(novelId);
+    // Check if novel exists using optimized validation
+    const novel = await validateNovelExists(novelId);
     if (!novel) {
       return res.status(404).json({ message: "Novel not found" });
     }
@@ -483,8 +484,8 @@ router.delete('/rate/:novelId', auth, async (req, res) => {
     const novelId = req.params.novelId;
     const userId = req.user._id;
 
-    // Check if novel exists
-    const novel = await Novel.findById(novelId);
+    // Check if novel exists using optimized validation
+    const novel = await validateNovelExists(novelId);
     if (!novel) {
       return res.status(404).json({ message: "Novel not found" });
     }
@@ -557,8 +558,8 @@ router.post('/bookmark', auth, async (req, res) => {
       return res.status(400).json({ message: 'Novel ID is required' });
     }
 
-    // Check if novel exists
-    const novel = await Novel.findById(novelId);
+    // Check if novel exists using optimized validation
+    const novel = await validateNovelExists(novelId);
     if (!novel) {
       return res.status(404).json({ message: "Novel not found" });
     }
@@ -789,8 +790,8 @@ router.get('/reviews/:novelId', async (req, res) => {
       return res.json(cachedReviews);
     }
     
-    // Check if novel exists
-    const novel = await Novel.findById(novelId);
+    // Check if novel exists using optimized validation
+    const novel = await validateNovelExists(novelId);
     if (!novel) {
       return res.status(404).json({ message: "Novel not found" });
     }

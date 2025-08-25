@@ -38,6 +38,7 @@ import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import { getCachedUserByUsername, clearUserCache } from '../utils/userCache.js';
 import { populateStaffNames } from '../utils/populateStaffNames.js';
 import { checkAndSwitchRentModuleToPublished, conditionallyRecalculateRentBalance } from './modules.js';
+import { clearNovelExistsCache } from '../utils/novelValidation.js';
 
 /**
  * Import the functions from modules.js
@@ -3593,8 +3594,12 @@ router.get("/:id/complete", async (req, res) => {
     
     const userId = req.user ? req.user._id : null;
     
-    // Use query deduplication to prevent multiple identical requests
-    const result = await dedupQuery(`novel-complete:${novelId}:${userId || 'guest'}`, async () => {
+    // Enhanced caching with longer TTL for complete data
+    const cacheKey = `novel-complete:${novelId}:${userId || 'guest'}`;
+    const cacheTTL = 1000 * 60 * 10; // 10 minutes for complete data
+    
+    // Use query deduplication with enhanced caching
+    const result = await dedupQuery(cacheKey, async () => {
       // Execute all queries in parallel for maximum performance
       const [
         novel, 
@@ -3743,7 +3748,7 @@ router.get("/:id/complete", async (req, res) => {
         interactions,
         contributionHistory
       };
-    });
+    }, cacheTTL);
 
     // Handle deduplication errors
     if (result.error) {

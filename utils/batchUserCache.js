@@ -186,6 +186,11 @@ const performBatchLookup = async (identifiers, options = {}) => {
       _id: 1 
     };
 
+    // Deduplicate ObjectIds in the query conditions to avoid duplicate IDs in database queries
+    if (queryConditions.length === 1 && queryConditions[0]._id && queryConditions[0]._id.$in) {
+      queryConditions[0]._id.$in = [...new Set(queryConditions[0]._id.$in.map(id => id.toString()))];
+    }
+
     // Log batch query for debugging duplicate issues
     if (process.env.NODE_ENV === 'development') {
     }

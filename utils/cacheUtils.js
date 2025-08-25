@@ -49,6 +49,14 @@ export const clearNovelCaches = () => {
       });
     }
   });
+  
+  // Clear novel existence validation cache
+  try {
+    const { clearNovelExistsCache } = require('./novelValidation.js');
+    clearNovelExistsCache();
+  } catch (error) {
+    // Ignore if novel validation cache is not available
+  }
 };
 
 /**

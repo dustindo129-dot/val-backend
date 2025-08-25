@@ -275,6 +275,20 @@ export const clearUserCache = (userId = null, username = null, userNumber = null
     userIdResolutionCache.clear();
     globalUserQueryDeduplication.clear();
   }
+
+  // CRITICAL FIX: Also clear batch user cache when individual user data changes
+  // This is important because batch queries might have cached stale user data
+  if (userId || username || userNumber) {
+    try {
+      import('./batchUserCache.js').then(({ clearBatchUserCache }) => {
+        clearBatchUserCache();
+      }).catch(err => {
+        console.error('Failed to clear batch user cache:', err);
+      });
+    } catch (error) {
+      // Ignore if batch cache module is not available
+    }
+  }
 };
 
 // Comprehensive cache clearing for user data changes

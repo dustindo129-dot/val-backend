@@ -5,6 +5,7 @@ import { broadcastEvent } from '../services/sseService.js';
 import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification, createCommentDeletionNotification } from '../services/notificationService.js';
 import { clearChapterCommentsCache, extractCommentIdentifiers } from '../utils/chapterCacheUtils.js';
 import { batchGetUsers } from '../utils/batchUserCache.js';
+import { validateNovelExists } from '../utils/novelValidation.js';
 
 // Helper function to get novel-specific roles for users
 const getNovelRoles = async (novel, userIds) => {
@@ -647,14 +648,15 @@ router.get('/novel/:novelId', async (req, res) => {
         projection: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 }
       });
 
-      // OPTIMIZED: Single novel lookup for roles (instead of in aggregation)
-      const Novel = (await import('../models/Novel.js')).default;
-      const novel = await Novel.findById(novelId, {
-        'active.pj_user': 1,
-        'active.translator': 1,
-        'active.editor': 1,
-        'active.proofreader': 1
-      }).lean();
+      // OPTIMIZED: Use cached novel validation for role checking
+      const novel = await validateNovelExists(novelId, {
+        projection: {
+          'active.pj_user': 1,
+          'active.translator': 1,
+          'active.editor': 1,
+          'active.proofreader': 1
+        }
+      });
 
       const novelRoles = novel ? await getNovelRoles(novel, userIds) : {};
 
@@ -1021,8 +1023,7 @@ router.get('/', async (req, res) => {
       // Get novel information for role checking
       let novel = null;
       if (contentType === 'novels') {
-        const Novel = (await import('../models/Novel.js')).default;
-        novel = await Novel.findById(contentId);
+        novel = await validateNovelExists(contentId);
       } else if (contentType === 'chapters') {
         // For chapters, get the novel from the chapter
         const Novel = (await import('../models/Novel.js')).default;
@@ -1043,7 +1044,7 @@ router.get('/', async (req, res) => {
         
         if (novelId) {
           // Use the extracted novelId to get novel directly
-          novel = await Novel.findById(novelId);
+          novel = await validateNovelExists(novelId);
         } else {
           // Fallback: lookup novelId from chapter document
           console.log(`Making database lookup for novelId, contentId: ${contentId}`);
@@ -1676,8 +1677,11 @@ router.post('/:commentId/pin', auth, async (req, res) => {
     if (req.user.role === 'pj_user' && novelId) {
       try {
         // Import Novel model to check pj_user assignment
-        const Novel = (await import('../models/Novel.js')).default;
-        const novel = await Novel.findById(novelId);
+        const novel = await validateNovelExists(novelId, {
+          projection: {
+            'active.pj_user': 1
+          }
+        });
         if (novel && novel.active && novel.active.pj_user) {
           canPinAsPjUser = novel.active.pj_user.includes(req.user._id) ||
                           novel.active.pj_user.includes(req.user.username) ||
