@@ -176,8 +176,8 @@ const getCachedComments = async (chapterId, novelId, userId = null, page = 1, li
       chapterId // Old format: just chapterId
     ];
     
-    // Optimized: Use facet aggregation to get count, comments, and reply counts in a single query
-    const results = await Comment.aggregate([
+    // OPTIMIZATION 1: Use $facet to combine root comments and count queries
+    const facetResults = await Comment.aggregate([
       {
         $match: {
           contentType: 'chapters',
@@ -192,8 +192,8 @@ const getCachedComments = async (chapterId, novelId, userId = null, page = 1, li
             { $match: { parentId: null } },
             { $count: 'total' }
           ],
-          // Get paginated root comments with user info
-          comments: [
+          // Get paginated root comments
+          rootComments: [
             { $match: { parentId: null } },
             {
               $addFields: {
@@ -204,18 +204,6 @@ const getCachedComments = async (chapterId, novelId, userId = null, page = 1, li
             { $sort: { isPinnedSort: -1, createdAt: -1 } },
             { $skip: (page - 1) * limit },
             { $limit: limit },
-            {
-              $lookup: {
-                from: 'users',
-                localField: 'user',
-                foreignField: '_id',
-                pipeline: [
-                  { $project: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 } }
-                ],
-                as: 'userInfo'
-              }
-            },
-            { $unwind: '$userInfo' },
             {
               $project: {
                 _id: 1,
@@ -230,53 +218,162 @@ const getCachedComments = async (chapterId, novelId, userId = null, page = 1, li
                 likesCount: 1,
                 isPinned: 1,
                 isEdited: 1,
-                user: {
-                  _id: '$userInfo._id',
-                  username: '$userInfo.username',
-                  displayName: '$userInfo.displayName',
-                  avatar: '$userInfo.avatar',
-                  role: '$userInfo.role',
-                  userNumber: '$userInfo.userNumber'
-                }
+                user: 1
               }
             }
           ],
-          // Get reply counts for all comments in this content
-          replyCounts: [
+          // OPTIMIZATION 2: Get all replies in single query instead of recursive calls
+          allReplies: [
             { $match: { parentId: { $ne: null } } },
             {
-              $group: {
-                _id: '$parentId',
-                count: { $sum: 1 }
+              $addFields: {
+                likesCount: { $size: '$likes' }
+              }
+            },
+            { $sort: { createdAt: 1 } }, // Replies sorted by oldest first
+            {
+              $project: {
+                _id: 1,
+                text: 1,
+                contentType: 1,
+                contentId: 1,
+                parentId: 1,
+                createdAt: 1,
+                isDeleted: 1,
+                adminDeleted: 1,
+                likes: 1,
+                likesCount: 1,
+                isPinned: 1,
+                isEdited: 1,
+                user: 1
               }
             }
           ]
         }
       }
     ]);
+
+    const totalComments = facetResults[0].totalCount[0]?.total || 0;
+    const rootComments = facetResults[0].rootComments || [];
+    const allReplies = facetResults[0].allReplies || [];
+
+    if (rootComments.length === 0) {
+      const result = {
+        comments: [],
+        total: totalComments,
+        page,
+        limit,
+        hasMore: false
+      };
+      
+      setCachedComments(cacheKey, result);
+      return result;
+    }
+
+    // Filter replies to only those belonging to current page's root comments
+    const rootCommentIds = rootComments.map(comment => comment._id.toString());
+    const rootCommentIdsSet = new Set(rootCommentIds);
     
-    const totalCount = results[0].totalCount;
-    const comments = results[0].comments;
-    const replyCounts = results[0].replyCounts;
+    // OPTIMIZATION 3: Build reply tree more efficiently
+    const relevantReplies = [];
+    const replyMap = new Map();
     
-    // Create reply count map
-    const replyCountMap = {};
-    replyCounts.forEach(item => {
-      replyCountMap[item._id.toString()] = item.count;
+    // First pass: collect all relevant replies and build a lookup map
+    allReplies.forEach(reply => {
+      replyMap.set(reply._id.toString(), reply);
     });
     
-    // Add reply counts to comments
-    const commentsWithReplies = comments.map(comment => ({
-      ...comment,
-      replyCount: replyCountMap[comment._id.toString()] || 0
-    }));
+    // Second pass: find replies that belong to current page's comments (recursively)
+    const findRelevantReplies = (commentId) => {
+      const relevant = [];
+      allReplies.forEach(reply => {
+        if (reply.parentId.toString() === commentId) {
+          relevant.push(reply);
+          // Recursively find replies to this reply
+          relevant.push(...findRelevantReplies(reply._id.toString()));
+        }
+      });
+      return relevant;
+    };
     
+    rootCommentIds.forEach(rootId => {
+      relevantReplies.push(...findRelevantReplies(rootId));
+    });
+
+    // OPTIMIZATION 4: Batch user lookups for all comments at once
+    const allComments = [...rootComments, ...relevantReplies];
+    const userIds = [...new Set(allComments.map(comment => comment.user))];
+    
+    const User = mongoose.model('User');
+    const users = await User.find(
+      { _id: { $in: userIds } },
+      { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 }
+    ).lean();
+
+    const usersMap = {};
+    users.forEach(user => {
+      usersMap[user._id.toString()] = user;
+    });
+
+    // Build nested reply structure
+    const repliesByParent = new Map();
+    const allCommentsById = new Map();
+    
+    // Process all comments with user info
+    const processCommentUser = (comment) => {
+      const userIdStr = comment.user.toString();
+      const userInfo = usersMap[userIdStr];
+      
+      return {
+        ...comment,
+        user: userInfo,
+        replies: []
+      };
+    };
+    
+    // Index all comments by ID with user info
+    rootComments.forEach(comment => {
+      const processedComment = processCommentUser(comment);
+      allCommentsById.set(comment._id.toString(), processedComment);
+    });
+    relevantReplies.forEach(reply => {
+      const processedReply = processCommentUser(reply);
+      allCommentsById.set(reply._id.toString(), processedReply);
+    });
+    
+    // Group replies by parent
+    relevantReplies.forEach(reply => {
+      const parentId = reply.parentId.toString();
+      if (!repliesByParent.has(parentId)) {
+        repliesByParent.set(parentId, []);
+      }
+      repliesByParent.get(parentId).push(allCommentsById.get(reply._id.toString()));
+    });
+    
+    // Recursively attach replies to their parents
+    const attachReplies = (comment) => {
+      const commentId = comment._id.toString();
+      const directReplies = repliesByParent.get(commentId) || [];
+      
+      comment.replies = directReplies.map(reply => {
+        return attachReplies(reply);
+      });
+      
+      return comment;
+    };
+    
+    // Build the final organized structure
+    const organizedComments = rootComments.map(comment => {
+      const processedComment = allCommentsById.get(comment._id.toString());
+      return attachReplies(processedComment);
+    });
+
     const result = {
-      comments: commentsWithReplies,
-      total: totalCount[0]?.total || 0,
+      comments: organizedComments,
+      total: totalComments,
       page,
       limit,
-      hasMore: (page * limit) < (totalCount[0]?.total || 0)
+      hasMore: (page * limit) < totalComments
     };
     
     // Cache the result

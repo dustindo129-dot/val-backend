@@ -464,37 +464,139 @@ router.get('/novel/:novelId', async (req, res) => {
         });
       }
 
-      // Get total count first - parentId filter already applied in pipeline
-      const rootCountPipeline = [...pipeline];
-      rootCountPipeline.push({ $count: "totalComments" });
-      const countResult = await Comment.aggregate(rootCountPipeline);
-      const totalComments = countResult.length > 0 ? countResult[0].totalComments : 0;
-
-      // Add pagination to main pipeline (parentId filter already applied)
-      pipeline.push({ $skip: skip });
-      pipeline.push({ $limit: limitNum });
-
-      // Final projection - exclude user lookup from aggregation
-      pipeline.push({
-        $project: {
-          _id: 1,
-          text: 1,
-          contentType: 1,
-          contentId: 1,
-          parentId: 1,
-          createdAt: 1,
-          isDeleted: 1,
-          adminDeleted: 1,
-          likes: 1,
-          likesCount: 1,
-          isPinned: 1,
-          isEdited: 1,
-          user: 1, // Keep user ID for separate lookup
-          chapterInfo: { $arrayElemAt: ['$chapterInfo', 0] }
+      // OPTIMIZATION: Use $facet to combine all queries into a single aggregation
+      const facetPipeline = [
+        {
+          $match: {
+            $or: matchConditions,
+            adminDeleted: { $ne: true }
+          }
+        },
+        {
+          $facet: {
+            // Get total count of root comments
+            totalCount: [
+              { $match: { parentId: null } },
+              { $count: "total" }
+            ],
+            // Get paginated root comments with chapter info
+            rootComments: [
+              { $match: { parentId: null } },
+              {
+                $addFields: {
+                  likesCount: { $size: "$likes" },
+                  isPinnedSort: { $ifNull: ["$isPinned", false] }
+                }
+              },
+              // Apply sorting
+              ...(sort === 'likes' 
+                ? [{ $sort: { isPinnedSort: -1, likesCount: -1, createdAt: -1 } }]
+                : sort === 'oldest' 
+                ? [{ $sort: { isPinnedSort: -1, createdAt: 1 } }]
+                : [{ $sort: { isPinnedSort: -1, createdAt: -1 } }]
+              ),
+              { $skip: skip },
+              { $limit: limitNum },
+              // Add chapter info lookup only if not hiding chapters
+              ...(chapterIds.length > 0 && !hideChapters ? [{
+                $lookup: {
+                  from: 'chapters',
+                  let: { 
+                    contentId: '$contentId',
+                    contentType: '$contentType'
+                  },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $and: [
+                            { $eq: ['$$contentType', 'chapters'] },
+                            {
+                              $or: [
+                                // Handle contentId format: "novelId-chapterId"
+                                { 
+                                  $and: [
+                                    { $ne: [{ $indexOfCP: ['$$contentId', '-'] }, -1] },
+                                    { $eq: [{ $toString: '$_id' }, { $arrayElemAt: [{ $split: ['$$contentId', '-'] }, 1] }] }
+                                  ]
+                                },
+                                // Handle direct chapter ID (no dash)
+                                { 
+                                  $and: [
+                                    { $eq: [{ $indexOfCP: ['$$contentId', '-'] }, -1] },
+                                    { $eq: [{ $toString: '$_id' }, '$$contentId'] }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    { $project: { title: 1, order: 1 } }
+                  ],
+                  as: 'chapterInfo'
+                }
+              }] : []),
+              {
+                $project: {
+                  _id: 1,
+                  text: 1,
+                  contentType: 1,
+                  contentId: 1,
+                  parentId: 1,
+                  createdAt: 1,
+                  isDeleted: 1,
+                  adminDeleted: 1,
+                  likes: 1,
+                  likesCount: 1,
+                  isPinned: 1,
+                  isEdited: 1,
+                  user: 1,
+                  chapterInfo: { $arrayElemAt: ['$chapterInfo', 0] }
+                }
+              }
+            ],
+            // Get ALL replies in single query instead of recursive calls
+            allReplies: [
+              { $match: { parentId: { $ne: null } } },
+              {
+                $addFields: {
+                  likesCount: { $size: "$likes" }
+                }
+              },
+              { $sort: { createdAt: 1 } }, // Replies sorted by oldest first
+              {
+                $project: {
+                  _id: 1,
+                  text: 1,
+                  contentType: 1,
+                  contentId: 1,
+                  parentId: 1,
+                  createdAt: 1,
+                  isDeleted: 1,
+                  adminDeleted: 1,
+                  likes: 1,
+                  likesCount: 1,
+                  isPinned: 1,
+                  isEdited: 1,
+                  user: 1
+                }
+              }
+            ],
+            // Get total count including ALL replies for display
+            allCommentsCount: [
+              { $count: "total" }
+            ]
+          }
         }
-      });
+      ];
 
-      const rootComments = await Comment.aggregate(pipeline);
+      const facetResults = await Comment.aggregate(facetPipeline);
+      const totalComments = facetResults[0].totalCount[0]?.total || 0;
+      const rootComments = facetResults[0].rootComments || [];
+      const allReplies = facetResults[0].allReplies || [];
+      const totalCommentsIncludingAllReplies = facetResults[0].allCommentsCount[0]?.total || 0;
 
       if (rootComments.length === 0) {
         return {
@@ -502,7 +604,7 @@ router.get('/novel/:novelId', async (req, res) => {
           pagination: {
             currentPage: pageNum,
             totalPages: Math.ceil(totalComments / limitNum),
-            totalComments,
+            totalComments: totalCommentsIncludingAllReplies,
             hasNext: false,
             hasPrev: pageNum > 1,
             limit: limitNum
@@ -510,61 +612,31 @@ router.get('/novel/:novelId', async (req, res) => {
         };
       }
 
-      // Fetch ALL replies recursively (including nested replies)
-      const rootCommentIds = rootComments.map(comment => comment._id);
+      // Filter replies to only those belonging to current page's root comments
+      const rootCommentIds = rootComments.map(comment => comment._id.toString());
+      const rootCommentIdsSet = new Set(rootCommentIds);
       
-      // Get all comment IDs that belong to this thread (root + all nested replies)
-      const getAllRepliesRecursively = async (parentIds, allReplies = []) => {
-        if (parentIds.length === 0) return allReplies;
-        
-        const directReplies = await Comment.find({
-          parentId: { $in: parentIds },
-          adminDeleted: { $ne: true }
-        }).select('_id parentId').lean();
-        
-        if (directReplies.length === 0) return allReplies;
-        
-        // Add these replies to our collection
-        allReplies.push(...directReplies);
-        
-        // Get replies to these replies (recursive)
-        const nextLevelParentIds = directReplies.map(r => r._id);
-        return await getAllRepliesRecursively(nextLevelParentIds, allReplies);
+      // Build reply tree efficiently
+      const relevantReplies = [];
+      
+      // Find replies that belong to current page's comments (recursively)
+      const findRelevantReplies = (commentId) => {
+        const relevant = [];
+        allReplies.forEach(reply => {
+          if (reply.parentId.toString() === commentId) {
+            relevant.push(reply);
+            // Recursively find replies to this reply
+            relevant.push(...findRelevantReplies(reply._id.toString()));
+          }
+        });
+        return relevant;
       };
       
-      // Get all nested reply IDs
-      const allReplyIds = await getAllRepliesRecursively(rootCommentIds);
-      const allReplyObjectIds = allReplyIds.map(r => r._id);
-      
-     // Now fetch all the reply data
-      const repliesPipeline = [
-        { $match: { _id: { $in: allReplyObjectIds }, adminDeleted: { $ne: true } } },
-        {
-          $addFields: {
-            likesCount: { $size: "$likes" }
-          }
-        },
-        { $sort: { createdAt: 1 } }, // Replies sorted by oldest first
-        {
-          $project: {
-            _id: 1,
-            text: 1,
-            contentType: 1,
-            contentId: 1,
-            parentId: 1,
-            createdAt: 1,
-            isDeleted: 1,
-            adminDeleted: 1,
-            likes: 1,
-            likesCount: 1,
-            isPinned: 1,
-            isEdited: 1,
-            user: 1
-          }
-        }
-      ];
+      rootCommentIds.forEach(rootId => {
+        relevantReplies.push(...findRelevantReplies(rootId));
+      });
 
-      const replies = await Comment.aggregate(repliesPipeline);
+      const replies = relevantReplies;
       
       // Combine root comments and replies for unified user lookup
       const allComments = [...rootComments, ...replies];
@@ -650,33 +722,6 @@ router.get('/novel/:novelId', async (req, res) => {
         return attachReplies(processedComment);
       });
       
-      // Helper function to count nested replies recursively
-      const countNestedReplies = (comment) => {
-        let count = comment.replies ? comment.replies.length : 0;
-        if (comment.replies) {
-          comment.replies.forEach(reply => {
-            count += countNestedReplies(reply);
-          });
-        }
-        return count;
-      };
-      
-
-      // For novel detail pages, we need to count ALL comments + replies in the entire novel, not just current page
-      // Get ALL comments for this novel to calculate the true total including nested replies
-      const allNovelCommentsPipeline = [
-        {
-          $match: {
-            $or: matchConditions,
-            adminDeleted: { $ne: true }
-          }
-        }
-        // No parentId filter - get ALL comments (root + replies)
-      ];
-      
-      const allNovelComments = await Comment.aggregate(allNovelCommentsPipeline);
-      const totalCommentsIncludingAllReplies = allNovelComments.length; // This includes root + ALL nested replies
-      
       // Calculate pagination info (still use root comment count for pagination logic)
       const totalPages = Math.ceil(totalComments / limitNum);
       const hasNext = pageNum < totalPages;
@@ -687,7 +732,7 @@ router.get('/novel/:novelId', async (req, res) => {
         pagination: {
           currentPage: pageNum,
           totalPages,
-          totalComments: totalCommentsIncludingAllReplies, // Show TOTAL including ALL nested replies across entire novel
+          totalComments: totalCommentsIncludingAllReplies, // Show TOTAL including ALL nested replies across entire novel (from facet)
           hasNext,
           hasPrev,
           limit: limitNum
