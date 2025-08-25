@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Notification from '../models/Notification.js';
 import User from '../models/User.js';
 import Novel from '../models/Novel.js';
@@ -388,6 +389,94 @@ export const createLikedCommentNotification = async (commentOwnerId, commentId, 
     }, commentOwnerId);
   } catch (error) {
     console.error('Error creating liked comment notification:', error);
+  }
+};
+
+/**
+ * Create notification for chapter like (first time only)
+ * @param {string} chapterOwner - Username or ObjectId of the user who owns the chapter (translator/editor/proofreader)
+ * @param {string} chapterId - ID of the liked chapter
+ * @param {string} likerId - ID of the user who liked the chapter
+ * @param {string} novelId - ID of the novel where the chapter belongs
+ */
+export const createLikedChapterNotification = async (chapterOwner, chapterId, likerId, novelId) => {
+  try {
+    // Don't notify if chapterOwner is empty or null
+    if (!chapterOwner) {
+      return;
+    }
+
+    // Don't notify if user is liking their own chapter (if chapterOwner is an ObjectId)
+    if (chapterOwner === likerId) {
+      return;
+    }
+
+    // Determine if chapterOwner is an ObjectId or username
+    let chapterOwnerId = null;
+    if (mongoose.Types.ObjectId.isValid(chapterOwner) && chapterOwner.length === 24) {
+      // It's already an ObjectId
+      chapterOwnerId = chapterOwner;
+    } else {
+      // It's a username, need to look it up
+      const ownerUser = await User.findOne({
+        $or: [
+          { username: chapterOwner },
+          { displayName: chapterOwner }
+        ]
+      }).select('_id');
+      
+      if (!ownerUser) {
+        console.log(`Chapter owner user not found: ${chapterOwner}`);
+        return;
+      }
+      
+      chapterOwnerId = ownerUser._id.toString();
+    }
+
+    // Don't notify if user is liking their own chapter (after lookup)
+    if (chapterOwnerId === likerId) {
+      return;
+    }
+
+    const [novel, liker, chapter] = await Promise.all([
+      Novel.findById(novelId),
+      User.findById(likerId).select('displayName username'),
+      Chapter.findById(chapterId).select('title')
+    ]);
+
+    if (!novel || !liker || !chapter) return;
+
+    const likerDisplayName = liker.displayName || liker.username;
+
+    const message = `<i>${likerDisplayName}</i> đã thích chương <b>${chapter.title}</b> trong truyện <b>${novel.title}</b>`;
+    
+    const linkData = { 
+      novelId, 
+      novelTitle: novel.title,
+      chapterId,
+      chapterTitle: chapter.title
+    };
+
+    const notification = new Notification({
+      userId: chapterOwnerId,
+      type: 'liked_chapter',
+      title: 'Chương được thích',
+      message,
+      relatedUser: likerId,
+      relatedNovel: novelId,
+      relatedChapter: chapterId,
+      data: linkData
+    });
+
+    await notification.save();
+    
+    // Broadcast new notification event to specific user only
+    broadcastEventToUser('new_notification', {
+      userId: chapterOwnerId,
+      notification: notification.toObject()
+    }, chapterOwnerId);
+  } catch (error) {
+    console.error('Error creating liked chapter notification:', error);
   }
 };
 

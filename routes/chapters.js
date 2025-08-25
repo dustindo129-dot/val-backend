@@ -34,6 +34,8 @@ import { calculateAndUpdateModuleRentBalance, conditionallyRecalculateRentBalanc
 import { clearNovelCaches, clearChapterCaches, notifyAllClients } from '../utils/cacheUtils.js';
 import { createNewChapterNotifications } from '../services/notificationService.js';
 import { populateStaffNames } from '../utils/populateStaffNames.js';
+import { getCachedUserByUsername } from '../utils/userCache.js';
+import { initializeCacheReferences } from '../utils/chapterCacheUtils.js';
 
 const router = express.Router();
 
@@ -67,19 +69,52 @@ const MAX_CACHE_SIZE = 1000;
 // Query deduplication cache to prevent multiple identical requests
 const pendingQueries = new Map();
 
+// Result cache for storing query results
+const resultCache = new Map();
+const RESULT_CACHE_TTL = 1000 * 45; // 45 seconds for main chapter queries
+
 // User lookup cache to prevent duplicate user queries
 const userCache = new Map();
-const USER_CACHE_TTL = 1000 * 60 * 5; // 5 minutes
+const USER_CACHE_TTL = 1000 * 60 * 10; // 10 minutes for user data
 
-// Optimized user lookup with caching
+// Comments cache to prevent duplicate comment queries
+const commentsCache = new Map();
+const COMMENTS_CACHE_TTL = 1000 * 60 * 2; // 2 minutes
+const MAX_COMMENTS_CACHE_SIZE = 500;
+
+// Chapter interaction cache for view tracking
+const chapterInteractionCache = new Map();
+const INTERACTION_CACHE_TTL = 1000 * 60 * 5; // 5 minutes
+
+// Username lookup cache for frequent username queries
+const usernameCache = new Map();
+const USERNAME_CACHE_TTL = 1000 * 60 * 10; // 10 minutes
+
+// User permission cache for frequent permission checks
+const userPermissionCache = new Map();
+const USER_PERMISSION_CACHE_TTL = 1000 * 60 * 15; // 15 minutes for permission data
+
+// Initialize cache references for shared utilities
+initializeCacheReferences({
+  commentsCache,
+  userCache,
+  chapterInteractionCache,
+  usernameCache,
+  userPermissionCache
+});
+
+// Optimized user lookup with caching and deduplication
 const getCachedUsers = async (userIds) => {
   if (!userIds || userIds.length === 0) return [];
+  
+  // Normalize user IDs to strings and remove duplicates
+  const normalizedIds = [...new Set(userIds.map(id => typeof id === 'object' ? id.toString() : id))];
   
   const results = [];
   const uncachedIds = [];
   
   // Check cache first
-  for (const userId of userIds) {
+  for (const userId of normalizedIds) {
     const cached = userCache.get(userId);
     if (cached && Date.now() - cached.timestamp < USER_CACHE_TTL) {
       results.push(cached.data);
@@ -88,12 +123,15 @@ const getCachedUsers = async (userIds) => {
     }
   }
   
-  // Fetch uncached users
+  // Deduplicate database queries using the same pattern as chapter queries
   if (uncachedIds.length > 0) {
-    const User = mongoose.model('User');
-    const freshUsers = await User.find({
-      _id: { $in: uncachedIds.map(id => mongoose.Types.ObjectId.createFromHexString(id)) }
-    }).select('displayName username userNumber avatar role').lean();
+    const cacheKey = `users:${uncachedIds.sort().join(',')}`;
+    const freshUsers = await dedupQuery(cacheKey, async () => {
+      const User = mongoose.model('User');
+      return await User.find({
+        _id: { $in: uncachedIds.map(id => mongoose.Types.ObjectId.createFromHexString(id)) }
+      }).select('displayName username userNumber avatar role').lean();
+    });
     
     // Cache the fresh results
     for (const user of freshUsers) {
@@ -105,7 +143,7 @@ const getCachedUsers = async (userIds) => {
     }
     
     // Clean up cache periodically
-    if (userCache.size > 500) {
+    if (userCache.size > 1000) {
       const cutoff = Date.now() - (USER_CACHE_TTL * 2);
       for (const [key, value] of userCache.entries()) {
         if (value.timestamp < cutoff) {
@@ -116,6 +154,225 @@ const getCachedUsers = async (userIds) => {
   }
   
   return results;
+};
+
+// Optimized comments lookup with caching
+const getCachedComments = async (chapterId, novelId, userId = null, page = 1, limit = 10) => {
+  const cacheKey = `comments_${chapterId}_${novelId}_${userId || 'anon'}_${page}_${limit}`;
+  
+  // Check cache first
+  const cached = commentsCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < COMMENTS_CACHE_TTL) {
+    return cached.data;
+  }
+  
+  try {
+    // Import Comment model dynamically to avoid circular dependency
+    const Comment = mongoose.model('Comment');
+    
+    // Try both contentId formats for backward compatibility
+    const contentIds = [
+      `${novelId}-${chapterId}`, // New format: novelId-chapterId
+      chapterId // Old format: just chapterId
+    ];
+    
+    // Optimized: Use facet aggregation to get count, comments, and reply counts in a single query
+    const results = await Comment.aggregate([
+      {
+        $match: {
+          contentType: 'chapters',
+          contentId: { $in: contentIds },
+          adminDeleted: { $ne: true }
+        }
+      },
+      {
+        $facet: {
+          // Get total count of root comments
+          totalCount: [
+            { $match: { parentId: null } },
+            { $count: 'total' }
+          ],
+          // Get paginated root comments with user info
+          comments: [
+            { $match: { parentId: null } },
+            {
+              $addFields: {
+                likesCount: { $size: '$likes' },
+                isPinnedSort: { $ifNull: ['$isPinned', false] }
+              }
+            },
+            { $sort: { isPinnedSort: -1, createdAt: -1 } },
+            { $skip: (page - 1) * limit },
+            { $limit: limit },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'user',
+                foreignField: '_id',
+                pipeline: [
+                  { $project: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 } }
+                ],
+                as: 'userInfo'
+              }
+            },
+            { $unwind: '$userInfo' },
+            {
+              $project: {
+                _id: 1,
+                text: 1,
+                contentType: 1,
+                contentId: 1,
+                parentId: 1,
+                createdAt: 1,
+                isDeleted: 1,
+                adminDeleted: 1,
+                likes: 1,
+                likesCount: 1,
+                isPinned: 1,
+                isEdited: 1,
+                user: {
+                  _id: '$userInfo._id',
+                  username: '$userInfo.username',
+                  displayName: '$userInfo.displayName',
+                  avatar: '$userInfo.avatar',
+                  role: '$userInfo.role',
+                  userNumber: '$userInfo.userNumber'
+                }
+              }
+            }
+          ],
+          // Get reply counts for all comments in this content
+          replyCounts: [
+            { $match: { parentId: { $ne: null } } },
+            {
+              $group: {
+                _id: '$parentId',
+                count: { $sum: 1 }
+              }
+            }
+          ]
+        }
+      }
+    ]);
+    
+    const totalCount = results[0].totalCount;
+    const comments = results[0].comments;
+    const replyCounts = results[0].replyCounts;
+    
+    // Create reply count map
+    const replyCountMap = {};
+    replyCounts.forEach(item => {
+      replyCountMap[item._id.toString()] = item.count;
+    });
+    
+    // Add reply counts to comments
+    const commentsWithReplies = comments.map(comment => ({
+      ...comment,
+      replyCount: replyCountMap[comment._id.toString()] || 0
+    }));
+    
+    const result = {
+      comments: commentsWithReplies,
+      total: totalCount[0]?.total || 0,
+      page,
+      limit,
+      hasMore: (page * limit) < (totalCount[0]?.total || 0)
+    };
+    
+    // Cache the result
+    setCachedComments(cacheKey, result);
+    
+    return result;
+    
+  } catch (error) {
+    console.error('Error fetching cached comments:', error);
+    return {
+      comments: [],
+      total: 0,
+      page,
+      limit,
+      hasMore: false
+    };
+  }
+};
+
+const setCachedComments = (cacheKey, data) => {
+  // Remove oldest entries if cache is too large
+  if (commentsCache.size >= MAX_COMMENTS_CACHE_SIZE) {
+    const oldestKey = commentsCache.keys().next().value;
+    commentsCache.delete(oldestKey);
+  }
+  
+  commentsCache.set(cacheKey, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+// Clear comments cache for a specific chapter
+const clearCommentsCache = (chapterId, novelId = null) => {
+  const keysToDelete = [];
+  for (const [key, value] of commentsCache.entries()) {
+    // Clear all cache entries that contain this chapterId
+    if (key.includes(`comments_${chapterId}_`) || 
+        (novelId && key.includes(`comments_${chapterId}_${novelId}_`))) {
+      keysToDelete.push(key);
+    }
+  }
+  keysToDelete.forEach(key => commentsCache.delete(key));
+  
+  console.log(`Cleared ${keysToDelete.length} comment cache entries for chapter ${chapterId}`);
+};
+
+// Cache chapter interaction to reduce duplicate queries
+const getCachedChapterInteraction = async (userId, chapterId) => {
+  if (!userId || !chapterId) return null;
+  
+  const cacheKey = `interaction_${userId}_${chapterId}`;
+  const cached = chapterInteractionCache.get(cacheKey);
+  
+  if (cached && Date.now() - cached.timestamp < INTERACTION_CACHE_TTL) {
+    return cached.data;
+  }
+  
+  try {
+    const UserChapterInteraction = mongoose.model('UserChapterInteraction');
+    const interaction = await UserChapterInteraction.findOne({
+      userId: mongoose.Types.ObjectId.createFromHexString(userId),
+      chapterId: mongoose.Types.ObjectId.createFromHexString(chapterId)
+    }).lean();
+    
+    // Cache the result (including null)
+    chapterInteractionCache.set(cacheKey, {
+      data: interaction,
+      timestamp: Date.now()
+    });
+    
+    return interaction;
+  } catch (error) {
+    console.error('Error fetching chapter interaction:', error);
+    return null;
+  }
+};
+
+// Clear interaction cache for a user-chapter pair
+const clearChapterInteractionCache = (userId, chapterId) => {
+  const cacheKey = `interaction_${userId}_${chapterId}`;
+  chapterInteractionCache.delete(cacheKey);
+};
+
+// Use global user cache for permission checks instead of local cache
+const getCachedUserPermissions = async (username) => {
+  if (!username) return null;
+  
+  try {
+    // Use the global user cache system instead of local cache
+    const userData = await getCachedUserByUsername(username);
+    return userData;
+  } catch (error) {
+    console.error('Error fetching user permissions:', error);
+    return null;
+  }
 };
 
 /**
@@ -190,8 +447,14 @@ const setCachedSlug = (slug, data) => {
   });
 };
 
-// Query deduplication helper
-const dedupQuery = async (key, queryFn) => {
+// Query deduplication and caching helper
+const dedupQuery = async (key, queryFn, ttl = RESULT_CACHE_TTL) => {
+  // Check if we have a cached result first
+  const cached = resultCache.get(key);
+  if (cached && Date.now() - cached.timestamp < ttl) {
+    return cached.data;
+  }
+  
   // If query is already pending, wait for it
   if (pendingQueries.has(key)) {
     return await pendingQueries.get(key);
@@ -203,6 +466,23 @@ const dedupQuery = async (key, queryFn) => {
   
   try {
     const result = await queryPromise;
+    
+    // Cache the result
+    resultCache.set(key, {
+      data: result,
+      timestamp: Date.now()
+    });
+    
+    // Clean up old cache entries periodically
+    if (resultCache.size > 100) {
+      const cutoff = Date.now() - (ttl * 2);
+      for (const [cacheKey, value] of resultCache.entries()) {
+        if (value.timestamp < cutoff) {
+          resultCache.delete(cacheKey);
+        }
+      }
+    }
+    
     return result;
   } finally {
     // Clean up pending query
@@ -222,14 +502,100 @@ const clearUserCaches = (userId) => {
     }
   }
   
+  // Clear result cache for this user
+  for (const [key, value] of resultCache.entries()) {
+    if (key.includes(`:user:${userId}`) || key.includes(`:user:anonymous`)) {
+      resultCache.delete(key);
+      clearedCount++;
+    }
+  }
+  
   // Clear user cache
   if (userCache.has(userId)) {
     userCache.delete(userId);
     clearedCount++;
   }
   
+  // Clear username cache (in case user changes username)
+  for (const [key, value] of usernameCache.entries()) {
+    if (value.data && value.data._id && value.data._id.toString() === userId) {
+      usernameCache.delete(key);
+      clearedCount++;
+    }
+  }
+  
+  // Clear user permission cache for this user
+  for (const [key, value] of userPermissionCache.entries()) {
+    if (key.includes(`user:${userId}:`)) {
+      userPermissionCache.delete(key);
+      clearedCount++;
+    }
+  }
+  
+  // Clear comments cache for this user
+  const commentKeysToDelete = [];
+  for (const [key, value] of commentsCache.entries()) {
+    if (key.includes(`_${userId}_`) || key.includes(`_anon_`)) {
+      commentKeysToDelete.push(key);
+    }
+  }
+  commentKeysToDelete.forEach(key => {
+    commentsCache.delete(key);
+    clearedCount++;
+  });
+  
+  // Clear interaction cache for this user
+  const interactionKeysToDelete = [];
+  for (const [key, value] of chapterInteractionCache.entries()) {
+    if (key.includes(`interaction_${userId}_`)) {
+      interactionKeysToDelete.push(key);
+    }
+  }
+  interactionKeysToDelete.forEach(key => {
+    chapterInteractionCache.delete(key);
+    clearedCount++;
+  });
+  
   console.log(`Cleared ${clearedCount} chapter cache entries for user ${userId}`);
   return clearedCount;
+};
+
+// Comprehensive cache clearing for chapter operations
+const clearChapterRelatedCaches = (chapterId, novelId = null, userId = null) => {
+  let clearedCount = 0;
+  
+  // Clear chapter-specific caches
+  clearChapterCaches(chapterId);
+  
+  // Clear comments cache for this chapter
+  clearCommentsCache(chapterId, novelId);
+  
+  // Clear interaction cache if user specified
+  if (userId) {
+    clearChapterInteractionCache(userId, chapterId);
+  }
+  
+  // Clear relevant query deduplication cache
+  for (const [key, promise] of pendingQueries.entries()) {
+    if (key.includes(`chapter:${chapterId}`) || 
+        key.includes(`chapter_full_optimized:${chapterId}`) ||
+        (novelId && key.includes(`comments_${novelId}`))) {
+      pendingQueries.delete(key);
+      clearedCount++;
+    }
+  }
+  
+  // Clear result cache for this chapter
+  for (const [key, value] of resultCache.entries()) {
+    if (key.includes(`chapter:${chapterId}`) || 
+        key.includes(`chapter_full_optimized:${chapterId}`) ||
+        (novelId && key.includes(`comments_${novelId}`))) {
+      resultCache.delete(key);
+      clearedCount++;
+    }
+  }
+  
+  console.log(`Cleared ${clearedCount} additional cache entries for chapter ${chapterId}`);
 };
 
 /**
@@ -785,7 +1151,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
       ]);
 
       return chapter;
-    }, 1000 * 60 * 2); // Cache for 2 minutes for frequently accessed chapters
+    }, 1000 * 30); // Cache for 30 seconds - now with actual result caching!
 
     if (!chapterData) {
       return res.status(404).json({ message: 'Chapter not found' });
@@ -905,11 +1271,9 @@ router.get('/:id', optionalAuth, async (req, res) => {
         let shouldIncrementView = false;
         
         if (req.user) {
-          // For authenticated users, check if they've viewed this chapter recently
-          const existingInteraction = await UserChapterInteraction.findOne({
-            userId: req.user._id,
-            chapterId: req.params.id
-          });
+          // For view tracking, we need fresh data to avoid stale aggregation results
+          // Use cached interaction lookup to get the most recent lastReadAt
+          const existingInteraction = await getCachedChapterInteraction(req.user._id.toString(), req.params.id);
           
           if (!existingInteraction || !existingInteraction.lastReadAt) {
             // First time viewing this chapter
@@ -921,25 +1285,33 @@ router.get('/:id', optionalAuth, async (req, res) => {
             shouldIncrementView = timeSinceLastView > fourHours;
           }
           
-          // Update user interaction regardless of view count
-          await UserChapterInteraction.findOneAndUpdate(
-            { userId: req.user._id, chapterId: req.params.id, novelId: chapterData.novelId },
-            {
-              $setOnInsert: {
-                userId: req.user._id,
-                chapterId: req.params.id,
-                novelId: chapterData.novelId,
-                createdAt: new Date(),
-                liked: false,
-                bookmarked: false
+          // Only update interaction if significant time has passed or it's first view
+          const shouldUpdateInteraction = !existingInteraction || shouldIncrementView;
+          
+          if (shouldUpdateInteraction) {
+            // Update user interaction only when necessary
+            await UserChapterInteraction.findOneAndUpdate(
+              { userId: req.user._id, chapterId: req.params.id, novelId: chapterData.novelId },
+              {
+                $setOnInsert: {
+                  userId: req.user._id,
+                  chapterId: req.params.id,
+                  novelId: chapterData.novelId,
+                  createdAt: new Date(),
+                  liked: false,
+                  bookmarked: false
+                },
+                $set: {
+                  lastReadAt: new Date(),
+                  updatedAt: new Date()
+                }
               },
-              $set: {
-                lastReadAt: new Date(),
-                updatedAt: new Date()
-              }
-            },
-            { upsert: true }
-          );
+              { upsert: true }
+            );
+            
+            // Clear the interaction cache since we just updated it
+            clearChapterInteractionCache(req.user._id.toString(), req.params.id);
+          }
         } else {
           // For anonymous users, implement server-side rate limiting using IP address
           // This prevents anonymous users from spamming views
@@ -1192,6 +1564,9 @@ router.post('/', auth, async (req, res) => {
         
         // Clear query deduplication cache for this chapter
         pendingQueries.delete(`chapter:${newChapter._id}`);
+        
+        // Also clear the full-optimized endpoint cache
+        pendingQueries.delete(`chapter_full_optimized:${newChapter._id}:user:anonymous`);
       } catch (unlockError) {
         console.error('Error during auto-unlock after paid chapter creation:', unlockError);
         // Don't fail the chapter creation if auto-unlock fails
@@ -1474,8 +1849,8 @@ router.put('/:id', auth, async (req, res) => {
       // Clear novel caches
       clearNovelCaches();
       
-      // Clear chapter-specific caches to ensure updated content is served immediately
-      clearChapterCaches(updatedChapter._id.toString());
+      // Clear all chapter-related caches comprehensively
+      clearChapterRelatedCaches(updatedChapter._id.toString(), existingChapter.novelId.toString(), req.user._id.toString());
       
       // Clear slug cache entries for this chapter to prevent stale data
       const chapterIdString = updatedChapter._id.toString();
@@ -1486,14 +1861,6 @@ router.put('/:id', auth, async (req, res) => {
         }
       }
       keysToDelete.forEach(key => slugCache.delete(key));
-      
-      // Clear query deduplication cache for this chapter (all user contexts)
-      for (const [key, promise] of pendingQueries.entries()) {
-        if (key.includes(`chapter:${chapterIdString}`) || 
-            key.includes(`chapter_full_optimized:${chapterIdString}`)) {
-          pendingQueries.delete(key);
-        }
-      }
 
       // Send notifications and SSE updates for draft chapters becoming public
       if (isDraftBecomingPublic) {
@@ -1550,8 +1917,14 @@ router.put('/:id', auth, async (req, res) => {
           }
           keysToDelete.forEach(key => slugCache.delete(key));
           
-          // Clear query deduplication cache for this chapter
-          pendingQueries.delete(`chapter:${updatedChapter._id}`);
+                // Clear query deduplication cache for this chapter
+      pendingQueries.delete(`chapter:${updatedChapter._id}`);
+      
+      // Also clear the full-optimized endpoint cache
+      pendingQueries.delete(`chapter_full_optimized:${updatedChapter._id}:user:anonymous`);
+      if (req.user && req.user._id) {
+        pendingQueries.delete(`chapter_full_optimized:${updatedChapter._id}:user:${req.user._id}`);
+      }
         } catch (unlockError) {
           console.error('Error during auto-unlock after chapterBalance change:', unlockError);
           // Don't fail the chapter update if auto-unlock fails
@@ -1709,8 +2082,8 @@ router.delete('/:id', auth, async (req, res) => {
       // Clear novel caches
       clearNovelCaches();
       
-      // Clear chapter-specific caches for the deleted chapter
-      clearChapterCaches(chapterId);
+      // Clear all chapter-related caches comprehensively
+      clearChapterRelatedCaches(chapterId, novelId.toString());
       
       // Clear slug cache entries for this chapter
       const keysToDelete = [];
@@ -1720,14 +2093,6 @@ router.delete('/:id', auth, async (req, res) => {
         }
       }
       keysToDelete.forEach(key => slugCache.delete(key));
-      
-      // Clear query deduplication cache for this chapter (all user contexts)
-      for (const [key, promise] of pendingQueries.entries()) {
-        if (key.includes(`chapter:${chapterId}`) || 
-            key.includes(`chapter_full_optimized:${chapterId}`)) {
-          pendingQueries.delete(key);
-        }
-      }
 
       // Notify clients of the chapter deletion
       notifyAllClients('update', {
@@ -2453,14 +2818,13 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
 
       const [result] = await Chapter.aggregate(pipeline);
       return result;
-    }, 1000 * 60 * 1); // Cache for 1 minute for this complex query
+    }, 1000 * 45); // Cache for 45 seconds - now with actual result caching!
     
     if (!chapterData) {
       console.log(`Chapter not found (ID: ${chapterId})`);
       return res.status(404).json({ message: 'Chapter not found' });
     }
     
-    console.log(`Fetching chapter title: ${chapterData.title}`);
 
     // CRITICAL: Add access control logic for rental system
     const user = req.user;
@@ -2542,6 +2906,61 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
       }
     }
 
+    // Helper function to check if user can see draft chapters
+    const canUserSeeDraftChapters = (user, novel) => {
+      if (!user) return false;
+      
+      // Admin and moderator can see all draft chapters
+      if (user.role === 'admin' || user.role === 'moderator') {
+        return true;
+      }
+      
+      // pj_user can see draft chapters for their assigned novels
+      if (user.role === 'pj_user' && novel?.active?.pj_user) {
+        const isAuthorized = novel.active.pj_user.includes(user._id.toString()) || 
+                            novel.active.pj_user.includes(user.username);
+        return isAuthorized;
+      }
+      
+      return false;
+    };
+    
+    // Filter function for draft chapters
+    const shouldShowChapter = (chapter) => {
+      if (chapter.mode !== 'draft') {
+        return true; // Show non-draft chapters to everyone
+      }
+      return canUserSeeDraftChapters(user, chapterData.novel);
+    };
+
+    // Filter draft chapters from allModuleChapters based on user permissions
+    if (chapterData.allModuleChapters && chapterData.allModuleChapters.length > 0) {
+      chapterData.allModuleChapters = chapterData.allModuleChapters.filter(shouldShowChapter);
+    }
+    
+    // Filter draft chapters from navigation (prev/next chapters)
+    if (chapterData.prevChapter && chapterData.prevChapter.mode === 'draft' && !shouldShowChapter(chapterData.prevChapter)) {
+      // Find the previous non-draft chapter that user can see
+      const availableChapters = chapterData.allModuleChapters || [];
+      const currentOrder = chapterData.order;
+      const prevChapters = availableChapters
+        .filter(ch => ch.order < currentOrder)
+        .sort((a, b) => b.order - a.order); // Sort descending to get the closest previous
+      
+      chapterData.prevChapter = prevChapters[0] || null;
+    }
+    
+    if (chapterData.nextChapter && chapterData.nextChapter.mode === 'draft' && !shouldShowChapter(chapterData.nextChapter)) {
+      // Find the next non-draft chapter that user can see
+      const availableChapters = chapterData.allModuleChapters || [];
+      const currentOrder = chapterData.order;
+      const nextChapters = availableChapters
+        .filter(ch => ch.order > currentOrder)
+        .sort((a, b) => a.order - b.order); // Sort ascending to get the closest next
+      
+      chapterData.nextChapter = nextChapters[0] || null;
+    }
+
     // Populate staff ObjectIds with user display names for both chapter and nested novel data
     const populatedChapter = await populateStaffNames(chapterData);
     
@@ -2604,11 +3023,9 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
         let shouldIncrementView = false;
         
         if (userId) {
-          // For authenticated users, check if they've viewed this chapter recently
-          const existingInteraction = await UserChapterInteraction.findOne({
-            userId,
-            chapterId
-          });
+          // For view tracking, we need fresh data to avoid stale aggregation results
+          // Use cached interaction lookup to get the most recent lastReadAt
+          const existingInteraction = await getCachedChapterInteraction(userId.toString(), chapterId);
           
           if (!existingInteraction || !existingInteraction.lastReadAt) {
             // First time viewing this chapter
@@ -2620,25 +3037,33 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
             shouldIncrementView = timeSinceLastView > fourHours;
           }
           
-          // Update user interaction regardless of view count
-          await UserChapterInteraction.findOneAndUpdate(
-            { userId, chapterId, novelId: chapterData.novel._id },
-            {
-              $setOnInsert: {
-                userId,
-                chapterId,
-                novelId: chapterData.novel._id,
-                createdAt: new Date(),
-                liked: false,
-                bookmarked: false
+          // Only update interaction if significant time has passed or it's first view
+          const shouldUpdateInteraction = !existingInteraction || shouldIncrementView;
+          
+          if (shouldUpdateInteraction) {
+            // Update user interaction only when necessary
+            await UserChapterInteraction.findOneAndUpdate(
+              { userId, chapterId, novelId: chapterData.novel._id },
+              {
+                $setOnInsert: {
+                  userId,
+                  chapterId,
+                  novelId: chapterData.novel._id,
+                  createdAt: new Date(),
+                  liked: false,
+                  bookmarked: false
+                },
+                $set: {
+                  lastReadAt: new Date(),
+                  updatedAt: new Date()
+                }
               },
-              $set: {
-                lastReadAt: new Date(),
-                updatedAt: new Date()
-              }
-            },
-            { upsert: true }
-          );
+              { upsert: true }
+            );
+            
+            // Clear the interaction cache since we just updated it
+            clearChapterInteractionCache(userId.toString(), chapterId);
+          }
         } else {
           // For anonymous users, implement server-side rate limiting using IP address
           // This prevents anonymous users from spamming views
@@ -2683,6 +3108,127 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
   } catch (error) {
     console.error('Error fetching chapter data:', error);
     res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * Get cached comments for a chapter
+ * @route GET /api/chapters/:chapterId/comments
+ */
+router.get('/:chapterId/comments', optionalAuth, async (req, res) => {
+  try {
+    const { chapterId } = req.params;
+    const { page = 1, limit = 10, novelId } = req.query;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(chapterId)) {
+      return res.status(400).json({ message: 'Invalid chapter ID format' });
+    }
+    
+    let chapterNovelId = novelId;
+    
+    // If novelId is provided as query parameter, use it to avoid database lookup
+    if (novelId && mongoose.Types.ObjectId.isValid(novelId)) {
+      chapterNovelId = novelId;
+    } else {
+      // Fallback: Get chapter to extract novelId
+      console.log(`Making database lookup for novelId, chapterId: ${chapterId}`);
+      const chapter = await Chapter.findById(chapterId).select('novelId').lean();
+      if (!chapter) {
+        return res.status(404).json({ message: 'Chapter not found' });
+      }
+      chapterNovelId = chapter.novelId.toString();
+    }
+    
+    const userId = req.user?._id?.toString();
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.max(1, Math.min(50, parseInt(limit))); // Cap at 50 comments per page
+    
+    // Use cached comments function
+    const commentsData = await getCachedComments(
+      chapterId, 
+      chapterNovelId, 
+      userId, 
+      pageNum, 
+      limitNum
+    );
+    
+    res.json(commentsData);
+  } catch (error) {
+    console.error('Error fetching chapter comments:', error);
+    res.status(500).json({ message: 'Failed to fetch comments' });
+  }
+});
+
+/**
+ * Clear all caches (admin only) - useful for debugging
+ * @route POST /api/chapters/admin/clear-cache
+ */
+router.post('/admin/clear-cache', auth, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+  
+  try {
+    // Clear all caches
+    slugCache.clear();
+    userCache.clear();
+    commentsCache.clear();
+    chapterInteractionCache.clear();
+    usernameCache.clear();
+    userPermissionCache.clear();
+    pendingQueries.clear();
+    resultCache.clear();
+    
+    // Clear global view cache if it exists
+    if (global.viewIPCache) {
+      global.viewIPCache.clear();
+    }
+    
+    console.log('All chapter-related caches cleared by admin');
+    res.json({ 
+      message: 'All caches cleared successfully',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error clearing caches:', error);
+    res.status(500).json({ message: 'Failed to clear caches' });
+  }
+});
+
+/**
+ * Get cached user permission data for privilege checks
+ * @route GET /api/chapters/user-permissions/:username
+ */
+router.get('/user-permissions/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    
+    if (!username) {
+      return res.status(400).json({ message: 'Username is required' });
+    }
+    
+    // Use cached user permission lookup
+    const userData = await getCachedUserPermissions(username);
+    
+    if (!userData) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Return only the necessary permission data (no sensitive info)
+    const permissionData = {
+      _id: userData._id,
+      username: userData.username,
+      displayName: userData.displayName,
+      role: userData.role,
+      userNumber: userData.userNumber,
+      avatar: userData.avatar
+    };
+    
+    res.json(permissionData);
+  } catch (error) {
+    console.error('Error fetching user permissions:', error);
+    res.status(500).json({ message: 'Failed to fetch user permissions' });
   }
 });
 

@@ -1,6 +1,7 @@
 import express from 'express';
 import User from '../models/User.js';
 import { generateToken, auth } from '../middleware/auth.js';
+import { getCachedUserByUsername, clearAllUserCaches } from '../utils/userCache.js';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -121,14 +122,14 @@ router.post('/signup', async (req, res) => {
       });
     }
 
-    // First check username separately
-    const existingUsername = await User.findOne({ username });
+    // First check username separately using cached lookup
+    const existingUsername = await getCachedUserByUsername(username);
     if (existingUsername) {
       console.log('Username exists:', username);
       return res.status(400).json({ message: 'Username already exists' });
     }
 
-    // Then check email separately
+    // Then check email separately (direct query as emails are not frequently cached)
     const existingEmail = await User.findOne({ email });
     if (existingEmail) {
       console.log('Email exists:', email);
@@ -317,6 +318,9 @@ router.post('/logout', auth, async (req, res) => {
     if (user) {
       user.currentSessionId = null;
       await user.save();
+      
+      // Clear all user caches after logout
+      clearAllUserCaches(user);
     }
 
     res.cookie('token', '', {
@@ -593,6 +597,9 @@ router.post('/reset-password/:token', async (req, res) => {
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
     await user.save();
+
+    // Clear all user caches after password reset
+    clearAllUserCaches(user);
 
     res.json({ message: 'Password reset successful' });
   } catch (error) {

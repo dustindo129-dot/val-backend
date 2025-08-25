@@ -20,7 +20,20 @@ const userChapterInteractionSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-
+  // Facebook-like features: track like history for first-time notifications
+  hasLikedBefore: {
+    type: Boolean,
+    default: false
+  },
+  // Metadata tracking for enhanced analytics and spam prevention
+  lastLikeTimestamp: {
+    type: Date,
+    default: null
+  },
+  lastLikeDeviceId: {
+    type: String,
+    default: null
+  },
   bookmarked: {
     type: Boolean,
     default: false

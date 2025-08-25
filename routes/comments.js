@@ -3,6 +3,8 @@ import { auth, checkBan } from '../middleware/auth.js';
 import Comment from '../models/Comment.js';
 import { broadcastEvent } from '../services/sseService.js';
 import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification, createCommentDeletionNotification } from '../services/notificationService.js';
+import { clearChapterCommentsCache, extractCommentIdentifiers } from '../utils/chapterCacheUtils.js';
+import { batchGetUsers } from '../utils/batchUserCache.js';
 
 // Helper function to get novel-specific roles for users
 const getNovelRoles = async (novel, userIds) => {
@@ -241,9 +243,11 @@ const clearUserStatsCache = async (userId) => {
 /**
  * Helper function to extract novel ID from comment and clear relevant caches
  * @param {Object} comment - The comment object
+ * @param {String} knownNovelId - Optional novelId to avoid database lookup
  */
-const clearCachesForComment = async (comment) => {
-  let novelId = null;
+const clearCachesForComment = async (comment, knownNovelId = null) => {
+  let novelId = knownNovelId;
+  let chapterId = null;
 
   try {
     if (comment.contentType === 'novels') {
@@ -251,14 +255,25 @@ const clearCachesForComment = async (comment) => {
     } else if (comment.contentType === 'chapters') {
       // For chapters, contentId might be in format "novelId-chapterId"
       const parts = comment.contentId.split('-');
-      if (parts.length === 2) {
+      if (parts.length === 2 && parts[0].length === 24 && parts[1].length === 24) {
+        // Valid ObjectId format for both parts
         novelId = parts[0];
+        chapterId = parts[1];
+      } else if (parts.length === 2) {
+        // May have different format, log and fall back
+        console.log(`Unexpected contentId format: ${comment.contentId}, parts:`, parts);
+        novelId = parts[0];
+        chapterId = parts[1];
       } else {
-        // Direct chapter ID, need to lookup novelId
-        const Chapter = (await import('../models/Chapter.js')).default;
-        const chapterDoc = await Chapter.findById(comment.contentId).select('novelId').lean();
-        if (chapterDoc) {
-          novelId = chapterDoc.novelId.toString();
+        // Direct chapter ID - only lookup if novelId not provided
+        chapterId = comment.contentId;
+        if (!novelId) {
+          console.log(`Making database lookup for novelId, contentId: ${comment.contentId}`);
+          const Chapter = (await import('../models/Chapter.js')).default;
+          const chapterDoc = await Chapter.findById(comment.contentId).select('novelId').lean();
+          if (chapterDoc) {
+            novelId = chapterDoc.novelId.toString();
+          }
         }
       }
     }
@@ -267,6 +282,24 @@ const clearCachesForComment = async (comment) => {
     if (novelId) {
       clearNovelCommentsCache(novelId);
       console.log(`Cleared novel comments cache for novel ${novelId}`);
+    }
+
+    // Clear chapter-specific comment caches if this is a chapter comment
+    if (chapterId && comment.contentType === 'chapters') {
+      clearChapterCommentsCache(chapterId, novelId);
+      console.log(`Cleared chapter comments cache for chapter ${chapterId}`);
+      
+      // CRITICAL: Also clear chapter full-optimized cache since comments affect the page
+      // Import the chapter caches utility if available
+      try {
+        const { clearChapterCaches } = await import('../utils/cacheUtils.js');
+        if (typeof clearChapterCaches === 'function') {
+          clearChapterCaches(chapterId);
+          console.log(`Cleared chapter full-optimized cache for chapter ${chapterId}`);
+        }
+      } catch (importError) {
+        console.warn('Could not import chapter cache utils:', importError.message);
+      }
     }
 
     // Also clear recent comments cache since comments have changed
@@ -536,34 +569,11 @@ router.get('/novel/:novelId', async (req, res) => {
       // Combine root comments and replies for unified user lookup
       const allComments = [...rootComments, ...replies];
 
-      // OPTIMIZED: Batch user lookups with caching
+      // OPTIMIZED: Batch user lookups with global user cache
       const userIds = [...new Set(allComments.map(comment => comment.user))];
-      const { results: cachedUsers, missingIds } = getCachedUserBasicInfo(userIds);
-      
-      // Fetch missing users from database
-      let freshUsers = [];
-      if (missingIds.length > 0) {
-        const User = (await import('../models/User.js')).default;
-        freshUsers = await User.find(
-          { _id: { $in: missingIds } },
-          { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 }
-        ).lean();
-        
-        // Cache the fresh users
-        setCachedUserBasicInfo(freshUsers);
-        
-        // Add to results
-        freshUsers.forEach(user => {
-          cachedUsers[user._id.toString()] = {
-            _id: user._id,
-            username: user.username,
-            displayName: user.displayName,
-            avatar: user.avatar,
-            role: user.role,
-            userNumber: user.userNumber
-          };
-        });
-      }
+      const cachedUsers = await batchGetUsers(userIds, {
+        projection: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 }
+      });
 
       // OPTIMIZED: Single novel lookup for roles (instead of in aggregation)
       const Novel = (await import('../models/Novel.js')).default;
@@ -970,17 +980,32 @@ router.get('/', async (req, res) => {
         novel = await Novel.findById(contentId);
       } else if (contentType === 'chapters') {
         // For chapters, get the novel from the chapter
-        const Chapter = (await import('../models/Chapter.js')).default;
+        const Novel = (await import('../models/Novel.js')).default;
         
         // Handle contentId format: "novelId-chapterId" or direct chapterId
         let chapterId = contentId;
+        let novelId = null;
+        
         if (contentId.includes('-')) {
           const parts = contentId.split('-');
-          chapterId = parts[1]; // Take the second part as chapterId
+          if (parts.length === 2 && parts[0].length === 24 && parts[1].length === 24) {
+            // Valid ObjectId format for both parts - extract novelId directly
+            novelId = parts[0];
+            chapterId = parts[1];
+            console.log(`Extracted novelId ${novelId} from contentId ${contentId}, avoiding database lookup`);
+          }
         }
         
-        const chapter = await Chapter.findById(chapterId).populate('novelId');
-        novel = chapter?.novelId;
+        if (novelId) {
+          // Use the extracted novelId to get novel directly
+          novel = await Novel.findById(novelId);
+        } else {
+          // Fallback: lookup novelId from chapter document
+          console.log(`Making database lookup for novelId, contentId: ${contentId}`);
+          const Chapter = (await import('../models/Chapter.js')).default;
+          const chapter = await Chapter.findById(chapterId).populate('novelId');
+          novel = chapter?.novelId;
+        }
       }
       
       // Get novel-specific roles for comment authors (including replies)
@@ -1299,56 +1324,7 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     // Save the reply
     await reply.save();
     
-    // Clear targeted caches for this comment (using parent comment to determine novel)
-    await clearCachesForComment(parentComment);
-    
-    // Clear user stats cache for the comment author
-    clearUserStatsCache(req.user._id.toString());
-    
-    // Populate user info
-    await reply.populate('user', 'username displayName avatar role userNumber');
-
-    // Create notification for the original commenter
-    if (parentComment.user.toString() !== req.user._id.toString()) {
-      // Extract novelId and chapterId from contentId and contentType
-      let novelId = null;
-      let chapterId = null;
-      
-      if (parentComment.contentType === 'novels') {
-        novelId = parentComment.contentId;
-      } else if (parentComment.contentType === 'chapters') {
-        // For chapters, contentId might be in format "novelId-chapterId"
-        const parts = parentComment.contentId.split('-');
-        if (parts.length === 2) {
-          novelId = parts[0];
-          chapterId = parts[1];
-        } else {
-          chapterId = parentComment.contentId;
-          // Try to get novelId from the chapter document
-          try {
-            const Chapter = require('../models/Chapter.js').default;
-            const chapterDoc = await Chapter.findById(chapterId);
-            if (chapterDoc) {
-              novelId = chapterDoc.novelId.toString();
-            }
-          } catch (err) {
-            console.error('Error getting novelId from chapter:', err);
-          }
-        }
-      }
-      
-      if (novelId || chapterId) {
-        await createCommentReplyNotification(
-          parentComment.user.toString(),
-          reply._id.toString(),
-          req.user.username,
-          novelId,
-          chapterId
-        );
-      }
-    }
-
-    // Create follow notifications for users following this novel (for replies too)
+    // Extract novelId and chapterId ONCE for cache clearing and notifications
     let novelId = null;
     let chapterId = null;
     
@@ -1374,6 +1350,32 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
         }
       }
     }
+    
+    // Clear targeted caches for this comment (pass novelId to avoid extra lookup)
+    await clearCachesForComment(parentComment, novelId);
+    
+    // Clear user stats cache for the comment author
+    clearUserStatsCache(req.user._id.toString());
+    
+    // Populate user info
+    await reply.populate('user', 'username displayName avatar role userNumber');
+
+    // Create notification for the original commenter
+    if (parentComment.user.toString() !== req.user._id.toString()) {
+      
+      if (novelId || chapterId) {
+        await createCommentReplyNotification(
+          parentComment.user.toString(),
+          reply._id.toString(),
+          req.user.username,
+          novelId,
+          chapterId
+        );
+      }
+    }
+
+    // Create follow notifications for users following this novel (for replies too)
+    // novelId and chapterId already extracted above
     
     if (novelId) {
       await createFollowCommentNotifications(
@@ -1513,34 +1515,35 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
     const isLiked = comment.likes.some(id => id.toString() === userId.toString());
     const serverTimestamp = Date.now();
 
-    // Create notification only when liking for the FIRST TIME EVER
-    if (isFirstTimeLike && isLiked && comment.user.toString() !== userId.toString()) {
-      let novelId = null;
-      let chapterId = null;
-      
-      if (comment.contentType === 'novels') {
-        novelId = comment.contentId;
-      } else if (comment.contentType === 'chapters') {
-        // For chapters, contentId might be in format "novelId-chapterId"
-        const parts = comment.contentId.split('-');
-        if (parts.length === 2) {
-          novelId = parts[0];
-          chapterId = parts[1];
-        } else {
-          chapterId = comment.contentId;
-          // Try to get novelId from the chapter document
-          try {
-            const Chapter = (await import('../models/Chapter.js')).default;
-            const chapterDoc = await Chapter.findById(chapterId);
-            if (chapterDoc) {
-              novelId = chapterDoc.novelId.toString();
-            }
-          } catch (err) {
-            console.error('Error getting novelId from chapter:', err);
+    // Extract novelId and chapterId ONCE for notifications and cache clearing
+    let novelId = null;
+    let chapterId = null;
+    
+    if (comment.contentType === 'novels') {
+      novelId = comment.contentId;
+    } else if (comment.contentType === 'chapters') {
+      // For chapters, contentId might be in format "novelId-chapterId"
+      const parts = comment.contentId.split('-');
+      if (parts.length === 2) {
+        novelId = parts[0];
+        chapterId = parts[1];
+      } else {
+        chapterId = comment.contentId;
+        // Try to get novelId from the chapter document
+        try {
+          const Chapter = (await import('../models/Chapter.js')).default;
+          const chapterDoc = await Chapter.findById(chapterId);
+          if (chapterDoc) {
+            novelId = chapterDoc.novelId.toString();
           }
+        } catch (err) {
+          console.error('Error getting novelId from chapter:', err);
         }
       }
-      
+    }
+
+    // Create notification only when liking for the FIRST TIME EVER
+    if (isFirstTimeLike && isLiked && comment.user.toString() !== userId.toString()) {
       if (novelId) {
         try {
           await createLikedCommentNotification(
@@ -1556,8 +1559,8 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
       }
     }
 
-    // Clear targeted caches for this comment since like count changed
-    await clearCachesForComment(comment);
+    // Clear targeted caches for this comment since like count changed (pass novelId to avoid extra lookup)
+    await clearCachesForComment(comment, novelId);
 
     // Broadcast real-time update to all connected clients
     broadcastEvent('comment_like_update', {
@@ -1599,42 +1602,42 @@ router.post('/:commentId/pin', auth, async (req, res) => {
     // Check if user has permission to pin comments
     const canPin = req.user.role === 'admin' || req.user.role === 'moderator';
     
+    // Extract novelId ONCE for permission checks and cache clearing
+    let novelId = null;
+    
+    if (comment.contentType === 'novels') {
+      novelId = comment.contentId;
+    } else if (comment.contentType === 'chapters') {
+      // For chapters, contentId is in format "novelId-chapterId"
+      const parts = comment.contentId.split('-');
+      if (parts.length === 2 && parts[0].length === 24 && parts[1].length === 24) {
+        novelId = parts[0];
+      } else {
+        // Fallback: try to get novelId from the chapter document
+        console.log(`Making database lookup for novelId in pin route, contentId: ${comment.contentId}`);
+        try {
+          const Chapter = (await import('../models/Chapter.js')).default;
+          const chapterDoc = await Chapter.findById(comment.contentId);
+          if (chapterDoc) {
+            novelId = chapterDoc.novelId.toString();
+          }
+        } catch (err) {
+          console.error('Error getting novelId from chapter:', err);
+        }
+      }
+    }
+
     // If user is pj_user, check if they're assigned to this novel
     let canPinAsPjUser = false;
-    if (req.user.role === 'pj_user') {
+    if (req.user.role === 'pj_user' && novelId) {
       try {
         // Import Novel model to check pj_user assignment
         const Novel = (await import('../models/Novel.js')).default;
-        let novelId = null;
-        
-        if (comment.contentType === 'novels') {
-          novelId = comment.contentId;
-        } else if (comment.contentType === 'chapters') {
-          // For chapters, contentId is in format "novelId-chapterId"
-          const parts = comment.contentId.split('-');
-          if (parts.length === 2) {
-            novelId = parts[0];
-          } else {
-            // Fallback: try to get novelId from the chapter document
-            try {
-              const Chapter = (await import('../models/Chapter.js')).default;
-              const chapterDoc = await Chapter.findById(comment.contentId);
-              if (chapterDoc) {
-                novelId = chapterDoc.novelId.toString();
-              }
-            } catch (err) {
-              console.error('Error getting novelId from chapter:', err);
-            }
-          }
-        }
-        
-        if (novelId) {
-          const novel = await Novel.findById(novelId);
-          if (novel && novel.active && novel.active.pj_user) {
-            canPinAsPjUser = novel.active.pj_user.includes(req.user._id) ||
-                            novel.active.pj_user.includes(req.user.username) ||
-                            novel.active.pj_user.includes(req.user.displayName);
-          }
+        const novel = await Novel.findById(novelId);
+        if (novel && novel.active && novel.active.pj_user) {
+          canPinAsPjUser = novel.active.pj_user.includes(req.user._id) ||
+                          novel.active.pj_user.includes(req.user.username) ||
+                          novel.active.pj_user.includes(req.user.displayName);
         }
       } catch (err) {
         console.error('Error checking pj_user assignment:', err);
@@ -1650,8 +1653,8 @@ router.post('/:commentId/pin', auth, async (req, res) => {
       comment.isPinned = false;
       await comment.save();
       
-      // Clear targeted caches for this comment
-      await clearCachesForComment(comment);
+      // Clear targeted caches for this comment (pass novelId to avoid extra lookup)
+      await clearCachesForComment(comment, novelId);
       
       res.json({
         isPinned: false,
@@ -1675,8 +1678,8 @@ router.post('/:commentId/pin', auth, async (req, res) => {
       comment.isPinned = true;
       await comment.save();
       
-      // Clear targeted caches for this comment
-      await clearCachesForComment(comment);
+      // Clear targeted caches for this comment (pass novelId to avoid extra lookup)
+      await clearCachesForComment(comment, novelId);
       
       res.json({
         isPinned: true,
@@ -1707,16 +1710,7 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
 
     await comment.save();
     
-    // Clear targeted caches for this comment
-    await clearCachesForComment(comment);
-    
-    // Clear user stats cache for the comment author
-    clearUserStatsCache(req.user._id.toString());
-
-    // Populate user info
-    await comment.populate('user', 'username displayName avatar role userNumber');
-
-    // Create follow notifications for users following this novel
+    // Extract novelId and chapterId ONCE for cache clearing and notifications
     let novelId = null;
     let chapterId = null;
     
@@ -1742,6 +1736,17 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
         }
       }
     }
+    
+    // Clear targeted caches for this comment (pass novelId to avoid extra lookup)
+    await clearCachesForComment(comment, novelId);
+    
+    // Clear user stats cache for the comment author
+    clearUserStatsCache(req.user._id.toString());
+
+    // Populate user info
+    await comment.populate('user', 'username displayName avatar role userNumber');
+
+    // Create follow notifications for users following this novel
     
     if (novelId) {
       await createFollowCommentNotifications(
@@ -1789,8 +1794,19 @@ router.patch('/:commentId', auth, checkBan, async (req, res) => {
 
     await comment.save();
     
-    // Clear targeted caches for this comment
-    await clearCachesForComment(comment);
+    // Extract novelId for cache clearing
+    let novelId = null;
+    if (comment.contentType === 'novels') {
+      novelId = comment.contentId;
+    } else if (comment.contentType === 'chapters') {
+      const parts = comment.contentId.split('-');
+      if (parts.length === 2 && parts[0].length === 24 && parts[1].length === 24) {
+        novelId = parts[0];
+      }
+    }
+    
+    // Clear targeted caches for this comment (pass novelId to avoid extra lookup)
+    await clearCachesForComment(comment, novelId);
     
     // Populate user info before returning
     await comment.populate('user', 'username displayName avatar role userNumber');
@@ -1827,6 +1843,34 @@ router.delete('/:commentId', auth, async (req, res) => {
     // Get deletion reason from request body (only for admin/moderator deletions)
     const { reason = '' } = req.body;
 
+    // Extract novelId ONCE for notifications and cache clearing
+    let novelId = null;
+    let chapterId = null;
+    
+    if (comment.contentType === 'novels') {
+      novelId = comment.contentId;
+    } else if (comment.contentType === 'chapters') {
+      // For chapters, contentId might be in format "novelId-chapterId"
+      const parts = comment.contentId.split('-');
+      if (parts.length === 2 && parts[0].length === 24 && parts[1].length === 24) {
+        novelId = parts[0];
+        chapterId = parts[1];
+      } else {
+        chapterId = comment.contentId;
+        // Try to get novelId from the chapter document
+        console.log(`Making database lookup for novelId in delete route, contentId: ${comment.contentId}`);
+        try {
+          const Chapter = (await import('../models/Chapter.js')).default;
+          const chapterDoc = await Chapter.findById(chapterId);
+          if (chapterDoc) {
+            novelId = chapterDoc.novelId.toString();
+          }
+        } catch (err) {
+          console.error('Error getting novelId from chapter:', err);
+        }
+      }
+    }
+
     if (isModAction) {
       // Admin/Moderator deletion - remove from interface but keep in DB
       comment.isDeleted = true;
@@ -1853,32 +1897,7 @@ router.delete('/:commentId', auth, async (req, res) => {
 
       // Send notification to comment owner if it's not their own comment
       if (comment.user.toString() !== req.user._id.toString()) {
-        // Determine novel and chapter info for notification
-        let novelId = null;
-        let chapterId = null;
-        
-        if (comment.contentType === 'novels') {
-          novelId = comment.contentId;
-        } else if (comment.contentType === 'chapters') {
-          // For chapters, contentId might be in format "novelId-chapterId"
-          const parts = comment.contentId.split('-');
-          if (parts.length === 2) {
-            novelId = parts[0];
-            chapterId = parts[1];
-          } else {
-            chapterId = comment.contentId;
-            // Try to get novelId from the chapter document
-            try {
-              const Chapter = (await import('../models/Chapter.js')).default;
-              const chapterDoc = await Chapter.findById(chapterId);
-              if (chapterDoc) {
-                novelId = chapterDoc.novelId.toString();
-              }
-            } catch (err) {
-              console.error('Error getting novelId from chapter:', err);
-            }
-          }
-        }
+        // novelId and chapterId already extracted above
         
         if (novelId) {
           // Strip HTML tags from comment text for preview
@@ -1905,8 +1924,8 @@ router.delete('/:commentId', auth, async (req, res) => {
 
     await comment.save();
     
-    // Clear targeted caches for this comment
-    await clearCachesForComment(comment);
+    // Clear targeted caches for this comment (pass novelId to avoid extra lookup)
+    await clearCachesForComment(comment, novelId);
     
     // Clear user stats cache for the comment author
     clearUserStatsCache(comment.user.toString());

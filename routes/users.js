@@ -11,7 +11,8 @@ import fs from 'fs';
 import Comment from '../models/Comment.js';
 import Chapter from '../models/Chapter.js';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
-import { getCachedUserById, getCachedUserByUsername, clearUserCache } from '../utils/userCache.js';
+import { getCachedUserById, getCachedUserByUsername, clearUserCache, clearAllUserCaches } from '../utils/userCache.js';
+import { batchGetUsers } from '../utils/batchUserCache.js';
 
 const router = express.Router();
 
@@ -173,6 +174,9 @@ router.post('/:displayNameSlug/avatar', auth, async (req, res) => {
       { avatar },
       { new: true }
     ).select('-password');
+
+    // Clear all user caches after avatar update
+    clearAllUserCaches(user);
 
     res.json({ avatar: user.avatar });
   } catch (error) {
@@ -1085,7 +1089,7 @@ router.get('/:displayNameSlug/blocked', auth, async (req, res) => {
  */
 router.get('/:username/ban-status', auth, async (req, res) => {
   try {
-    const user = await User.findOne({ username: req.params.username });
+    const user = await getCachedUserByUsername(req.params.username);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -1326,8 +1330,8 @@ router.put('/:id', auth, async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Clear user cache when data changes
-    clearUserCache(user._id, user.username);
+    // Clear all user caches when data changes
+    clearAllUserCaches(user);
 
     res.json(user);
   } catch (err) {
@@ -2736,6 +2740,9 @@ router.post('/number/:userNumber/avatar', auth, async (req, res) => {
       { new: true }
     ).select('-password');
 
+    // Clear all user caches after avatar update
+    clearAllUserCaches(user);
+
     res.json({ avatar: user.avatar });
   } catch (error) {
     console.error('Avatar update error:', error);
@@ -3136,7 +3143,7 @@ router.put('/number/:userNumber/intro', auth, async (req, res) => {
 });
 
 /**
- * Get multiple users by their IDs or userNumbers (optimized with caching)
+ * Get multiple users by their IDs or userNumbers (optimized with batch caching)
  * @route POST /api/users/by-ids
  */
 router.post('/by-ids', async (req, res) => {
@@ -3152,50 +3159,19 @@ router.post('/by-ids', async (req, res) => {
       return res.status(400).json({ message: 'Cannot fetch more than 50 users at once' });
     }
     
-    // Create cache key based on sorted IDs for consistent caching
-    const sortedIds = [...ids].sort();
-    const cacheKey = `users_batch_${sortedIds.join('_')}`;
-    
-    // Check cache first
-    const cachedUsers = getCachedUserStats(cacheKey);
-    if (cachedUsers) {
-      return res.json({ users: cachedUsers });
-    }
-    
-    // Separate ObjectIds and userNumbers
-    const objectIds = [];
-    const userNumbers = [];
-    
-    ids.forEach(id => {
-      if (mongoose.Types.ObjectId.isValid(id) && /^[0-9a-fA-F]{24}$/.test(id)) {
-        objectIds.push(mongoose.Types.ObjectId.createFromHexString(id));
-      } else if (!isNaN(parseInt(id))) {
-        userNumbers.push(parseInt(id));
-      }
-      // Skip invalid IDs
+    // Use batch cache lookup
+    const userLookupResult = await batchGetUsers(ids, {
+      projection: { displayName: 1, username: 1, userNumber: 1, avatar: 1, role: 1, _id: 1 }
     });
     
-    // Build query conditions
-    const queryConditions = [];
-    if (objectIds.length > 0) {
-      queryConditions.push({ _id: { $in: objectIds } });
+    // Convert the lookup result to an array format that matches the old API
+    const users = [];
+    for (const id of ids) {
+      const user = userLookupResult[id] || userLookupResult[id.toString()];
+      if (user) {
+        users.push(user);
+      }
     }
-    if (userNumbers.length > 0) {
-      queryConditions.push({ userNumber: { $in: userNumbers } });
-    }
-    
-    if (queryConditions.length === 0) {
-      return res.json({ users: [] });
-    }
-    
-    // Fetch users
-    const users = await User.find(
-      { $or: queryConditions },
-      { displayName: 1, username: 1, userNumber: 1, avatar: 1, role: 1, _id: 1 }
-    ).lean();
-    
-    // Cache the result for 5 minutes
-    setCachedUserStats(cacheKey, users);
     
     res.json({ users });
   } catch (error) {

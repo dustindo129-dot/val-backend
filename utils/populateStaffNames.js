@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import User from '../models/User.js';
+import { batchGetUsers } from './batchUserCache.js';
 
 /**
  * Populates staff ObjectIds with user display names
@@ -66,8 +67,10 @@ export const populateStaffNames = async (obj) => {
       }
     }
 
-    // Collect ObjectIds from chapter staff fields
+    // Define staff fields array for reuse
     const chapterStaffFields = ['translator', 'editor', 'proofreader'];
+
+    // Collect ObjectIds from chapter staff fields
     for (const field of chapterStaffFields) {
       if (obj.hasOwnProperty(field)) {
         collectObjectIds(obj[field]);
@@ -91,8 +94,16 @@ export const populateStaffNames = async (obj) => {
       }
     }
 
-    // If no ObjectIds or author strings found, return original object
-    if (allObjectIds.size === 0 && authorStringsToMatch.size === 0) {
+    // Collect staff strings that might match usernames/displayNames/userNumbers
+    const staffStringsToMatch = new Set();
+    for (const field of chapterStaffFields) {
+      if (obj.hasOwnProperty(field) && obj[field] && typeof obj[field] === 'string' && !isValidObjectId(obj[field])) {
+        staffStringsToMatch.add(obj[field].trim());
+      }
+    }
+
+    // If no ObjectIds or strings to match found, return original object
+    if (allObjectIds.size === 0 && authorStringsToMatch.size === 0 && staffStringsToMatch.size === 0) {
       return obj;
     }
 
@@ -121,24 +132,47 @@ export const populateStaffNames = async (obj) => {
       }
     }
 
-    // Fetch all users in one batched query
-    const users = await User.find(
-      queryConditions.length === 1 ? queryConditions[0] : { $or: queryConditions },
-      { displayName: 1, username: 1, userNumber: 1, avatar: 1, role: 1 }
-    ).lean();
-
-    // Create user lookup maps
-    const userMap = {}; // ObjectId -> User
-    const userNameMap = {}; // displayName/username -> User (case-insensitive)
-    
-    users.forEach(user => {
-      userMap[user._id.toString()] = user;
-      // Also map by displayName and username for string matching (case-insensitive)
-      if (user.displayName) {
-        userNameMap[user.displayName.toLowerCase()] = user;
+    // Add staff string matching conditions (case-insensitive, including userNumber)
+    if (staffStringsToMatch.size > 0) {
+      const staffStrings = Array.from(staffStringsToMatch);
+      const regexConditions = staffStrings.map(staffString => ({
+        $or: [
+          { displayName: { $regex: new RegExp(`^${staffString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+          { username: { $regex: new RegExp(`^${staffString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+          { userNumber: { $regex: new RegExp(`^${staffString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }
+        ]
+      }));
+      
+      if (regexConditions.length === 1) {
+        queryConditions.push(regexConditions[0]);
+      } else {
+        queryConditions.push({ $or: regexConditions });
       }
-      if (user.username) {
-        userNameMap[user.username.toLowerCase()] = user;
+    }
+
+    // Use batch cache lookup instead of direct database query
+    const allIdentifiers = [...allObjectIds, ...authorStringsToMatch, ...staffStringsToMatch];
+    const userLookupResult = await batchGetUsers(allIdentifiers, {
+      projection: { displayName: 1, username: 1, userNumber: 1, avatar: 1, role: 1 }
+    });
+
+    // Create user lookup maps from batch result
+    const userMap = {}; // ObjectId -> User
+    const userNameMap = {}; // displayName/username/userNumber -> User (case-insensitive)
+    
+    Object.values(userLookupResult).forEach(user => {
+      if (user && user._id) {
+        userMap[user._id.toString()] = user;
+        // Also map by displayName, username, and userNumber for string matching (case-insensitive)
+        if (user.displayName) {
+          userNameMap[user.displayName.toLowerCase()] = user;
+        }
+        if (user.username) {
+          userNameMap[user.username.toLowerCase()] = user;
+        }
+        if (user.userNumber) {
+          userNameMap[user.userNumber.toString().toLowerCase()] = user;
+        }
       }
     });
 
@@ -155,7 +189,16 @@ export const populateStaffNames = async (obj) => {
         return userObj ? (userObj.displayName || userObj.username) : staffValue;
       }
 
-      // If not an ObjectId, return as is (already a display name or text)
+      // If not an ObjectId, try to find user by username/displayName/userNumber
+      if (typeof staffValue === 'string') {
+        const userObj = userNameMap[staffValue.toLowerCase()];
+        if (userObj) {
+          // Return display name if available, otherwise username
+          return userObj.displayName || userObj.username;
+        }
+      }
+
+      // If no user found, return as is (already a display name or text)
       return staffValue;
     };
 
