@@ -361,6 +361,28 @@ router.post('/like', auth, async (req, res) => {
       console.warn('Could not clear user stats cache:', error.message);
     }
 
+    // CRITICAL: Clear complete novel cache to ensure fresh user interaction data
+    try {
+      const { clearNovelCaches } = await import('../utils/cacheUtils.js');
+      if (clearNovelCaches) {
+        clearNovelCaches();
+      }
+      
+      // Also clear specific user cache entries from novels route
+      const { clearSpecificNovelCache } = await import('./novels.js');
+      if (clearSpecificNovelCache) {
+        // Clear both logged-in user and guest cache entries (ensure proper string format)
+        const userIdString = userId.toString();
+        clearSpecificNovelCache(`novel-complete:${novelId}:${userIdString}`);
+        clearSpecificNovelCache(`novel-complete:${novelId}:guest`);
+        
+        // Also clear any variations
+        clearSpecificNovelCache(`novel-complete:${novelId}:${userId}`); // ObjectId version
+      }
+    } catch (error) {
+      console.warn('Could not clear novel caches:', error.message);
+    }
+
     // Get total likes count
     const [stats] = await UserNovelInteraction.aggregate([
       { $match: { novelId: new mongoose.Types.ObjectId(novelId), liked: true } },
@@ -446,6 +468,28 @@ router.post('/rate', auth, async (req, res) => {
       console.warn('Could not clear user stats cache:', error.message);
     }
 
+    // CRITICAL: Clear complete novel cache to ensure fresh user interaction data
+    try {
+      const { clearNovelCaches } = await import('../utils/cacheUtils.js');
+      if (clearNovelCaches) {
+        clearNovelCaches();
+      }
+      
+      // Also clear specific user cache entries from novels route
+      const { clearSpecificNovelCache } = await import('./novels.js');
+      if (clearSpecificNovelCache) {
+        // Clear both logged-in user and guest cache entries (ensure proper string format)
+        const userIdString = userId.toString();
+        clearSpecificNovelCache(`novel-complete:${novelId}:${userIdString}`);
+        clearSpecificNovelCache(`novel-complete:${novelId}:guest`);
+        
+        // Also clear any variations
+        clearSpecificNovelCache(`novel-complete:${novelId}:${userId}`); // ObjectId version
+      }
+    } catch (error) {
+      console.warn('Could not clear novel caches:', error.message);
+    }
+
     // Calculate new rating statistics
     const [stats] = await UserNovelInteraction.aggregate([
       { $match: { novelId: new mongoose.Types.ObjectId(novelId), rating: { $exists: true, $ne: null } } },
@@ -518,6 +562,28 @@ router.delete('/rate/:novelId', auth, async (req, res) => {
       console.warn('Could not clear user stats cache:', error.message);
     }
 
+    // CRITICAL: Clear complete novel cache to ensure fresh user interaction data
+    try {
+      const { clearNovelCaches } = await import('../utils/cacheUtils.js');
+      if (clearNovelCaches) {
+        clearNovelCaches();
+      }
+      
+      // Also clear specific user cache entries from novels route
+      const { clearSpecificNovelCache } = await import('./novels.js');
+      if (clearSpecificNovelCache) {
+        // Clear both logged-in user and guest cache entries (ensure proper string format)
+        const userIdString = userId.toString();
+        clearSpecificNovelCache(`novel-complete:${novelId}:${userIdString}`);
+        clearSpecificNovelCache(`novel-complete:${novelId}:guest`);
+        
+        // Also clear any variations
+        clearSpecificNovelCache(`novel-complete:${novelId}:${userId}`); // ObjectId version
+      }
+    } catch (error) {
+      console.warn('Could not clear novel caches:', error.message);
+    }
+
     // Calculate new rating statistics
     const [stats] = await UserNovelInteraction.aggregate([
       { $match: { novelId: new mongoose.Types.ObjectId(novelId), rating: { $exists: true, $ne: null } } },
@@ -567,6 +633,8 @@ router.post('/bookmark', auth, async (req, res) => {
     // Find or create interaction
     let interaction = await UserNovelInteraction.findOne({ userId, novelId });
     
+    const wasBookmarked = interaction?.bookmarked || false;
+    
     if (!interaction) {
       // Create new interaction with bookmarked=true
       interaction = new UserNovelInteraction({
@@ -579,7 +647,7 @@ router.post('/bookmark', auth, async (req, res) => {
       interaction.bookmarked = !interaction.bookmarked;
     }
     await interaction.save();
-
+    
     // Clear caches for this user and novel
     clearUserStatsCache(userId);
     clearNovelStatsCache(novelId); // Clear novel stats cache
@@ -598,8 +666,46 @@ router.post('/bookmark', auth, async (req, res) => {
       console.warn('Could not clear user stats cache:', error.message);
     }
 
+    // IMMEDIATE: Clear specific user cache to prevent rapid-click issues
+    try {
+      const { clearSpecificNovelCache } = await import('./novels.js');
+      if (clearSpecificNovelCache) {
+        // Clear current user's cache immediately to prevent stale data on rapid clicks
+        const userIdString = userId.toString();
+        clearSpecificNovelCache(`novel-complete:${novelId}:${userIdString}`);
+        clearSpecificNovelCache(`novel-complete:${novelId}:${userId}`); // ObjectId version
+      }
+    } catch (error) {
+      console.warn('Could not clear specific user cache:', error.message);
+    }
+
+    // DELAYED: Clear remaining caches to avoid race conditions with frontend optimistic updates
+    setTimeout(async () => {
+      try {
+        const { clearNovelCaches } = await import('../utils/cacheUtils.js');
+        if (clearNovelCaches) {
+          clearNovelCaches();
+        }
+        
+        // Also clear guest cache (delayed to avoid interfering with current user)
+        const { clearSpecificNovelCache } = await import('./novels.js');
+        if (clearSpecificNovelCache) {
+          clearSpecificNovelCache(`novel-complete:${novelId}:guest`);
+        }
+      } catch (error) {
+        console.warn('Could not clear novel caches:', error.message);
+      }
+    }, 1000); // Reduced delay since we handle immediate user cache above
+
+    // Get total bookmarks count
+    const [stats] = await UserNovelInteraction.aggregate([
+      { $match: { novelId: new mongoose.Types.ObjectId(novelId), bookmarked: true } },
+      { $group: { _id: null, totalBookmarks: { $sum: 1 } } }
+    ]);
+    
     return res.json({ 
-      bookmarked: interaction.bookmarked
+      bookmarked: interaction.bookmarked,
+      totalBookmarks: stats?.totalBookmarks || 0
     });
   } catch (err) {
     console.error("Error toggling bookmark:", err);

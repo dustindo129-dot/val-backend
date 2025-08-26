@@ -131,6 +131,18 @@ const QUERY_CACHE_TTL = 1000 * 60 * 5; // 5 minutes cache
 // Register the cache map so it can be cleared by cacheUtils
 registerCacheMap(queryCacheMap);
 
+// Export function to clear specific cache entries
+export const clearSpecificNovelCache = (cacheKey) => {
+  const hadCache = queryCacheMap.has(cacheKey);
+  const hadPending = pendingQueries.has(cacheKey);
+  
+  queryCacheMap.delete(cacheKey);
+  pendingQueries.delete(cacheKey);
+  
+  if (process.env.NODE_ENV === 'development') {
+  }
+};
+
 // Cache for contribution history to reduce database queries
 const contributionHistoryCache = new Map();
 const CONTRIBUTION_HISTORY_CACHE_TTL = 1000 * 60 * 5; // 5 minutes - balance between freshness and performance
@@ -3583,7 +3595,7 @@ export async function checkAndUnlockContent(novelId) {
  * Get complete novel page data in a single optimized request
  * @route GET /api/novels/:id/complete
  */
-router.get("/:id/complete", async (req, res) => {
+router.get("/:id/complete", optionalAuth, async (req, res) => {
   try {
     const novelId = req.params.id;
     
@@ -3689,6 +3701,9 @@ router.get("/:id/complete", async (req, res) => {
               totalRatings: {
                 $sum: { $cond: [{ $ne: ['$rating', null] }, 1, 0] }
               },
+              totalBookmarks: {
+                $sum: { $cond: [{ $eq: ['$bookmarked', true] }, 1, 0] }
+              },
               ratingSum: {
                 $sum: { $ifNull: ['$rating', 0] }
               }
@@ -3731,13 +3746,15 @@ router.get("/:id/complete", async (req, res) => {
       const interactions = {
         totalLikes: stats?.totalLikes || 0,
         totalRatings: stats?.totalRatings || 0,
+        totalBookmarks: stats?.totalBookmarks || 0,
         averageRating: stats?.totalRatings > 0 
           ? (stats.ratingSum / stats.totalRatings).toFixed(1) 
           : '0.0',
         userInteraction: {
           liked: userInteraction?.liked || false,
           rating: userInteraction?.rating || null,
-          bookmarked: userInteraction?.bookmarked || false
+          bookmarked: userInteraction?.bookmarked || false,
+          followed: userInteraction?.followed || false
         }
       };
 
