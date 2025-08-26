@@ -282,13 +282,11 @@ const clearCachesForComment = async (comment, knownNovelId = null) => {
     // Clear caches for the specific novel
     if (novelId) {
       clearNovelCommentsCache(novelId);
-      console.log(`Cleared novel comments cache for novel ${novelId}`);
     }
 
     // Clear chapter-specific comment caches if this is a chapter comment
     if (chapterId && comment.contentType === 'chapters') {
       clearChapterCommentsCache(chapterId, novelId);
-      console.log(`Cleared chapter comments cache for chapter ${chapterId}`);
       
       // CRITICAL: Also clear chapter full-optimized cache since comments affect the page
       // Import the chapter caches utility if available
@@ -296,7 +294,6 @@ const clearCachesForComment = async (comment, knownNovelId = null) => {
         const { clearChapterCaches } = await import('../utils/cacheUtils.js');
         if (typeof clearChapterCaches === 'function') {
           clearChapterCaches(chapterId);
-          console.log(`Cleared chapter full-optimized cache for chapter ${chapterId}`);
         }
       } catch (importError) {
         console.warn('Could not import chapter cache utils:', importError.message);

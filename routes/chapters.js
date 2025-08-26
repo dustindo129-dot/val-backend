@@ -2356,7 +2356,6 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
     // Log successful chapter fetch
     console.log(`Fetched chapter: "${chapter.title}" (ID: ${chapter._id})`);
     
-    
     // CRITICAL: Add access control logic for rental system
     const user = req.user;
     let hasAccess = false;
