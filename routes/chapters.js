@@ -1254,6 +1254,9 @@ router.get('/:id', optionalAuth, async (req, res) => {
       return res.status(404).json({ message: 'Chapter not found' });
     }
 
+    // Log successful chapter fetch
+    console.log(`Fetched chapter: "${chapterData.title}" (ID: ${chapterData._id})`);
+
     // Check if user can access this chapter content
     const user = req.user; // Will be undefined if not authenticated
     let hasAccess = false;
