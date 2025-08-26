@@ -1616,24 +1616,27 @@ router.post('/', auth, async (req, res) => {
     // Get novel info for the notification
     const novel = await Novel.findById(novelId).select('title');
 
-    // Only create notifications and notify clients for non-draft chapters
+    // Always notify clients about new chapters (both draft and published)
+    // But only create user notifications for non-draft chapters
     if (!isDraftChapter) {
-      // Create notifications for users who bookmarked this novel
+      // Create notifications for users who bookmarked this novel (only for published chapters)
       await createNewChapterNotifications(
         novelId.toString(),
         newChapter._id.toString(),
         newChapter.title
       );
-
-      // Notify all clients about the new chapter
-      notifyAllClients('new_chapter', {
-        chapterId: newChapter._id,
-        chapterTitle: newChapter.title,
-        novelId: novelId,
-        novelTitle: novel?.title || 'Unknown Novel',
-        timestamp: new Date().toISOString()
-      });
     }
+
+    // Always notify all clients about the new chapter (including drafts)
+    // This ensures the novel detail page updates immediately
+    notifyAllClients('new_chapter', {
+      chapterId: newChapter._id,
+      chapterTitle: newChapter.title,
+      novelId: novelId,
+      novelTitle: novel?.title || 'Unknown Novel',
+      isDraft: isDraftChapter, // Add flag to distinguish draft chapters
+      timestamp: new Date().toISOString()
+    });
 
     // Check for auto-unlock if a paid chapter was created
     if (mode === 'paid') {
