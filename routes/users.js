@@ -2400,6 +2400,121 @@ const clearUserResolutionCache = (userId = null) => {
 export { clearUserStatsCache, clearUserResolutionCache };
 
 /**
+ * Get consolidated user settings data (optimized single query)
+ * @route GET /api/users/number/:userNumber/settings-data
+ */
+router.get('/number/:userNumber/settings-data', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+
+    // Check if user has admin/moderator role for reports access
+    const isAdminOrMod = req.user.role === 'admin' || req.user.role === 'moderator';
+    
+    // Use aggregation to get all required data in one query
+    const [userData] = await User.aggregate([
+      // Match the user by userNumber
+      { $match: { userNumber } },
+      
+      // Add fields for notifications count
+      {
+        $lookup: {
+          from: 'notifications',
+          let: { userId: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$userId', '$$userId'] },
+                    { $eq: ['$isRead', false] }
+                  ]
+                }
+              }
+            },
+            { $count: 'unreadCount' }
+          ],
+          as: 'notificationsCount'
+        }
+      },
+      
+      // Add banned users lookup if user is admin
+      ...(req.user.role === 'admin' ? [{
+        $lookup: {
+          from: 'users',
+          pipeline: [
+            { $match: { isBanned: true } },
+            { $project: { username: 1, displayName: 1, avatar: 1 } }
+          ],
+          as: 'bannedUsers'
+        }
+      }] : []),
+      
+      // Add pending reports lookup if admin/moderator
+      ...(isAdminOrMod ? [{
+        $lookup: {
+          from: 'reports',
+          pipeline: [
+            { $match: { status: 'pending' } },
+            { $sort: { createdAt: -1 } }
+          ],
+          as: 'pendingReports'
+        }
+      }] : []),
+      
+      // Add blocked users lookup
+      {
+        $lookup: {
+          from: 'users',
+          let: { blockedUserIds: '$blockedUsers' },
+          pipeline: [
+            { $match: { $expr: { $in: ['$_id', '$$blockedUserIds'] } } },
+            { $project: { username: 1, displayName: 1, avatar: 1 } }
+          ],
+          as: 'blockedUsers'
+        }
+      },
+      
+      // Project only needed fields
+      {
+        $project: {
+          _id: 1,
+          username: 1,
+          displayName: 1,
+          email: 1,
+          avatar: 1,
+          displayNameLastChanged: 1,
+          role: 1,
+          unreadNotifications: { 
+            $arrayElemAt: ['$notificationsCount.unreadCount', 0] 
+          },
+          bannedUsers: req.user.role === 'admin' ? '$bannedUsers' : '$$REMOVE',
+          pendingReports: isAdminOrMod ? '$pendingReports' : '$$REMOVE',
+          blockedUsers: '$blockedUsers'
+        }
+      }
+    ]);
+
+    if (!userData) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== userData._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to view these settings' });
+    }
+
+    res.json(userData);
+  } catch (error) {
+    console.error('Error fetching settings data:', error);
+    res.status(500).json({ message: 'Failed to fetch settings data' });
+  }
+});
+
+/**
  * Get user's public profile by userNumber (no authentication required)
  * @route GET /api/users/number/:userNumber/public-profile
  */

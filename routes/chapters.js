@@ -418,7 +418,6 @@ const clearCommentsCache = (chapterId, novelId = null) => {
   }
   keysToDelete.forEach(key => commentsCache.delete(key));
   
-  console.log(`Cleared ${keysToDelete.length} comment cache entries for chapter ${chapterId}`);
 };
 
 // Cache chapter interaction to reduce duplicate queries
@@ -653,7 +652,6 @@ const clearUserCaches = (userId) => {
     clearedCount++;
   });
   
-  console.log(`Cleared ${clearedCount} chapter cache entries for user ${userId}`);
   return clearedCount;
 };
 
@@ -692,7 +690,6 @@ const clearChapterRelatedCaches = (chapterId, novelId = null, userId = null) => 
     }
   }
   
-  console.log(`Cleared ${clearedCount} additional cache entries for chapter ${chapterId}`);
 };
 
 /**
@@ -1247,15 +1244,16 @@ router.get('/:id', optionalAuth, async (req, res) => {
         }
       ]);
 
+      // Log successful chapter fetch before returning
+      if (chapter) {
+        console.log(`Fetched chapter: "${chapter.title}" (ID: ${chapter._id})`);
+      }
       return chapter;
     }, 1000 * 30); // Cache for 30 seconds - now with actual result caching!
 
     if (!chapterData) {
       return res.status(404).json({ message: 'Chapter not found' });
     }
-
-    // Log successful chapter fetch
-    console.log(`Fetched chapter: "${chapterData.title}" (ID: ${chapterData._id})`);
 
     // Check if user can access this chapter content
     const user = req.user; // Will be undefined if not authenticated
