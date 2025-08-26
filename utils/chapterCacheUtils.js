@@ -45,8 +45,6 @@ export const clearChapterCommentsCache = (chapterId, novelId = null) => {
   }
   keysToDelete.forEach(key => commentsCache.delete(key));
   
-  console.log(`Cleared ${keysToDelete.length} comment cache entries for chapter ${chapterId}`);
-  
   // Also clear novel caches to ensure consistency
   clearNovelCaches();
   
