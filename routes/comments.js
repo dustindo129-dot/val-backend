@@ -1038,7 +1038,6 @@ router.get('/', async (req, res) => {
             // Valid ObjectId format for both parts - extract novelId directly
             novelId = parts[0];
             chapterId = parts[1];
-            console.log(`Extracted novelId ${novelId} from contentId ${contentId}, avoiding database lookup`);
           }
         }
         

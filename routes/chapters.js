@@ -1243,11 +1243,6 @@ router.get('/:id', optionalAuth, async (req, res) => {
           }
         }
       ]);
-
-      // Log successful chapter fetch before returning
-      if (chapter) {
-        console.log(`Fetched chapter: "${chapter.title}" (ID: ${chapter._id})`);
-      }
       return chapter;
     }, 1000 * 30); // Cache for 30 seconds - now with actual result caching!
 
@@ -2357,6 +2352,10 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
 
     const chapter = chapterResult[0];
     const stats = interactionStats[0];
+    
+    // Log successful chapter fetch
+    console.log(`Fetched chapter: "${chapter.title}" (ID: ${chapter._id})`);
+    
     
     // CRITICAL: Add access control logic for rental system
     const user = req.user;
