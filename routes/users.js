@@ -846,37 +846,57 @@ router.post('/:username/follows', auth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid novel ID' });
     }
 
-    // Find existing interaction or create a new one
-    let interaction = await UserNovelInteraction.findOne({
-      userId: req.user._id,
-      novelId: novelId
-    });
+    // Use findOneAndUpdate with upsert for atomic operation
+    const result = await UserNovelInteraction.findOneAndUpdate(
+      { userId: req.user._id, novelId: novelId },
+      [
+        {
+          // Use aggregation pipeline for atomic toggle
+          $set: {
+            followed: { $not: ['$followed'] }, // Toggle the current value
+            updatedAt: new Date()
+          }
+        }
+      ],
+      { 
+        new: true, // Return updated document
+        upsert: true, // Create if doesn't exist
+        setDefaultsOnInsert: true // Set defaults for new documents
+      }
+    );
 
-    if (!interaction) {
-      // Create new interaction with followed=true
-      interaction = new UserNovelInteraction({
-        userId: req.user._id,
-        novelId: novelId,
-        followed: true,
-        updatedAt: new Date()
-      });
-      await interaction.save();
-      
-      return res.json({
-        message: 'Novel followed successfully',
-        isFollowed: true
-      });
-    } else {
-      // Toggle follow status
-      interaction.followed = !interaction.followed;
-      interaction.updatedAt = new Date();
-      await interaction.save();
-      
-      return res.json({
-        message: interaction.followed ? 'Novel followed successfully' : 'Novel unfollowed successfully',
-        isFollowed: interaction.followed
-      });
+    // CRITICAL: Clear caches immediately
+    const userIdString = req.user._id.toString();
+    
+    // Clear novel caches
+    try {
+      const { clearNovelCaches } = await import('../utils/cacheUtils.js');
+      if (clearNovelCaches) {
+        await clearNovelCaches();
+      }
+    } catch (error) {
+      console.warn('Could not clear novel caches:', error.message);
     }
+
+    // Clear specific cache entries
+    try {
+      const { clearSpecificNovelCache } = await import('./novels.js');
+      if (clearSpecificNovelCache) {
+        // Clear both logged-in user and guest cache entries
+        await Promise.all([
+          clearSpecificNovelCache(`novel-complete:${novelId}:${userIdString}`),
+          clearSpecificNovelCache(`novel-complete:${novelId}:guest`),
+          clearSpecificNovelCache(`novel-complete:${novelId}:${req.user._id}`)
+        ]);
+      }
+    } catch (error) {
+      console.warn('Could not clear specific novel caches:', error.message);
+    }
+
+    return res.json({
+      message: result.followed ? 'Novel followed successfully' : 'Novel unfollowed successfully',
+      isFollowed: result.followed
+    });
   } catch (error) {
     console.error('Follow toggle error:', error);
     res.status(500).json({ message: 'Failed to toggle follow' });
@@ -909,6 +929,28 @@ router.delete('/:username/follows/:novelId', auth, async (req, res) => {
       interaction.followed = false;
       interaction.updatedAt = new Date();
       await interaction.save();
+      
+      // CRITICAL: Clear complete novel cache to ensure fresh user interaction data (same as like/bookmark)
+      try {
+        const { clearNovelCaches } = await import('../utils/cacheUtils.js');
+        if (clearNovelCaches) {
+          clearNovelCaches();
+        }
+        
+        // Also clear specific user cache entries from novels route
+        const { clearSpecificNovelCache } = await import('./novels.js');
+        if (clearSpecificNovelCache) {
+          // Clear both logged-in user and guest cache entries (ensure proper string format)
+          const userIdString = req.user._id.toString();
+          clearSpecificNovelCache(`novel-complete:${req.params.novelId}:${userIdString}`);
+          clearSpecificNovelCache(`novel-complete:${req.params.novelId}:guest`);
+          
+          // Also clear any variations
+          clearSpecificNovelCache(`novel-complete:${req.params.novelId}:${req.user._id}`); // ObjectId version
+        }
+      } catch (error) {
+        console.warn('Could not clear novel caches:', error.message);
+      }
     }
 
     res.json({ 

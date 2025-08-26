@@ -992,6 +992,28 @@ router.post('/:novelId/modules', auth, async (req, res) => {
       await checkAndUnlockContent(req.params.novelId);
     }
     
+    // Send real-time notification about the new module
+    // Use both specific event and generic 'update' as fallback for SSE connection timing issues
+    notifyAllClients('new_module', {
+      moduleId: newModule._id,
+      moduleTitle: newModule.title,
+      novelId: req.params.novelId,
+      isDraft: newModule.mode === 'draft',
+      timestamp: new Date().toISOString()
+    });
+    
+    // FALLBACK: Also send generic 'update' event that existing handlers already catch
+    // This ensures UI updates even if SSE connection timing is problematic
+    notifyAllClients('update', {
+      type: 'module_created',
+      novelId: req.params.novelId,
+      moduleId: newModule._id,
+      moduleTitle: newModule.title,
+      timestamp: new Date().toISOString()
+    });
+    
+
+    
     // Return the created module
     res.status(201).json(newModule);
   } catch (err) {
