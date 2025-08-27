@@ -204,8 +204,13 @@ export const populateStaffNames = async (obj) => {
 
     // Helper function to process a staff array (for novels)
     const processStaffArray = (staffArray) => {
-      if (!Array.isArray(staffArray) || staffArray.length === 0) {
-        return staffArray;
+      // FIXED: Always return arrays as arrays, even if empty or undefined
+      if (!Array.isArray(staffArray)) {
+        return staffArray; // Return undefined/null as is
+      }
+      
+      if (staffArray.length === 0) {
+        return []; // Return empty array as empty array
       }
 
       const result = staffArray.map(item => {
@@ -230,7 +235,8 @@ export const populateStaffNames = async (obj) => {
       if (obj.active) {
         populatedObj.active = {};
         for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
-          if (obj.active[role]) {
+          // FIXED: Always preserve the role, even if it's empty or undefined
+          if (obj.active.hasOwnProperty(role)) {
             populatedObj.active[role] = processStaffArray(obj.active[role]);
           }
         }
@@ -240,7 +246,8 @@ export const populateStaffNames = async (obj) => {
       if (obj.inactive) {
         populatedObj.inactive = {};
         for (const role of ['pj_user', 'translator', 'editor', 'proofreader']) {
-          if (obj.inactive[role]) {
+          // FIXED: Always preserve the role, even if it's empty or undefined
+          if (obj.inactive.hasOwnProperty(role)) {
             populatedObj.inactive[role] = processStaffArray(obj.inactive[role]);
           }
         }
