@@ -2169,18 +2169,135 @@ router.get('/id/:userId/role-modules', async (req, res) => {
         }
       });
 
-      // Return the combined list including the newly added modules
-      res.json({
-        ongoingModules: [
-          ...existingOngoingModules,
-          ...newModulesToAdd.map(item => ({
-            moduleId: userData.newModules.find(m => m._id.toString() === item.moduleId.toString()),
-            addedAt: item.addedAt
-          }))
-        ],
-        completedModules: existingCompletedModules,
-        newModulesCount: userData.newModules.length
-      });
+      // Clear user stats cache since module data changed
+      clearUserStatsCache(userId);
+      
+      // Also clear complete profile cache
+      const user = await User.findById(userId).select('userNumber');
+      if (user) {
+        clearUserStatsCache(`complete_profile_${user.userNumber}`);
+      }
+
+      // Re-run the aggregation to get the updated data including the newly added modules
+      const updatedResult = await User.aggregate([
+        // Match the specific user
+        { $match: { _id: new mongoose.Types.ObjectId(userId) } },
+        
+        // Add a field to perform the novel lookup
+        { $addFields: { userId: { $toString: "$_id" } } },
+        
+        // Lookup existing ongoing modules with novel data
+        {
+          $lookup: {
+            from: 'modules',
+            let: { moduleIds: '$ongoingModules.moduleId' },
+            pipeline: [
+              { $match: { $expr: { $in: ['$_id', '$$moduleIds'] } } },
+              {
+                $lookup: {
+                  from: 'novels',
+                  localField: 'novelId',
+                  foreignField: '_id',
+                  as: 'novelId',
+                  pipeline: [{ $project: { title: 1, illustration: 1 } }]
+                }
+              },
+              { $unwind: '$novelId' }
+            ],
+            as: 'existingOngoingModules'
+          }
+        },
+        
+        // Lookup existing completed modules with novel data
+        {
+          $lookup: {
+            from: 'modules',
+            let: { moduleIds: '$completedModules.moduleId' },
+            pipeline: [
+              { $match: { $expr: { $in: ['$_id', '$$moduleIds'] } } },
+              {
+                $lookup: {
+                  from: 'novels',
+                  localField: 'novelId',
+                  foreignField: '_id',
+                  as: 'novelId',
+                  pipeline: [{ $project: { title: 1, illustration: 1 } }]
+                }
+              },
+              { $unwind: '$novelId' }
+            ],
+            as: 'existingCompletedModules'
+          }
+        },
+        
+        // Project final result
+        {
+          $project: {
+            _id: 1,
+            ongoingModules: {
+              $map: {
+                input: '$ongoingModules',
+                as: 'ongoing',
+                in: {
+                  moduleId: {
+                    $arrayElemAt: [
+                      {
+                        $filter: {
+                          input: '$existingOngoingModules',
+                          cond: { $eq: ['$$this._id', '$$ongoing.moduleId'] }
+                        }
+                      },
+                      0
+                    ]
+                  },
+                  addedAt: '$$ongoing.addedAt'
+                }
+              }
+            },
+            completedModules: {
+              $map: {
+                input: '$completedModules',
+                as: 'completed',
+                in: {
+                  moduleId: {
+                    $arrayElemAt: [
+                      {
+                        $filter: {
+                          input: '$existingCompletedModules',
+                          cond: { $eq: ['$$this._id', '$$completed.moduleId'] }
+                        }
+                      },
+                      0
+                    ]
+                  },
+                  addedAt: '$$completed.addedAt'
+                }
+              }
+            }
+          }
+        }
+      ]);
+
+      if (updatedResult && updatedResult.length > 0) {
+        const updatedUserData = updatedResult[0];
+        
+        // Filter out null modules from updated lists
+        const updatedOngoingModules = updatedUserData.ongoingModules.filter(item => item.moduleId);
+        const updatedCompletedModules = updatedUserData.completedModules.filter(item => item.moduleId);
+
+        res.json({
+          ongoingModules: updatedOngoingModules,
+          completedModules: updatedCompletedModules,
+          newModulesCount: userData.newModules.length
+        });
+      } else {
+        // Fallback if the updated aggregation fails
+        res.json({
+          ongoingModules: existingOngoingModules,
+          completedModules: existingCompletedModules,
+          newModulesCount: userData.newModules.length
+        });
+      }
     } else {
       // Normal case - just return existing modules without adding new ones
       res.json({
@@ -2644,148 +2761,32 @@ router.get('/number/:userNumber/public-profile-complete', async (req, res) => {
       followingCount,
       commentsCount
     ] = await Promise.all([
-      // Get user modules with optimized aggregation
-      User.aggregate([
-        { $match: { _id: user._id } },
-        { $addFields: { userId: { $toString: '$_id' } } },
-        
-        // Lookup novels where user has roles
-        {
-          $lookup: {
-            from: 'novels',
-            let: { userId: '$userId' },
-            pipeline: [
-              {
-                $match: {
-                  $expr: {
-                    $or: [
-                      { $in: ['$$userId', '$active.pj_user'] },
-                      { $in: ['$$userId', '$active.translator'] },
-                      { $in: ['$$userId', '$active.editor'] },
-                      { $in: ['$$userId', '$active.proofreader'] }
-                    ]
-                  }
-                }
-              },
-              { $project: { _id: 1 } }
-            ],
-            as: 'userNovels'
+      // Get user modules using direct population (more reliable than complex aggregation)
+      User.findById(user._id)
+        .populate({
+          path: 'ongoingModules.moduleId',
+          populate: {
+            path: 'novelId',
+            select: 'title illustration'
           }
-        },
-        
-        // Lookup modules from user's novels
-        {
-          $lookup: {
-            from: 'modules',
-            let: { novelIds: '$userNovels._id' },
-            pipeline: [
-              { $match: { $expr: { $in: ['$novelId', '$$novelIds'] } } },
-              {
-                $lookup: {
-                  from: 'novels',
-                  localField: 'novelId',
-                  foreignField: '_id',
-                  as: 'novelId',
-                  pipeline: [{ $project: { title: 1, illustration: 1 } }]
-                }
-              },
-              { $unwind: '$novelId' }
-            ],
-            as: 'roleModules'
+        })
+        .populate({
+          path: 'completedModules.moduleId',
+          populate: {
+            path: 'novelId',
+            select: 'title illustration'
           }
-        },
-        
-        // Lookup existing ongoing modules
-        {
-          $lookup: {
-            from: 'modules',
-            let: { moduleIds: '$ongoingModules.moduleId' },
-            pipeline: [
-              { $match: { $expr: { $in: ['$_id', '$$moduleIds'] } } },
-              {
-                $lookup: {
-                  from: 'novels',
-                  localField: 'novelId',
-                  foreignField: '_id',
-                  as: 'novelId',
-                  pipeline: [{ $project: { title: 1, illustration: 1 } }]
-                }
-              },
-              { $unwind: '$novelId' }
-            ],
-            as: 'existingOngoingModules'
+        })
+        .then(populatedUser => {
+          if (!populatedUser) {
+            return { ongoingModules: [], completedModules: [] };
           }
-        },
-        
-        // Lookup existing completed modules
-        {
-          $lookup: {
-            from: 'modules',
-            let: { moduleIds: '$completedModules.moduleId' },
-            pipeline: [
-              { $match: { $expr: { $in: ['$_id', '$$moduleIds'] } } },
-              {
-                $lookup: {
-                  from: 'novels',
-                  localField: 'novelId',
-                  foreignField: '_id',
-                  as: 'novelId',
-                  pipeline: [{ $project: { title: 1, illustration: 1 } }]
-                }
-              },
-              { $unwind: '$novelId' }
-            ],
-            as: 'existingCompletedModules'
-          }
-        },
-        
-        // Project final result
-        {
-          $project: {
-            _id: 1,
-            ongoingModules: {
-              $map: {
-                input: '$ongoingModules',
-                as: 'ongoing',
-                in: {
-                  moduleId: {
-                    $arrayElemAt: [
-                      {
-                        $filter: {
-                          input: '$existingOngoingModules',
-                          cond: { $eq: ['$$this._id', '$$ongoing.moduleId'] }
-                        }
-                      },
-                      0
-                    ]
-                  },
-                  addedAt: '$$ongoing.addedAt'
-                }
-              }
-            },
-            completedModules: {
-              $map: {
-                input: '$completedModules',
-                as: 'completed',
-                in: {
-                  moduleId: {
-                    $arrayElemAt: [
-                      {
-                        $filter: {
-                          input: '$existingCompletedModules',
-                          cond: { $eq: ['$$this._id', '$$completed.moduleId'] }
-                        }
-                      },
-                      0
-                    ]
-                  },
-                  addedAt: '$$completed.addedAt'
-                }
-              }
-            }
-          }
-        }
-      ]),
+          
+          return {
+            ongoingModules: populatedUser.ongoingModules || [],
+            completedModules: populatedUser.completedModules || []
+          };
+        }),
       
       // Get chapters participated count
       Chapter.countDocuments({
@@ -2810,8 +2811,8 @@ router.get('/number/:userNumber/public-profile-complete', async (req, res) => {
       })
     ]);
 
-    // Process modules data
-    const moduleData = userModulesResult[0] || { ongoingModules: [], completedModules: [] };
+    // Process modules data (now comes directly from populate, not aggregation)
+    const moduleData = userModulesResult || { ongoingModules: [], completedModules: [] };
     const ongoingModules = moduleData.ongoingModules.filter(item => item.moduleId);
     const completedModules = moduleData.completedModules.filter(item => item.moduleId);
 
