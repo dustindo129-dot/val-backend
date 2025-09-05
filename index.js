@@ -82,11 +82,8 @@ app.use(compression());
 // Configure CORS
 const corsOptions = {
   origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl requests, direct navigation)
-    if (!origin) {
-      console.log('CORS: Allowing request with no origin header');
-      return callback(null, true);
-    }
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
     
     const allowedOrigins = [
       // Always include these development URLs
@@ -106,27 +103,11 @@ const corsOptions = {
       ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])
     ];
     
-    // Normalize origin for comparison (remove trailing slashes)
-    const normalizedOrigin = origin.replace(/\/$/, '');
-    const normalizedAllowedOrigins = allowedOrigins.map(o => o.replace(/\/$/, ''));
-    
-    if (normalizedAllowedOrigins.includes(normalizedOrigin)) {
-      console.log(`CORS: Allowing origin: ${origin}`);
+    if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
     
-    // For same-origin requests (when origin matches host), allow them
-    // This handles cases where the origin might be the same as the host but not in our list
-    const originHost = normalizedOrigin.replace(/^https?:\/\//, '');
-    if (originHost === 'val-bh6h9.ondigitalocean.app' || 
-        originHost === 'valvrareteam.net' || 
-        originHost === 'www.valvrareteam.net' ||
-        originHost === 'valvrareteam.netlify.app') {
-      console.log(`CORS: Allowing same-origin request: ${origin}`);
-      return callback(null, true);
-    }
-    
-    console.warn(`CORS blocked origin: ${origin} (normalized: ${normalizedOrigin})`);
+    console.warn(`CORS blocked origin: ${origin}`);
     return callback(new Error(`Origin ${origin} not allowed by CORS policy`), false);
   },
   credentials: true,
@@ -150,14 +131,6 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// Request logging middleware for debugging CORS issues
-app.use((req, res, next) => {
-  if (process.env.NODE_ENV !== 'production') {
-    console.log(`${req.method} ${req.url} - Origin: ${req.headers.origin || 'none'} - Host: ${req.headers.host} - User-Agent: ${req.headers['user-agent']?.substring(0, 100) || 'none'}`);
-  }
-  next();
-});
-
 // Additional CORS headers for EventSource/SSE specifically
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -166,33 +139,15 @@ app.use((req, res, next) => {
     'http://127.0.0.1:5173', 
     'http://localhost:4173', 
     'http://127.0.0.1:4173',
-    'http://localhost:4174',
-    'http://127.0.0.1:4174',
     'https://valvrareteam.net',
     'https://www.valvrareteam.net',
     'https://valvrareteam.netlify.app',
     'https://val-bh6h9.ondigitalocean.app'
   ];
   
-  if (origin) {
-    // Normalize origin for comparison
-    const normalizedOrigin = origin.replace(/\/$/, '');
-    const normalizedAllowedOrigins = allowedOrigins.map(o => o.replace(/\/$/, ''));
-    
-    if (normalizedAllowedOrigins.includes(normalizedOrigin)) {
-      res.header('Access-Control-Allow-Origin', origin);
-      res.header('Access-Control-Allow-Credentials', 'true');
-    } else {
-      // Check for same-origin requests
-      const originHost = normalizedOrigin.replace(/^https?:\/\//, '');
-      if (originHost === 'val-bh6h9.ondigitalocean.app' || 
-          originHost === 'valvrareteam.net' || 
-          originHost === 'www.valvrareteam.net' ||
-          originHost === 'valvrareteam.netlify.app') {
-        res.header('Access-Control-Allow-Origin', origin);
-        res.header('Access-Control-Allow-Credentials', 'true');
-      }
-    }
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
   }
   
   // Handle preflight OPTIONS requests
