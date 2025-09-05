@@ -107,7 +107,10 @@ const corsOptions = {
       return callback(null, true);
     }
     
-    console.warn(`CORS blocked origin: ${origin}`);
+    // Only log CORS blocks in development to reduce production log spam
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn(`CORS blocked origin: ${origin}`);
+    }
     return callback(new Error(`Origin ${origin} not allowed by CORS policy`), false);
   },
   credentials: true,
@@ -139,6 +142,8 @@ app.use((req, res, next) => {
     'http://127.0.0.1:5173', 
     'http://localhost:4173', 
     'http://127.0.0.1:4173',
+    'http://localhost:4174',
+    'http://127.0.0.1:4174',
     'https://valvrareteam.net',
     'https://www.valvrareteam.net',
     'https://valvrareteam.netlify.app',
@@ -175,6 +180,35 @@ app.use((req, res, next) => {
   }
   // Referrer policy
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
+// Security monitoring for suspicious requests
+// Detects and logs potential probing/unauthorized API access attempts
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const userAgent = req.headers['user-agent'] || '';
+  
+  // Flag suspicious patterns in production only (CORS will still block them)
+  if (process.env.NODE_ENV === 'production' && origin) {
+    if (origin.includes('workers.dev') ||
+        origin.includes('glitch.me') ||
+        origin.includes('repl.co') ||
+        userAgent.includes('curl') ||
+        userAgent.includes('wget')) {
+      
+      // Rate-limited logging to avoid spam (once per minute per origin)
+      if (!req.app.locals.suspiciousOrigins) req.app.locals.suspiciousOrigins = {};
+      const now = Date.now();
+      const lastLogged = req.app.locals.suspiciousOrigins[origin] || 0;
+      
+      if (now - lastLogged > 60000) { // 1 minute cooldown
+        console.warn(`🚨 Suspicious request detected: ${origin} - ${userAgent.substring(0, 50)}`);
+        req.app.locals.suspiciousOrigins[origin] = now;
+      }
+    }
+  }
+  
   next();
 });
 
