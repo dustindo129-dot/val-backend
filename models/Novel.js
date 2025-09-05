@@ -11,7 +11,7 @@ const novelSchema = new mongoose.Schema({
   author: { type: String, required: true },
   illustrator: { type: String },
   // SEO-friendly slug and short id suffix for fast lookups
-  slug: { type: String, unique: true, index: true, trim: true, lowercase: true },
+  slug: { type: String, unique: true, trim: true, lowercase: true },
   shortId8: { type: String, index: true, trim: true, lowercase: true },
   active: {
     pj_user: [{ type: mongoose.Schema.Types.Mixed }],
@@ -66,7 +66,7 @@ const novelSchema = new mongoose.Schema({
   toObject: { getters: true }
 });
 
-// Indexes are defined via field options above (slug unique, shortId8 indexed)
+// Indexes are defined via field options above (slug unique index, shortId8 indexed)
 
 // Helper to build a URL-friendly slug base from a title
 function slugifyTitle(title) {

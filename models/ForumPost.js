@@ -167,7 +167,7 @@ const forumPostSchema = new mongoose.Schema({
 });
 
 // Add indexes for better query performance
-forumPostSchema.index({ slug: 1 }, { unique: true });
+// Note: slug index is already created by the unique: true field option
 forumPostSchema.index({ author: 1 });
 forumPostSchema.index({ createdAt: -1 });
 forumPostSchema.index({ lastActivity: -1 });
