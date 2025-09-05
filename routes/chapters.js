@@ -36,7 +36,7 @@ import { createNewChapterNotifications } from '../services/notificationService.j
 import { populateStaffNames } from '../utils/populateStaffNames.js';
 import { getCachedUserByUsername } from '../utils/userCache.js';
 import { initializeCacheReferences } from '../utils/chapterCacheUtils.js';
-import { createUniqueSlug } from '../../src/utils/slugUtils.js';
+import { createUniqueSlug } from '../utils/slugUtils.js';
 
 const router = express.Router();
 

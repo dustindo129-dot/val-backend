@@ -32,6 +32,10 @@ echo "✅ In server directory"
 echo "📦 Installing server dependencies..."
 npm ci || error_exit "Failed to install server dependencies"
 
+echo "🔧 Verifying server-only dependencies..."
+# Note: Server imports have been updated to use server/utils instead of src/utils
+# for server-only deployments (slugUtils.js copied to server/utils)
+
 echo "🔧 Applying mongoose ESM patch..."
 if [ -f "fix-mongoose.js" ]; then
     node fix-mongoose.js || echo "⚠️  mongoose patch skipped"
