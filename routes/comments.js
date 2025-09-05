@@ -6,6 +6,7 @@ import { createCommentReplyNotification, createFollowCommentNotifications, creat
 import { clearChapterCommentsCache, extractCommentIdentifiers } from '../utils/chapterCacheUtils.js';
 import { batchGetUsers } from '../utils/batchUserCache.js';
 import { validateNovelExists } from '../utils/novelValidation.js';
+import ForumPost from '../models/ForumPost.js';
 
 // Helper function to get novel-specific roles for users
 const getNovelRoles = async (novel, userIds) => {
@@ -307,6 +308,21 @@ const clearCachesForComment = async (comment, knownNovelId = null) => {
     console.warn('Error clearing caches for comment:', error);
     // Fallback to clearing all caches if specific clearing fails
     clearAllCommentCaches();
+  }
+};
+
+/**
+ * Helper function to update forum post comment count
+ * @param {String} forumPostId - The forum post ID
+ */
+const updateForumPostCommentCount = async (forumPostId) => {
+  try {
+    const forumPost = await ForumPost.findById(forumPostId);
+    if (forumPost) {
+      await forumPost.updateCommentCount();
+    }
+  } catch (error) {
+    console.error('Error updating forum post comment count:', error);
   }
 };
 
@@ -1289,7 +1305,7 @@ router.get('/recent', async (req, res) => {
                     then: { $arrayElemAt: ['$chapterInfo.novelTitle', 0] }
                   }
                 ],
-                default: 'Feedback'
+                default: 'Unknown'
               }
             },
             chapterTitle: {
@@ -1398,6 +1414,11 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     
     // Clear user stats cache for the comment author
     clearUserStatsCache(req.user._id.toString());
+
+    // Update forum post comment count if this is a forum comment
+    if (parentComment.contentType === 'forum') {
+      await updateForumPostCommentCount(parentComment.contentId);
+    }
     
     // Populate user info
     await reply.populate('user', 'username displayName avatar role userNumber');
@@ -1635,7 +1656,7 @@ router.post('/:commentId/pin', auth, async (req, res) => {
       return res.status(404).json({ message: 'Comment not found' });
     }
 
-    // Only allow pinning on novel and chapter comments (not feedback)
+    // Only allow pinning on novel and chapter comments
     if (comment.contentType !== 'novels' && comment.contentType !== 'chapters') {
       return res.status(400).json({ message: 'Comments can only be pinned on novels or chapters' });
     }
@@ -1786,6 +1807,11 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
     
     // Clear user stats cache for the comment author
     clearUserStatsCache(req.user._id.toString());
+
+    // Update forum post comment count if this is a forum comment
+    if (contentType === 'forum') {
+      await updateForumPostCommentCount(contentId);
+    }
 
     // Populate user info
     await comment.populate('user', 'username displayName avatar role userNumber');
@@ -1973,6 +1999,11 @@ router.delete('/:commentId', auth, async (req, res) => {
     
     // Clear user stats cache for the comment author
     clearUserStatsCache(comment.user.toString());
+
+    // Update forum post comment count if this is a forum comment
+    if (comment.contentType === 'forum') {
+      await updateForumPostCommentCount(comment.contentId);
+    }
     
     res.json({ 
       message: 'Comment deleted successfully',

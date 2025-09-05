@@ -36,6 +36,7 @@ import { createNewChapterNotifications } from '../services/notificationService.j
 import { populateStaffNames } from '../utils/populateStaffNames.js';
 import { getCachedUserByUsername } from '../utils/userCache.js';
 import { initializeCacheReferences } from '../utils/chapterCacheUtils.js';
+import { createUniqueSlug } from '../../src/utils/slugUtils.js';
 
 const router = express.Router();
 
@@ -1879,6 +1880,12 @@ router.put('/:id', auth, async (req, res) => {
         console.log(`Updating chapter timestamp for "${existingChapter.title}" due to mode change from draft to ${mode}`);
       }
 
+      // Check if title changed to generate new slug
+      let titleChanged = false;
+      if (title && title !== existingChapter.title) {
+        titleChanged = true;
+      }
+
       // Build update object conditionally
       const updateFields = {
         ...(title && { title }),
@@ -1941,6 +1948,12 @@ router.put('/:id', auth, async (req, res) => {
 
       await session.commitTransaction();
       transactionCommitted = true;
+
+      // Generate new slug if title changed (for frontend URL update)
+      let newSlug = null;
+      if (titleChanged && novel) {
+        newSlug = createUniqueSlug(updatedChapter.title, updatedChapter._id);
+      }
 
       // Clear novel caches
       clearNovelCaches();
@@ -2055,7 +2068,14 @@ router.put('/:id', auth, async (req, res) => {
 
       // Populate and return the updated chapter
       const populatedChapter = await populateStaffNames(updatedChapter.toObject());
-      return res.json(populatedChapter);
+      
+      // Add new slug to response if title changed
+      const response = populatedChapter;
+      if (newSlug) {
+        response.newSlug = newSlug;
+      }
+      
+      return res.json(response);
 
     } catch (err) {
       // Only abort transaction if it hasn't been committed yet

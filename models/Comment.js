@@ -88,7 +88,7 @@ const commentSchema = new mongoose.Schema({
   contentType: {
     type: String,
     required: true,
-    enum: ['novels', 'chapters', 'feedback']
+    enum: ['novels', 'chapters', 'forum']
   },
   contentId: {
     type: String,

@@ -45,6 +45,7 @@ import webhookRoutes from './routes/webhook.js';
 import userTransactionRoutes from './routes/userTransaction.js';
 import novelTransactionRoutes from './routes/novelTransactions.js';
 import giftRoutes from './routes/gifts.js';
+import forumRoutes from './routes/forum.js';
 import { initScheduler } from './scheduler.js';
 
 // Configure ES modules __dirname equivalent
@@ -263,6 +264,7 @@ app.use('/api/webhooks', webhookRoutes);
 app.use('/api/transactions', userTransactionRoutes); // User transaction endpoints
 app.use('/api/novel-transactions', novelTransactionRoutes); // Novel transaction endpoints
 app.use('/api/gifts', giftRoutes); // Gift system endpoints
+app.use('/api/forum', forumRoutes); // Forum system endpoints
 
 // Health check endpoint
 app.get('/health', (req, res) => {
