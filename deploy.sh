@@ -62,9 +62,25 @@ for location in "${FRONTEND_LOCATIONS[@]}"; do
             echo "✅ Verified: This is our val-frontend package.json"
         elif grep -q '"vite"' "$location" 2>/dev/null; then
             echo "✅ Verified: Contains Vite dependency (likely frontend)"
+        elif grep -q '"name".*"val-server"' "$location" 2>/dev/null; then
+            echo "❌ Detected: This is val-server package.json, not frontend"
+            echo "🏗️  This is a server-only deployment environment"
+            FRONTEND_FOUND=false
+            break
         else
             echo "⚠️  Warning: This may not be the correct frontend package.json"
             echo "📄 Package name: $(grep '"name"' "$location" 2>/dev/null || echo 'not found')"
+            echo "🔍 Checking if this has frontend characteristics..."
+            
+            # Additional checks for frontend indicators
+            if grep -q -E '"react"|"vue"|"angular"|"svelte"|"@vitejs"' "$location" 2>/dev/null; then
+                echo "✅ Found frontend framework dependencies, proceeding"
+            else
+                echo "❌ No frontend framework found, this appears to be a different package.json"
+                echo "🏗️  Treating as server-only deployment"
+                FRONTEND_FOUND=false
+                break
+            fi
         fi
         break
     fi
