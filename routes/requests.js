@@ -68,12 +68,10 @@ router.get('/', async (req, res) => {
       // For history view - show ALL requests including withdrawn
       query = {}; // No filter - show everything
     } else {
-      // For main list view - show only pending requests and approved web requests
+      // For main list view - show only pending requests
       query = { 
-        $or: [
-          { status: 'pending', type: { $in: ['new', 'web'] } },
-          { type: 'web', status: 'approved' }
-        ]
+        status: 'pending', 
+        type: { $in: ['new', 'web'] }
       };
     }
     
