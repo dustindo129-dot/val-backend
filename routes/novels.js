@@ -3538,6 +3538,7 @@ export async function checkAndUnlockContent(novelId) {
     // Clear caches and notify clients after successful transaction
     if (result.unlockedContent.length > 0 || result.switchedModules.length > 0) {
       clearNovelCaches();
+      clearContributionHistoryCache(novelId);
       
       // Send notifications for unlocked content
       result.unlockedContent.forEach(content => {
@@ -4506,6 +4507,9 @@ router.post("/:id/auto-unlock", auth, async (req, res) => {
 
     // Clear novel caches after manual unlock
     clearNovelCaches();
+    
+    // Clear contribution history cache to ensure fresh data shows up immediately
+    clearContributionHistoryCache(novelId);
 
     // Notify clients of the update
     notifyAllClients('novel_budget_updated', { 
