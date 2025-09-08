@@ -327,7 +327,7 @@ router.delete('/posts/:slug', auth, async (req, res) => {
 });
 
 /**
- * Pin/Unpin a forum post
+ * Pin/Unpin a forum post by slug
  * @route POST /api/forum/posts/:slug/pin
  */
 router.post('/posts/:slug/pin', auth, async (req, res) => {
@@ -340,6 +340,41 @@ router.post('/posts/:slug/pin', auth, async (req, res) => {
     }
 
     const post = await ForumPost.findOne({ slug });
+    if (!post) {
+      return res.status(404).json({ message: 'Post not found' });
+    }
+
+    // Toggle pin status
+    post.isPinned = !post.isPinned;
+    await post.save();
+
+    // Clear forum posts cache
+    clearForumPostsCache();
+
+    res.json({
+      isPinned: post.isPinned,
+      message: post.isPinned ? 'Post pinned successfully' : 'Post unpinned successfully'
+    });
+  } catch (error) {
+    console.error('Error pinning post:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * Pin/Unpin a forum post by ID (alternative endpoint)
+ * @route POST /api/forum/posts/id/:id/pin
+ */
+router.post('/posts/id/:id/pin', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Only admin and moderators can pin posts
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      return res.status(403).json({ message: 'Only administrators and moderators can pin posts' });
+    }
+
+    const post = await ForumPost.findById(id);
     if (!post) {
       return res.status(404).json({ message: 'Post not found' });
     }
@@ -397,7 +432,7 @@ router.post('/posts/:slug/lock', auth, async (req, res) => {
 });
 
 /**
- * Toggle comments for a forum post (Admin/Moderator only)
+ * Toggle comments for a forum post (Admin/Moderator or post author)
  * @route PATCH /api/forum/posts/:slug/toggle-comments
  */
 router.patch('/posts/:slug/toggle-comments', auth, async (req, res) => {
@@ -405,14 +440,17 @@ router.patch('/posts/:slug/toggle-comments', auth, async (req, res) => {
     const { slug } = req.params;
     const { commentsDisabled } = req.body;
 
-    // Check if user is admin or moderator
-    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-      return res.status(403).json({ message: 'Only admin and moderators can toggle comments' });
-    }
-
     const post = await ForumPost.findOne({ slug });
     if (!post) {
       return res.status(404).json({ message: 'Post not found' });
+    }
+
+    // Check permissions: admin/moderator can toggle any post, authors can toggle their own posts
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'moderator';
+    const isAuthor = post.author.toString() === req.user.id;
+    
+    if (!isAdmin && !isAuthor) {
+      return res.status(403).json({ message: 'You can only toggle comments on your own posts or if you are an admin/moderator' });
     }
 
     // Update comments disabled status
