@@ -562,6 +562,180 @@ export const createCommentDeletionNotification = async (commentOwnerId, moderato
 };
 
 /**
+ * Create notification for forum post approval
+ * @param {string} userId - ID of the post author
+ * @param {string} postId - ID of the approved post
+ * @param {string} postTitle - Title of the approved post
+ * @param {string} approverId - ID of the admin/mod who approved
+ */
+export const createForumPostApprovedNotification = async (userId, postId, postTitle, approverId) => {
+  try {
+    // We no longer include admin/mod identity in notification content
+
+    const notification = new Notification({
+      userId,
+      type: 'forum_post_approved',
+      title: 'Bài đăng được duyệt',
+      message: `Bài đăng <b>"${postTitle}"</b> đã được duyệt`,
+      relatedForumPost: postId,
+      // Do not attach approver info to avoid exposing identity
+      data: {
+        postId,
+        postTitle,
+        status: 'approved'
+      }
+    });
+
+    await notification.save();
+    console.log(`Forum post approval notification created for user ${userId}`);
+    
+    broadcastEventToUser('new_notification', {
+      userId,
+      notification: notification.toObject()
+    }, userId);
+  } catch (error) {
+    console.error('Error creating forum post approval notification:', error);
+  }
+};
+
+/**
+ * Create notification for forum post decline
+ * @param {string} userId - ID of the post author
+ * @param {string} postId - ID of the declined post
+ * @param {string} postTitle - Title of the declined post
+ * @param {string} declinerId - ID of the admin/mod who declined
+ * @param {string} reason - Reason for decline (optional)
+ */
+export const createForumPostDeclinedNotification = async (userId, postId, postTitle, declinerId, reason = '') => {
+  try {
+    // Do not include admin/mod identity in message
+    let message = `Bài đăng <b>"${postTitle}"</b> đã bị từ chối`;
+    if (reason && reason.trim()) {
+      message += `<br><b>Lý do:</b> ${reason.trim()}`;
+    }
+
+    const notification = new Notification({
+      userId,
+      type: 'forum_post_declined',
+      title: 'Bài đăng bị từ chối',
+      message,
+      relatedForumPost: postId,
+      // Do not attach decliner identity
+      data: {
+        postId,
+        postTitle,
+        status: 'declined',
+        reason: reason || ''
+      }
+    });
+
+    await notification.save();
+    console.log(`Forum post decline notification created for user ${userId}`);
+    
+    broadcastEventToUser('new_notification', {
+      userId,
+      notification: notification.toObject()
+    }, userId);
+  } catch (error) {
+    console.error('Error creating forum post decline notification:', error);
+  }
+};
+
+/**
+ * Create notification for new comment on user's forum post
+ * @param {string} postAuthorId - ID of the post author
+ * @param {string} postId - ID of the forum post
+ * @param {string} postTitle - Title of the forum post
+ * @param {string} commenterId - ID of the commenter
+ * @param {string} commentId - ID of the comment
+ */
+export const createForumPostCommentNotification = async (postAuthorId, postId, postTitle, commenterId, commentId) => {
+  try {
+    // Don't notify if user is commenting on their own post
+    if (postAuthorId === commenterId) {
+      return;
+    }
+
+    const commenter = await User.findById(commenterId).select('displayName username');
+    if (!commenter) return;
+
+    const commenterName = commenter.displayName || commenter.username;
+
+    const notification = new Notification({
+      userId: postAuthorId,
+      type: 'forum_post_comment',
+      title: 'Bình luận mới',
+      message: `<i>${commenterName}</i> đã bình luận trong bài đăng <b>"${postTitle}"</b>`,
+      relatedForumPost: postId,
+      relatedComment: commentId,
+      relatedUser: commenterId,
+      data: {
+        postId,
+        postTitle,
+        commenterId,
+        commenterName,
+        commentId
+      }
+    });
+
+    await notification.save();
+    console.log(`Forum post comment notification created for user ${postAuthorId}`);
+    
+    broadcastEventToUser('new_notification', {
+      userId: postAuthorId,
+      notification: notification.toObject()
+    }, postAuthorId);
+  } catch (error) {
+    console.error('Error creating forum post comment notification:', error);
+  }
+};
+
+/**
+ * Create notification for forum post deletion by admin/moderator
+ * @param {string} userId - ID of the post author
+ * @param {string} postTitle - Title of the deleted post
+ * @param {string} deleterId - ID of the admin/mod who deleted
+ * @param {string} reason - Reason for deletion (optional)
+ */
+export const createForumPostDeletedNotification = async (userId, postTitle, deleterId, reason = '') => {
+  try {
+    // Don't notify if user is deleting their own post
+    if (userId === deleterId) {
+      return;
+    }
+
+    // Do not include admin/mod identity in message
+    let message = `Bài đăng <b>"${postTitle}"</b> đã bị xóa`;
+    if (reason && reason.trim()) {
+      message += `<br><b>Lý do:</b> ${reason.trim()}`;
+    }
+
+    const notification = new Notification({
+      userId,
+      type: 'forum_post_deleted',
+      title: 'Bài đăng bị xóa',
+      message,
+      // Do not attach deleter identity
+      data: {
+        postTitle,
+        status: 'deleted',
+        reason: reason || ''
+      }
+    });
+
+    await notification.save();
+    console.log(`Forum post deletion notification created for user ${userId}`);
+    
+    broadcastEventToUser('new_notification', {
+      userId,
+      notification: notification.toObject()
+    }, userId);
+  } catch (error) {
+    console.error('Error creating forum post deletion notification:', error);
+  }
+};
+
+/**
  * Get unread notification count for a user
  * @param {string} userId - ID of the user
  * @returns {number} Count of unread notifications

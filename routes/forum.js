@@ -3,6 +3,15 @@ import { auth, checkBan } from '../middleware/auth.js';
 import ForumPost from '../models/ForumPost.js';
 import { clearAllCommentCaches } from './comments.js';
 import { batchGetUsers } from '../utils/batchUserCache.js';
+import Comment from '../models/Comment.js';
+import Notification from '../models/Notification.js';
+import { 
+  createForumPostApprovedNotification, 
+  createForumPostDeclinedNotification, 
+  createForumPostCommentNotification, 
+  createForumPostDeletedNotification 
+} from '../services/notificationService.js';
+import { broadcastEvent } from '../services/sseService.js';
 
 const router = express.Router();
 
@@ -55,32 +64,44 @@ router.get('/posts', async (req, res) => {
       return res.json(cachedPosts);
     }
 
-    // Get total count
+    // Get total count (only approved posts - includes legacy posts without isPending field)
     const totalPosts = await ForumPost.countDocuments({
       isDeleted: false,
-      adminDeleted: false
+      adminDeleted: false,
+      $or: [
+        { isPending: false },
+        { isPending: { $exists: false } } // Include legacy posts without isPending field
+      ]
     });
 
-    // Fetch posts with pagination
+    // Fetch posts with pagination (only approved posts - includes legacy posts)
     const posts = await ForumPost.find({
       isDeleted: false,
-      adminDeleted: false
+      adminDeleted: false,
+      $or: [
+        { isPending: false },
+        { isPending: { $exists: false } } // Include legacy posts without isPending field
+      ]
     })
     .sort({ isPinned: -1, lastActivity: -1 }) // Pinned first, then by last activity
     .skip(skip)
     .limit(limitNum)
     .lean();
 
-    // Get user info for all authors
+    // Get user info for all authors and approvers
     const authorIds = [...new Set(posts.map(post => post.author))];
-    const authors = await batchGetUsers(authorIds, {
+    const approverIds = [...new Set(posts.map(post => post.approvedBy).filter(Boolean))];
+    const allUserIds = [...new Set([...authorIds, ...approverIds])];
+    
+    const users = await batchGetUsers(allUserIds, {
       projection: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 }
     });
 
-    // Attach author info to posts
+    // Attach author and approver info to posts
     const postsWithAuthors = posts.map(post => ({
       ...post,
-      author: authors[post.author.toString()] || null
+      author: users[post.author.toString()] || null,
+      approvedBy: post.approvedBy ? users[post.approvedBy.toString()] || null : null
     }));
 
     const result = {
@@ -117,21 +138,27 @@ router.get('/posts/:slug', async (req, res) => {
     const post = await ForumPost.findOne({
       slug,
       isDeleted: false,
-      adminDeleted: false
+      adminDeleted: false,
+      $or: [
+        { isPending: false },
+        { isPending: { $exists: false } } // Include legacy posts without isPending field
+      ]
     }).lean();
 
     if (!post) {
       return res.status(404).json({ message: 'Post not found' });
     }
 
-    // Get author info
-    const authors = await batchGetUsers([post.author], {
+    // Get author and approver info
+    const userIds = [post.author, post.approvedBy].filter(Boolean);
+    const users = await batchGetUsers(userIds, {
       projection: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 }
     });
 
     const postWithAuthor = {
       ...post,
-      author: authors[post.author.toString()] || null
+      author: users[post.author.toString()] || null,
+      approvedBy: post.approvedBy ? users[post.approvedBy.toString()] || null : null
     };
 
     // Only increment view count if skipViewTracking is not set (view gating system)
@@ -161,11 +188,6 @@ router.post('/posts', auth, checkBan, async (req, res) => {
   try {
     const { title, content } = req.body;
 
-    // Check if user is admin or moderator
-    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
-      return res.status(403).json({ message: 'Only administrators and moderators can create forum posts' });
-    }
-
     if (!title || !content) {
       return res.status(400).json({ message: 'Title and content are required' });
     }
@@ -177,23 +199,45 @@ router.post('/posts', auth, checkBan, async (req, res) => {
     // Generate unique slug
     const slug = await ForumPost.generateSlug(title);
 
+    // Check if user is admin or moderator (auto-approve their posts)
+    const isAdminOrMod = req.user.role === 'admin' || req.user.role === 'moderator';
+
     // Create the post
     const post = new ForumPost({
       title: title.trim(),
       content,
       author: req.user._id,
-      slug
+      slug,
+      isPending: !isAdminOrMod, // Regular users have pending posts
+      ...(isAdminOrMod && {
+        approvedBy: req.user._id,
+        approvedAt: new Date()
+      })
     });
 
     await post.save();
 
-    // Clear forum posts cache
-    clearForumPostsCache();
+    // Only clear forum posts cache if post was approved immediately
+    if (!post.isPending) {
+      clearForumPostsCache();
+    }
+
+    // Broadcast admin task update if a pending post was created
+    if (post.isPending) {
+      broadcastEvent('admin_task_update', { 
+        type: 'pending_post_created',
+        postId: post._id.toString(),
+        title: post.title
+      });
+    }
 
     // Populate author info for response
     await post.populate('author', 'username displayName avatar role userNumber');
 
-    res.status(201).json(post);
+    res.status(201).json({
+      ...post.toObject(),
+      isPending: post.isPending
+    });
   } catch (error) {
     console.error('Error creating forum post:', error);
     if (error.name === 'ValidationError') {
@@ -309,6 +353,44 @@ router.delete('/posts/:slug', auth, async (req, res) => {
     }
 
     await post.save();
+
+    // Delete all comments related to this forum post
+    try {
+      const deleteResult = await Comment.deleteMany({
+        contentType: 'forum',
+        contentId: post._id.toString()
+      });
+      console.log(`Deleted ${deleteResult.deletedCount} comments for forum post ${post._id}`);
+    } catch (commentDeleteError) {
+      console.error('Failed to delete related comments:', commentDeleteError);
+      // Continue with post deletion even if comment deletion fails
+    }
+
+    // Delete all notifications related to this forum post
+    try {
+      const notificationDeleteResult = await Notification.deleteMany({
+        relatedForumPost: post._id
+      });
+      console.log(`Deleted ${notificationDeleteResult.deletedCount} notifications for forum post ${post._id}`);
+    } catch (notificationDeleteError) {
+      console.error('Failed to delete related notifications:', notificationDeleteError);
+      // Continue with post deletion even if notification deletion fails
+    }
+
+    // Send notification to post author if it's a mod action (not their own post)
+    if (isModAction && !isAuthor) {
+      try {
+        await createForumPostDeletedNotification(
+          post.author.toString(),
+          post.title,
+          req.user._id.toString(),
+          reason
+        );
+      } catch (notificationError) {
+        console.error('Failed to send deletion notification:', notificationError);
+        // Don't fail the deletion if notification fails
+      }
+    }
 
     // Clear forum posts cache
     clearForumPostsCache();
@@ -466,6 +548,178 @@ router.patch('/posts/:slug/toggle-comments', auth, async (req, res) => {
     });
   } catch (error) {
     console.error('Error toggling comments:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * Get pending posts for admin/moderator review
+ * @route GET /api/forum/pending-posts
+ */
+router.get('/pending-posts', auth, async (req, res) => {
+  try {
+    // Only admin and moderators can view pending posts
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      return res.status(403).json({ message: 'Only administrators and moderators can view pending posts' });
+    }
+
+    const { page = 1, limit = 10 } = req.query;
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const totalPosts = await ForumPost.countDocuments({
+      isPending: true,
+      isDeleted: false,
+      adminDeleted: false
+    });
+
+    // Fetch pending posts with pagination
+    const posts = await ForumPost.find({
+      isPending: true,
+      isDeleted: false,
+      adminDeleted: false
+    })
+    .sort({ createdAt: -1 }) // Newest first
+    .skip(skip)
+    .limit(limitNum)
+    .lean();
+
+    // Get user info for all authors
+    const authorIds = [...new Set(posts.map(post => post.author))];
+    const authors = await batchGetUsers(authorIds, {
+      projection: { username: 1, displayName: 1, avatar: 1, role: 1, userNumber: 1 }
+    });
+
+    // Attach author info to posts
+    const postsWithAuthors = posts.map(post => ({
+      ...post,
+      author: authors[post.author.toString()] || null
+    }));
+
+    const result = {
+      posts: postsWithAuthors,
+      pagination: {
+        currentPage: pageNum,
+        totalPages: Math.ceil(totalPosts / limitNum),
+        totalPosts,
+        hasNext: pageNum < Math.ceil(totalPosts / limitNum),
+        hasPrev: pageNum > 1,
+        limit: limitNum
+      }
+    };
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching pending posts:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * Approve a pending post
+ * @route POST /api/forum/posts/:id/approve
+ */
+router.post('/posts/:id/approve', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Only admin and moderators can approve posts
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      return res.status(403).json({ message: 'Only administrators and moderators can approve posts' });
+    }
+
+    const post = await ForumPost.approvePost(id, req.user._id);
+
+    // Clear forum posts cache since we now have a new approved post
+    clearForumPostsCache();
+
+    // Populate author info for response
+    await post.populate('author', 'username displayName avatar role userNumber');
+
+    // Send notification to post author
+    try {
+      await createForumPostApprovedNotification(
+        post.author._id.toString(),
+        post._id.toString(),
+        post.title,
+        req.user._id.toString()
+      );
+    } catch (notificationError) {
+      console.error('Failed to send approval notification:', notificationError);
+      // Don't fail the approval if notification fails
+    }
+
+    // Broadcast admin task update to all connected clients
+    broadcastEvent('admin_task_update', { 
+      type: 'post_approved',
+      postId: post._id.toString(),
+      title: post.title
+    });
+
+    res.json({
+      message: 'Post approved successfully',
+      post: post
+    });
+  } catch (error) {
+    console.error('Error approving post:', error);
+    if (error.message.includes('not found') || error.message.includes('not pending')) {
+      return res.status(404).json({ message: error.message });
+    }
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * Reject a pending post
+ * @route POST /api/forum/posts/:id/reject
+ */
+router.post('/posts/:id/reject', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason = '' } = req.body;
+
+    // Only admin and moderators can reject posts
+    if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      return res.status(403).json({ message: 'Only administrators and moderators can reject posts' });
+    }
+
+    const post = await ForumPost.rejectPost(id, req.user._id, reason);
+
+    // Populate author info for response
+    await post.populate('author', 'username displayName avatar role userNumber');
+
+    // Send notification to post author
+    try {
+      await createForumPostDeclinedNotification(
+        post.author._id.toString(),
+        post._id.toString(),
+        post.title,
+        req.user._id.toString(),
+        reason
+      );
+    } catch (notificationError) {
+      console.error('Failed to send decline notification:', notificationError);
+      // Don't fail the rejection if notification fails
+    }
+
+    // Broadcast admin task update to all connected clients
+    broadcastEvent('admin_task_update', { 
+      type: 'post_rejected',
+      postId: post._id.toString(),
+      title: post.title
+    });
+
+    res.json({
+      message: 'Post rejected successfully',
+      post: post
+    });
+  } catch (error) {
+    console.error('Error rejecting post:', error);
+    if (error.message.includes('not found') || error.message.includes('not pending')) {
+      return res.status(404).json({ message: error.message });
+    }
     res.status(500).json({ message: error.message });
   }
 });

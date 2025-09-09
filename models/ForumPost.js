@@ -107,6 +107,33 @@ const forumPostSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Moderation status
+  isPending: {
+    type: Boolean,
+    default: false
+  },
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  approvedAt: {
+    type: Date,
+    default: null
+  },
+  rejectedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  rejectedAt: {
+    type: Date,
+    default: null
+  },
+  rejectionReason: {
+    type: String,
+    default: ''
+  },
   isDeleted: {
     type: Boolean,
     default: false
@@ -173,6 +200,8 @@ forumPostSchema.index({ createdAt: -1 });
 forumPostSchema.index({ lastActivity: -1 });
 forumPostSchema.index({ isPinned: -1, lastActivity: -1 });
 forumPostSchema.index({ isDeleted: 1, adminDeleted: 1 });
+forumPostSchema.index({ isPending: 1, createdAt: -1 }); // For moderator queue
+forumPostSchema.index({ isPending: 1, isDeleted: 1, adminDeleted: 1 }); // For approved posts listing
 
 // Pre-save middleware to update timestamps
 forumPostSchema.pre('save', function(next) {
@@ -206,6 +235,40 @@ forumPostSchema.methods.updateCommentCount = async function() {
   this.commentCount = count;
   this.lastActivity = new Date();
   return this.save();
+};
+
+// Static method to approve a pending post
+forumPostSchema.statics.approvePost = async function(postId, approverId) {
+  const post = await this.findById(postId);
+  if (!post || !post.isPending) {
+    throw new Error('Post not found or not pending approval');
+  }
+  
+  post.isPending = false;
+  post.approvedBy = approverId;
+  post.approvedAt = new Date();
+  post.rejectedBy = null;
+  post.rejectedAt = null;
+  post.rejectionReason = '';
+  
+  return await post.save();
+};
+
+// Static method to reject a pending post
+forumPostSchema.statics.rejectPost = async function(postId, rejecterId, reason = '') {
+  const post = await this.findById(postId);
+  if (!post || !post.isPending) {
+    throw new Error('Post not found or not pending approval');
+  }
+  
+  post.isPending = false;
+  post.rejectedBy = rejecterId;
+  post.rejectedAt = new Date();
+  post.rejectionReason = reason;
+  post.approvedBy = null;
+  post.approvedAt = null;
+  
+  return await post.save();
 };
 
 // Static method to generate unique slug

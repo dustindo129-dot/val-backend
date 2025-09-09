@@ -2,7 +2,7 @@ import express from 'express';
 import { auth, checkBan } from '../middleware/auth.js';
 import Comment from '../models/Comment.js';
 import { broadcastEvent } from '../services/sseService.js';
-import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification, createCommentDeletionNotification } from '../services/notificationService.js';
+import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification, createCommentDeletionNotification, createForumPostCommentNotification } from '../services/notificationService.js';
 import { clearChapterCommentsCache, extractCommentIdentifiers } from '../utils/chapterCacheUtils.js';
 import { batchGetUsers } from '../utils/batchUserCache.js';
 import { validateNovelExists } from '../utils/novelValidation.js';
@@ -1825,6 +1825,25 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
         req.user._id.toString(),
         chapterId
       );
+    }
+
+    // Create notification for forum post author if this is a forum comment
+    if (contentType === 'forum') {
+      try {
+        const forumPost = await ForumPost.findById(contentId).populate('author', '_id username displayName');
+        if (forumPost && forumPost.author) {
+          await createForumPostCommentNotification(
+            forumPost.author._id.toString(),
+            forumPost._id.toString(),
+            forumPost.title,
+            req.user._id.toString(),
+            comment._id.toString()
+          );
+        }
+      } catch (notificationError) {
+        console.error('Failed to send forum post comment notification:', notificationError);
+        // Don't fail the comment creation if notification fails
+      }
     }
 
     // Notify clients about the new comment via SSE

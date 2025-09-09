@@ -2,6 +2,7 @@ import express from 'express';
 import Report from '../models/Report.js';
 import { auth, checkRole } from '../middleware/auth.js';
 import { createReportFeedbackNotification } from '../services/notificationService.js';
+import { broadcastEvent } from '../services/sseService.js';
 
 const router = express.Router();
 
@@ -36,6 +37,14 @@ router.post('/', auth, async (req, res) => {
     const populatedReport = await Report.findById(savedReport._id)
       .populate('reporter', 'username avatar')
       .exec();
+    
+    // Broadcast admin task update for new report
+    broadcastEvent('admin_task_update', { 
+      type: 'report_created',
+      reportId: savedReport._id.toString(),
+      contentType: contentType,
+      reportType: reportType
+    });
     
     res.status(201).json(populatedReport);
   } catch (error) {
@@ -93,6 +102,14 @@ router.put('/:id/resolve', auth, checkRole(['admin', 'moderator']), async (req, 
         novelId: report.novelId
       }
     );
+    
+    // Broadcast admin task update for resolved report
+    broadcastEvent('admin_task_update', { 
+      type: 'report_resolved',
+      reportId: report._id.toString(),
+      contentType: report.contentType,
+      reportType: report.reportType
+    });
     
     res.json({ message: 'Report resolved successfully' });
   } catch (error) {

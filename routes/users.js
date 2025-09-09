@@ -13,6 +13,8 @@ import Chapter from '../models/Chapter.js';
 import UserChapterInteraction from '../models/UserChapterInteraction.js';
 import { getCachedUserById, getCachedUserByUsername, clearUserCache, clearAllUserCaches } from '../utils/userCache.js';
 import { batchGetUsers } from '../utils/batchUserCache.js';
+import ForumPost from '../models/ForumPost.js';
+import Report from '../models/Report.js';
 
 const router = express.Router();
 
@@ -1329,6 +1331,37 @@ router.get('/:displayNameSlug/public-profile', async (req, res) => {
   } catch (err) {
     console.error('Error getting user public profile:', err);
     res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * @route GET /api/users/admin-task-count
+ * @desc Get count of pending admin tasks (pending posts + pending reports)
+ * @access Private/Admin/Moderator
+ */
+router.get('/admin-task-count', auth, async (req, res) => {
+  try {
+    // Check if user is admin or moderator
+    if (!['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Access denied. Admin/Moderator only.' });
+    }
+
+    // Count pending forum posts and pending reports in parallel
+    const [pendingPostsCount, pendingReportsCount] = await Promise.all([
+      ForumPost.countDocuments({ isPending: true }),
+      Report.countDocuments({ status: 'pending' })
+    ]);
+
+    const totalCount = pendingPostsCount + pendingReportsCount;
+
+    res.json({
+      totalCount,
+      pendingPosts: pendingPostsCount,
+      pendingReports: pendingReportsCount
+    });
+  } catch (error) {
+    console.error('Error fetching admin task count:', error);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
