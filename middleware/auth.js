@@ -99,6 +99,14 @@ export const auth = async (req, res, next) => {
         }
       }
 
+      // Check if user is banned
+      if (user.isBanned) {
+        return res.status(403).json({ 
+          message: 'Your account has been banned. Please contact support if you believe this is an error.',
+          code: 'ACCOUNT_BANNED'
+        });
+      }
+
       // Attach user to request object
       req.user = user;
       next();

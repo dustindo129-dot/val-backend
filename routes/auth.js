@@ -149,6 +149,16 @@ router.post('/signup', async (req, res) => {
     const savedUser = await user.save();
     console.log('User saved successfully. ID:', savedUser._id);
 
+    // Check if user is banned (in case they were banned before)
+    if (savedUser.isBanned) {
+      // Delete the newly created user if they were somehow marked as banned
+      await User.findByIdAndDelete(savedUser._id);
+      return res.status(403).json({ 
+        message: 'Account creation failed. Please contact support.',
+        code: 'ACCOUNT_BANNED'
+      });
+    }
+
     // Create device fingerprint and session ID for single-device authentication (IP only)
     const deviceFingerprint = crypto
       .createHash('sha256')
@@ -228,6 +238,14 @@ router.post('/login', async (req, res) => {
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid username or password' });
+    }
+
+    // Check if user is banned
+    if (user.isBanned) {
+      return res.status(403).json({ 
+        message: 'Your account has been banned. Please contact support if you believe this is an error.',
+        code: 'ACCOUNT_BANNED'
+      });
     }
 
     // Create device fingerprint based on IP only (allows multiple browsers on same device)
@@ -382,6 +400,14 @@ router.post('/refresh', async (req, res) => {
     const user = await User.findById(decoded.userId);
     if (!user) {
       return res.status(401).json({ message: 'User not found' });
+    }
+
+    // Check if user is banned
+    if (user.isBanned) {
+      return res.status(403).json({ 
+        message: 'Your account has been banned. Please contact support if you believe this is an error.',
+        code: 'ACCOUNT_BANNED'
+      });
     }
 
     // Create device fingerprint for refresh request (IP only)

@@ -1169,7 +1169,25 @@ router.post('/ban/:username', auth, async (req, res) => {
     userToBan.isBanned = true;
     await userToBan.save();
 
-    res.json({ message: 'User banned successfully' });
+    // Delete all comments by the banned user
+    try {
+      const commentsResult = await Comment.deleteMany({ user: userToBan._id });
+      console.log(`Deleted ${commentsResult.deletedCount} comments for banned user: ${userToBan.username}`);
+    } catch (commentError) {
+      console.error('Error deleting user comments during ban:', commentError);
+      // Continue with ban even if comment deletion fails
+    }
+
+    // Clear all user caches after banning
+    clearAllUserCaches(userToBan);
+
+    res.json({ 
+      message: 'User banned successfully. All comments have been removed.',
+      details: {
+        username: userToBan.username,
+        bannedAt: new Date().toISOString()
+      }
+    });
   } catch (error) {
     console.error('Ban user error:', error);
     res.status(500).json({ message: 'Failed to ban user' });
@@ -1195,7 +1213,16 @@ router.delete('/ban/:username', auth, async (req, res) => {
     userToUnban.isBanned = false;
     await userToUnban.save();
 
-    res.json({ message: 'User unbanned successfully' });
+    // Clear all user caches after unbanning
+    clearAllUserCaches(userToUnban);
+
+    res.json({ 
+      message: 'User unbanned successfully',
+      details: {
+        username: userToUnban.username,
+        unbannedAt: new Date().toISOString()
+      }
+    });
   } catch (error) {
     console.error('Unban user error:', error);
     res.status(500).json({ message: 'Failed to unban user' });
