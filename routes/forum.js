@@ -724,4 +724,7 @@ router.post('/posts/:id/reject', auth, async (req, res) => {
   }
 });
 
+// Export the cache clearing function for use in other routes
+export { clearForumPostsCache };
+
 export default router;

@@ -7,6 +7,7 @@ import { clearChapterCommentsCache, extractCommentIdentifiers } from '../utils/c
 import { batchGetUsers } from '../utils/batchUserCache.js';
 import { validateNovelExists } from '../utils/novelValidation.js';
 import ForumPost from '../models/ForumPost.js';
+import { clearForumPostsCache } from './forum.js';
 
 // Helper function to get novel-specific roles for users
 const getNovelRoles = async (novel, userIds) => {
@@ -1418,6 +1419,8 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
     // Update forum post comment count if this is a forum comment
     if (parentComment.contentType === 'forum') {
       await updateForumPostCommentCount(parentComment.contentId);
+      // Clear forum posts cache so homepage shows updated comment count
+      clearForumPostsCache();
     }
     
     // Populate user info
@@ -1811,6 +1814,8 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
     // Update forum post comment count if this is a forum comment
     if (contentType === 'forum') {
       await updateForumPostCommentCount(contentId);
+      // Clear forum posts cache so homepage shows updated comment count
+      clearForumPostsCache();
     }
 
     // Populate user info
@@ -2022,6 +2027,8 @@ router.delete('/:commentId', auth, async (req, res) => {
     // Update forum post comment count if this is a forum comment
     if (comment.contentType === 'forum') {
       await updateForumPostCommentCount(comment.contentId);
+      // Clear forum posts cache so homepage shows updated comment count
+      clearForumPostsCache();
     }
     
     res.json({ 
