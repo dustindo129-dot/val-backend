@@ -1022,7 +1022,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
             localField: 'moduleId',
             foreignField: '_id',
             pipeline: [
-              { $project: { mode: 1, moduleBalance: 1, rentBalance: 1 } }
+              { $project: { mode: 1, moduleBalance: 1, rentBalance: 1, recalculateRentOnUnlock: 1 } }
             ],
             as: 'module'
           }
@@ -1048,7 +1048,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
             localField: 'moduleId',
             foreignField: '_id',
             pipeline: [
-              { $project: { title: 1, mode: 1, moduleBalance: 1, rentBalance: 1 } }
+              { $project: { title: 1, mode: 1, moduleBalance: 1, rentBalance: 1, recalculateRentOnUnlock: 1 } }
             ],
             as: 'module'
           }
@@ -2286,7 +2286,7 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
             from: 'modules', 
             localField: 'moduleId', 
             foreignField: '_id', 
-            pipeline: [ { '$project': { title: 1, mode: 1, moduleBalance: 1, rentBalance: 1 } } ], 
+            pipeline: [ { '$project': { title: 1, mode: 1, moduleBalance: 1, rentBalance: 1, recalculateRentOnUnlock: 1 } } ], 
             as: 'module' 
         }},
         { '$lookup': { 
@@ -2741,7 +2741,7 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
           localField: 'moduleId',
           foreignField: '_id',
           pipeline: [
-            { $project: { title: 1, mode: 1, moduleBalance: 1, rentBalance: 1 } }
+            { $project: { title: 1, mode: 1, moduleBalance: 1, rentBalance: 1, recalculateRentOnUnlock: 1 } }
           ],
           as: 'module'
         }

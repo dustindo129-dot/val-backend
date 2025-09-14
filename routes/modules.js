@@ -1084,6 +1084,7 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
       { new: true }
     );
 
+
     if (!updatedModule) {
       return res.status(404).json({ message: 'Module not found' });
     }

@@ -3630,7 +3630,7 @@ router.get("/:id/complete", optionalAuth, async (req, res) => {
           
         // 2. Get modules
         Module.find({ novelId: novelId })
-          .select('title illustration order chapters mode moduleBalance rentBalance')
+          .select('title illustration order chapters mode moduleBalance rentBalance recalculateRentOnUnlock')
           .sort('order')
           .lean(),
           
