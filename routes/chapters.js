@@ -657,6 +657,79 @@ const clearUserCaches = (userId) => {
 };
 
 // Comprehensive cache clearing for chapter operations
+/**
+ * Check if a user is assigned to a specific chapter as translator, editor, or proofreader
+ * @param {Object} chapter - Chapter object with staff assignments
+ * @param {Object} user - User object with role and _id
+ * @returns {boolean} - True if user is assigned to this specific chapter
+ */
+const hasChapterRole = (chapter, user) => {
+  if (!user || !chapter) return false;
+  
+  // Check all possible user identifiers against chapter staff assignments
+  const userIdentifiers = [
+    user._id?.toString(),
+    user.id?.toString(), 
+    user.username,
+    user.displayName,
+    user.userNumber?.toString()
+  ].filter(Boolean);
+  
+  // Check if user is assigned as translator, editor, or proofreader on this chapter
+  const staffFields = ['translator', 'editor', 'proofreader'];
+  
+  return staffFields.some(field => {
+    const staffValue = chapter[field];
+    if (!staffValue) return false;
+    
+    // Handle case where staff value is an object (populated user)
+    if (typeof staffValue === 'object' && staffValue !== null) {
+      const staffIdentifiers = [
+        staffValue._id?.toString(),
+        staffValue.id?.toString(),
+        staffValue.username,
+        staffValue.displayName,
+        staffValue.userNumber?.toString()
+      ].filter(Boolean);
+      
+      return userIdentifiers.some(userId => staffIdentifiers.includes(userId));
+    }
+    
+    // Handle case where staff value is a primitive (user ID, username, etc.)
+    return userIdentifiers.includes(staffValue?.toString());
+  });
+};
+
+/**
+ * Check if a user can edit a specific chapter
+ * Admins, moderators, pj_users for the novel, and users assigned to the chapter can edit
+ * @param {Object} chapter - Chapter object with staff assignments
+ * @param {Object} novel - Novel object with active staff
+ * @param {Object} user - User object with role and _id
+ * @returns {boolean} - True if user can edit this specific chapter
+ */
+const canEditChapter = (chapter, novel, user) => {
+  if (!user || !chapter) return false;
+  
+  // Admins and moderators can edit any chapter
+  if (user.role === 'admin' || user.role === 'moderator') {
+    return true;
+  }
+  
+  // pj_user can edit chapters for novels they manage
+  if (user.role === 'pj_user' && novel) {
+    const isAuthorized = novel.active?.pj_user?.includes(user._id.toString()) || 
+                        novel.active?.pj_user?.includes(user.username);
+    if (isAuthorized) {
+      return true;
+    }
+  }
+  
+  // Users with translator, editor, or proofreader roles can edit chapters they're assigned to
+  // This applies to users with any main role (user, pj_user, etc.) if they're assigned to the chapter
+  return hasChapterRole(chapter, user);
+};
+
 const clearChapterRelatedCaches = (chapterId, novelId = null, userId = null) => {
   let clearedCount = 0;
   
@@ -1307,7 +1380,15 @@ router.get('/:id', optionalAuth, async (req, res) => {
           }
           break;
         case 'draft':
-          // Draft is only accessible to admin/mod/assigned pj_user (already checked above)
+          // Draft is accessible to admin/mod/assigned pj_user (already checked above)
+          // Also check if user has chapter-specific roles
+          if (user) {
+            const userCanSeeDraft = canUserSeeDraftChapters(user, chapterData.novel, chapterData);
+            if (userCanSeeDraft) {
+              hasAccess = true;
+              accessReason = 'draft-staff-access';
+            }
+          }
           break;
         case 'paid':
           // Individual paid chapters in non-paid modules
@@ -1469,24 +1550,48 @@ router.post('/', auth, async (req, res) => {
       chapterBalance
     } = req.body;
     
-    // Check if user has permission (admin, moderator, or pj_user managing this novel)
+    // Check if user has permission (admin, moderator, pj_user managing this novel, or novel staff)
     if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      const novel = await Novel.findById(novelId).lean();
+      if (!novel) {
+        return res.status(404).json({ message: 'Novel not found' });
+      }
+      
+      let isAuthorized = false;
+      
       // For pj_user, check if they manage this novel
       if (req.user.role === 'pj_user') {
-        const novel = await Novel.findById(novelId).lean();
-        if (!novel) {
-          return res.status(404).json({ message: 'Novel not found' });
-        }
+        isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                      novel.active?.pj_user?.includes(req.user.username);
+      }
+      
+      // Check if user has novel-level translator, editor, or proofreader roles
+      if (!isAuthorized && novel.active) {
+        const checkUserInStaffList = (staffList) => {
+          if (!staffList || !Array.isArray(staffList)) return false;
+          return staffList.some(staffValue => {
+            if (typeof staffValue === 'object' && staffValue !== null) {
+              return staffValue._id?.toString() === req.user._id?.toString() ||
+                     staffValue.username === req.user.username ||
+                     staffValue.displayName === req.user.displayName ||
+                     staffValue.userNumber?.toString() === req.user.userNumber?.toString();
+            }
+            return staffValue?.toString() === req.user._id?.toString() ||
+                   staffValue === req.user.username ||
+                   staffValue === req.user.displayName ||
+                   staffValue?.toString() === req.user.userNumber?.toString();
+          });
+        };
         
-        // Check if user is in the novel's active pj_user array (handle both ObjectIds and usernames)
-        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
-                            novel.active?.pj_user?.includes(req.user.username);
-        
-        if (!isAuthorized) {
-          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
-        }
-      } else {
-        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
+        isAuthorized = checkUserInStaffList(novel.active.translator) ||
+                      checkUserInStaffList(novel.active.editor) ||
+                      checkUserInStaffList(novel.active.proofreader);
+      }
+      
+      if (!isAuthorized) {
+        return res.status(403).json({ 
+          message: 'Access denied. You must be assigned to this novel as a project manager, translator, editor, or proofreader to create chapters.' 
+        });
       }
     }
     
@@ -1805,16 +1910,8 @@ router.put('/:id', auth, async (req, res) => {
         return res.status(404).json({ message: 'Novel not found' });
       }
 
-      // Permission check: admin, moderator, or pj_user managing this novel
-      let hasPermission = false;
-      if (req.user.role === 'admin' || req.user.role === 'moderator') {
-        hasPermission = true;
-      } else if (req.user.role === 'pj_user') {
-        // Check if user manages this novel
-        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
-                            novel.active?.pj_user?.includes(req.user.username);
-        hasPermission = isAuthorized;
-      }
+      // Use the new chapter-specific permission logic
+      const hasPermission = canEditChapter(existingChapter, novel, req.user);
 
       if (!hasPermission) {
         await session.abortTransaction();
@@ -2435,7 +2532,15 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
           }
           break;
         case 'draft':
-          // Draft is only accessible to admin/mod/assigned pj_user (already checked above)
+          // Draft is accessible to admin/mod/assigned pj_user (already checked above)
+          // Also check if user has chapter-specific roles
+          if (user) {
+            const userCanSeeDraft = canUserSeeDraftChapters(user, chapterData.novel, chapterData);
+            if (userCanSeeDraft) {
+              hasAccess = true;
+              accessReason = 'draft-staff-access';
+            }
+          }
           break;
         case 'paid':
           // Individual paid chapters in non-paid modules
@@ -3001,7 +3106,15 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
           }
           break;
         case 'draft':
-          // Draft is only accessible to admin/mod/assigned pj_user (already checked above)
+          // Draft is accessible to admin/mod/assigned pj_user (already checked above)
+          // Also check if user has chapter-specific roles
+          if (user) {
+            const userCanSeeDraft = canUserSeeDraftChapters(user, chapterData.novel, chapterData);
+            if (userCanSeeDraft) {
+              hasAccess = true;
+              accessReason = 'draft-staff-access';
+            }
+          }
           break;
         case 'paid':
           // Individual paid chapters in non-paid modules
@@ -3026,7 +3139,7 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
     }
 
     // Helper function to check if user can see draft chapters
-    const canUserSeeDraftChapters = (user, novel) => {
+    const canUserSeeDraftChapters = (user, novel, chapter = null) => {
       if (!user) return false;
       
       // Admin and moderator can see all draft chapters
@@ -3038,7 +3151,41 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
       if (user.role === 'pj_user' && novel?.active?.pj_user) {
         const isAuthorized = novel.active.pj_user.includes(user._id.toString()) || 
                             novel.active.pj_user.includes(user.username);
-        return isAuthorized;
+        if (isAuthorized) {
+          return true;
+        }
+      }
+      
+      // Users with translator, editor, or proofreader roles can see draft chapters they're assigned to
+      // BUT anyone with novel-level translator/editor/proofreader roles can see ALL draft chapters for that novel
+      if (novel?.active) {
+        const checkUserInStaffList = (staffList) => {
+          if (!staffList || !Array.isArray(staffList)) return false;
+          return staffList.some(staffValue => {
+            if (typeof staffValue === 'object' && staffValue !== null) {
+              return staffValue._id?.toString() === user._id?.toString() ||
+                     staffValue.username === user.username ||
+                     staffValue.displayName === user.displayName ||
+                     staffValue.userNumber?.toString() === user.userNumber?.toString();
+            }
+            return staffValue?.toString() === user._id?.toString() ||
+                   staffValue === user.username ||
+                   staffValue === user.displayName ||
+                   staffValue?.toString() === user.userNumber?.toString();
+          });
+        };
+        
+        // Check if user has novel-level translator, editor, or proofreader roles
+        if (checkUserInStaffList(novel.active.translator) ||
+            checkUserInStaffList(novel.active.editor) ||
+            checkUserInStaffList(novel.active.proofreader)) {
+          return true;
+        }
+      }
+      
+      // If a specific chapter is provided, also check chapter-specific roles
+      if (chapter) {
+        return hasChapterRole(chapter, user);
       }
       
       return false;
@@ -3049,7 +3196,7 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
       if (chapter.mode !== 'draft') {
         return true; // Show non-draft chapters to everyone
       }
-      return canUserSeeDraftChapters(user, chapterData.novel);
+      return canUserSeeDraftChapters(user, chapterData.novel, chapter);
     };
 
     // Filter draft chapters from allModuleChapters based on user permissions

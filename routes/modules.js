@@ -915,24 +915,48 @@ router.put('/:novelId/modules/reorder', auth, async (req, res) => {
 // Create a new module
 router.post('/:novelId/modules', auth, async (req, res) => {
   try {
-    // Check if user has permission (admin, moderator, or pj_user managing this novel)
+    // Check if user has permission (admin, moderator, pj_user managing this novel, or novel staff)
     if (req.user.role !== 'admin' && req.user.role !== 'moderator') {
+      const novel = await Novel.findById(req.params.novelId).lean();
+      if (!novel) {
+        return res.status(404).json({ message: 'Novel not found' });
+      }
+      
+      let isAuthorized = false;
+      
       // For pj_user, check if they manage this novel
       if (req.user.role === 'pj_user') {
-        const novel = await Novel.findById(req.params.novelId).lean();
-        if (!novel) {
-          return res.status(404).json({ message: 'Novel not found' });
-        }
+        isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
+                      novel.active?.pj_user?.includes(req.user.username);
+      }
+      
+      // Check if user has novel-level translator, editor, or proofreader roles
+      if (!isAuthorized && novel.active) {
+        const checkUserInStaffList = (staffList) => {
+          if (!staffList || !Array.isArray(staffList)) return false;
+          return staffList.some(staffValue => {
+            if (typeof staffValue === 'object' && staffValue !== null) {
+              return staffValue._id?.toString() === req.user._id?.toString() ||
+                     staffValue.username === req.user.username ||
+                     staffValue.displayName === req.user.displayName ||
+                     staffValue.userNumber?.toString() === req.user.userNumber?.toString();
+            }
+            return staffValue?.toString() === req.user._id?.toString() ||
+                   staffValue === req.user.username ||
+                   staffValue === req.user.displayName ||
+                   staffValue?.toString() === req.user.userNumber?.toString();
+          });
+        };
         
-        // Check if user is in the novel's active pj_user array (handle both ObjectIds and usernames)
-        const isAuthorized = novel.active?.pj_user?.includes(req.user._id.toString()) || 
-                            novel.active?.pj_user?.includes(req.user.username);
-        
-        if (!isAuthorized) {
-          return res.status(403).json({ message: 'Access denied. You do not manage this novel.' });
-        }
-      } else {
-        return res.status(403).json({ message: 'Access denied. Admin, moderator, or project user privileges required.' });
+        isAuthorized = checkUserInStaffList(novel.active.translator) ||
+                      checkUserInStaffList(novel.active.editor) ||
+                      checkUserInStaffList(novel.active.proofreader);
+      }
+      
+      if (!isAuthorized) {
+        return res.status(403).json({ 
+          message: 'Access denied. You must be assigned to this novel as a project manager, translator, editor, or proofreader to create modules.' 
+        });
       }
     }
 
