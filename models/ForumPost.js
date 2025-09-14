@@ -107,6 +107,10 @@ const forumPostSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  showOnHomepage: {
+    type: Boolean,
+    default: true
+  },
   // Moderation status
   isPending: {
     type: Boolean,
@@ -202,6 +206,7 @@ forumPostSchema.index({ isPinned: -1, lastActivity: -1 });
 forumPostSchema.index({ isDeleted: 1, adminDeleted: 1 });
 forumPostSchema.index({ isPending: 1, createdAt: -1 }); // For moderator queue
 forumPostSchema.index({ isPending: 1, isDeleted: 1, adminDeleted: 1 }); // For approved posts listing
+forumPostSchema.index({ showOnHomepage: 1, isPinned: -1, lastActivity: -1 }); // For homepage posts listing
 
 // Pre-save middleware to update timestamps
 forumPostSchema.pre('save', function(next) {

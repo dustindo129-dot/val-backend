@@ -53,36 +53,47 @@ const clearForumPostsCache = () => {
  */
 router.get('/posts', async (req, res) => {
   try {
-    const { page = 1, limit = 10 } = req.query;
+    const { page = 1, limit = 10, showOnHomepage } = req.query;
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
     const skip = (pageNum - 1) * limitNum;
 
-    // Check cache first
-    const cachedPosts = getCachedForumPosts(pageNum, limitNum);
-    if (cachedPosts) {
-      return res.json(cachedPosts);
+    // Build query filter
+    const queryFilter = {
+      isDeleted: false,
+      adminDeleted: false,
+      $or: [
+        { isPending: false },
+        { isPending: { $exists: false } } // Include legacy posts without isPending field
+      ]
+    };
+
+    // Add homepage visibility filter if specified
+    if (showOnHomepage !== undefined) {
+      if (showOnHomepage === 'true') {
+        queryFilter.$and = [
+          { $or: [
+            { showOnHomepage: true },
+            { showOnHomepage: { $exists: false } } // Include legacy posts without showOnHomepage field (default true)
+          ]}
+        ];
+      } else if (showOnHomepage === 'false') {
+        queryFilter.showOnHomepage = false;
+      }
     }
 
-    // Get total count (only approved posts - includes legacy posts without isPending field)
-    const totalPosts = await ForumPost.countDocuments({
-      isDeleted: false,
-      adminDeleted: false,
-      $or: [
-        { isPending: false },
-        { isPending: { $exists: false } } // Include legacy posts without isPending field
-      ]
-    });
+    // Create cache key that includes homepage filter
+    const cacheKey = `posts_${pageNum}_${limitNum}_${showOnHomepage || 'all'}`;
+    const cachedPosts = forumPostsCache.get(cacheKey);
+    if (cachedPosts && Date.now() - cachedPosts.timestamp < FORUM_POSTS_CACHE_TTL) {
+      return res.json(cachedPosts.data);
+    }
 
-    // Fetch posts with pagination (only approved posts - includes legacy posts)
-    const posts = await ForumPost.find({
-      isDeleted: false,
-      adminDeleted: false,
-      $or: [
-        { isPending: false },
-        { isPending: { $exists: false } } // Include legacy posts without isPending field
-      ]
-    })
+    // Get total count with filters
+    const totalPosts = await ForumPost.countDocuments(queryFilter);
+
+    // Fetch posts with pagination and filters
+    const posts = await ForumPost.find(queryFilter)
     .sort({ isPinned: -1, lastActivity: -1 }) // Pinned first, then by last activity
     .skip(skip)
     .limit(limitNum)
@@ -116,8 +127,11 @@ router.get('/posts', async (req, res) => {
       }
     };
 
-    // Cache the result
-    setCachedForumPosts(pageNum, limitNum, result);
+    // Cache the result with the new cache key
+    forumPostsCache.set(cacheKey, {
+      data: result,
+      timestamp: Date.now()
+    });
 
     res.json(result);
   } catch (error) {
@@ -548,6 +562,45 @@ router.patch('/posts/:slug/toggle-comments', auth, async (req, res) => {
     });
   } catch (error) {
     console.error('Error toggling comments:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * Toggle homepage visibility for a forum post (Admin/Moderator or post author)
+ * @route PATCH /api/forum/posts/:slug/toggle-homepage
+ */
+router.patch('/posts/:slug/toggle-homepage', auth, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { showOnHomepage } = req.body;
+
+    const post = await ForumPost.findOne({ slug });
+    if (!post) {
+      return res.status(404).json({ message: 'Post not found' });
+    }
+
+    // Check permissions: admin/moderator can toggle any post, authors can toggle their own posts
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'moderator';
+    const isAuthor = post.author.toString() === req.user.id;
+    
+    if (!isAdmin && !isAuthor) {
+      return res.status(403).json({ message: 'You can only toggle homepage visibility on your own posts or if you are an admin/moderator' });
+    }
+
+    // Update homepage visibility status
+    post.showOnHomepage = showOnHomepage;
+    await post.save();
+
+    // Clear forum posts cache
+    clearForumPostsCache();
+
+    res.json({
+      showOnHomepage: post.showOnHomepage,
+      message: post.showOnHomepage ? 'Post will be shown on homepage' : 'Post will not be shown on homepage'
+    });
+  } catch (error) {
+    console.error('Error toggling homepage visibility:', error);
     res.status(500).json({ message: error.message });
   }
 });
