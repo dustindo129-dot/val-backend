@@ -1154,9 +1154,10 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
           const conversionTimestamp = new Date();
           
           // Convert all chapters to published mode with proper timestamp updates
-          const chapterUpdatePromises = chapters.map(chapter => {
-            if (chapter.mode !== 'published') {
-              return Chapter.findByIdAndUpdate(
+          const chapterUpdatePromises = chapters
+            .filter(chapter => chapter.mode !== 'published') // Filter first to avoid null promises
+            .map(chapter => 
+              Chapter.findByIdAndUpdate(
                 chapter._id,
                 { 
                   mode: 'published',
@@ -1166,12 +1167,12 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
                   new: true,
                   maxTimeMS: 5000 
                 }
-              );
-            }
-            return Promise.resolve();
-          });
+              )
+            );
           
-          await Promise.all(chapterUpdatePromises);
+          if (chapterUpdatePromises.length > 0) {
+            await Promise.all(chapterUpdatePromises);
+          }
           
           // Log the timestamp updates for tracking
           const nonPublishedChapters = chapters.filter(c => c.mode !== 'published');
