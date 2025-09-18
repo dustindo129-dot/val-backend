@@ -3536,12 +3536,14 @@ export async function checkAndUnlockContent(novelId) {
     transactionCommitted = true;
     
     // Clear caches and notify clients after successful transaction
-    if (result.unlockedContent.length > 0 || result.switchedModules.length > 0) {
+    if (result && result.unlockedContent && result.unlockedContent.length > 0 || 
+        result && result.switchedModules && result.switchedModules.length > 0) {
       clearNovelCaches();
       clearContributionHistoryCache(novelId);
       
       // Send notifications for unlocked content
-      result.unlockedContent.forEach(content => {
+      if (result.unlockedContent) {
+        result.unlockedContent.forEach(content => {
         if (content.type === 'module') {
           notifyAllClients('module_unlocked', { 
             novelId, 
@@ -3556,10 +3558,12 @@ export async function checkAndUnlockContent(novelId) {
             chapterTitle: content.title 
           });
         }
-      });
+        });
+      }
 
       // Send notifications for modules that switched from rent to published mode
-      result.switchedModules.forEach(module => {
+      if (result.switchedModules) {
+        result.switchedModules.forEach(module => {
         notifyAllClients('module_mode_changed', { 
           novelId, 
           moduleId: module._id,
@@ -3568,7 +3572,8 @@ export async function checkAndUnlockContent(novelId) {
           newMode: 'published',
           reason: 'auto_switch_rent_to_published'
         });
-      });
+        });
+      }
 
       // Send additional notification if novel moved to top of latest updates
       notifyAllClients('novel_updated_for_latest', { 
@@ -3578,7 +3583,7 @@ export async function checkAndUnlockContent(novelId) {
       });
     }
 
-    return result;
+    return result || { unlockedContent: [], finalBudget: 0, switchedModules: [] };
 
   } catch (error) {
     // Only abort transaction if it hasn't been committed yet
