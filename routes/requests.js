@@ -790,7 +790,7 @@ router.get('/history', auth, async (req, res) => {
 router.put('/:requestId', auth, async (req, res) => {
   try {
     const { requestId } = req.params;
-    const { note, contactInfo, illustration } = req.body;
+    const { note, contactInfo, illustration, goalBalance } = req.body;
     
     // Find the request
     const request = await Request.findById(requestId);
@@ -832,6 +832,14 @@ router.put('/:requestId', auth, async (req, res) => {
     
     if (illustration !== undefined) {
       updateData.illustration = illustration;
+    }
+    
+    if (goalBalance !== undefined && request.type === 'web') {
+      // Validate goalBalance is a positive number
+      if (isNaN(goalBalance) || Number(goalBalance) <= 0) {
+        return res.status(400).json({ message: 'Số 🌾 mục tiêu phải là số dương' });
+      }
+      updateData.goalBalance = Number(goalBalance);
     }
     
     // Update the request
