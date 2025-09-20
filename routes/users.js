@@ -102,6 +102,16 @@ const MAX_USER_STATS_CACHE_SIZE = 200;
 // Query deduplication cache for user stats
 const pendingUserStatsQueries = new Map();
 
+// Simple in-memory cache for blog posts
+const blogPostsCache = new Map();
+const BLOG_POSTS_CACHE_TTL = 1000 * 60 * 5; // 5 minutes
+const MAX_BLOG_POSTS_CACHE_SIZE = 100;
+
+// Simple in-memory cache for admin data
+const adminCache = new Map();
+const ADMIN_CACHE_TTL = 1000 * 60 * 2; // 2 minutes
+const MAX_ADMIN_CACHE_SIZE = 50;
+
 // Helper function to manage user stats cache
 const getCachedUserStats = (userId) => {
   const cached = userStatsCache.get(userId);
@@ -146,6 +156,76 @@ const clearUserStatsCache = (userId = null) => {
     userStatsCache.delete(userId);
   } else {
     userStatsCache.clear();
+  }
+};
+
+// Helper function to manage blog posts cache
+const getCachedBlogPosts = (userId, page = 1) => {
+  const cacheKey = `${userId}_page_${page}`;
+  const cached = blogPostsCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < BLOG_POSTS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedBlogPosts = (userId, page = 1, data) => {
+  const cacheKey = `${userId}_page_${page}`;
+  
+  // Implement LRU-like cache management
+  if (blogPostsCache.size >= MAX_BLOG_POSTS_CACHE_SIZE) {
+    const oldestKey = blogPostsCache.keys().next().value;
+    blogPostsCache.delete(oldestKey);
+  }
+  
+  blogPostsCache.set(cacheKey, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+const clearBlogPostsCache = (userId = null) => {
+  if (userId) {
+    // Clear all pages for this user
+    const keysToDelete = [];
+    for (const key of blogPostsCache.keys()) {
+      if (key.startsWith(`${userId}_page_`)) {
+        keysToDelete.push(key);
+      }
+    }
+    keysToDelete.forEach(key => blogPostsCache.delete(key));
+  } else {
+    blogPostsCache.clear();
+  }
+};
+
+// Helper functions for admin cache management
+const getCachedAdminData = (key) => {
+  const cached = adminCache.get(key);
+  if (cached && Date.now() - cached.timestamp < ADMIN_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+};
+
+const setCachedAdminData = (key, data) => {
+  // Implement LRU-like cache management
+  if (adminCache.size >= MAX_ADMIN_CACHE_SIZE) {
+    const oldestKey = adminCache.keys().next().value;
+    adminCache.delete(oldestKey);
+  }
+  
+  adminCache.set(key, {
+    data,
+    timestamp: Date.now()
+  });
+};
+
+const clearAdminCache = (key = null) => {
+  if (key) {
+    adminCache.delete(key);
+  } else {
+    adminCache.clear();
   }
 };
 
@@ -1181,6 +1261,8 @@ router.post('/ban/:username', auth, async (req, res) => {
 
     // Clear all user caches after banning
     clearAllUserCaches(userToBan);
+    // Clear admin cache since banned users list changed
+    clearAdminCache('banned_users');
 
     res.json({ 
       message: 'User banned successfully. All comments have been removed.',
@@ -1216,6 +1298,8 @@ router.delete('/ban/:username', auth, async (req, res) => {
 
     // Clear all user caches after unbanning
     clearAllUserCaches(userToUnban);
+    // Clear admin cache since banned users list changed
+    clearAdminCache('banned_users');
 
     res.json({ 
       message: 'User unbanned successfully',
@@ -1241,8 +1325,18 @@ router.get('/banned', auth, async (req, res) => {
       return res.status(403).json({ message: 'Only admins can view banned users' });
     }
 
-    const bannedUsers = await User.find({ isBanned: true })
-      .select('username displayName avatar');
+    // Check cache first
+    const cacheKey = 'banned_users';
+    let bannedUsers = getCachedAdminData(cacheKey);
+    
+    if (!bannedUsers) {
+      bannedUsers = await User.find({ isBanned: true })
+        .select('username displayName avatar')
+        .lean();
+      
+      // Cache the result
+      setCachedAdminData(cacheKey, bannedUsers);
+    }
 
     res.json(bannedUsers);
   } catch (error) {
@@ -1374,19 +1468,30 @@ router.get('/admin-task-count', auth, async (req, res) => {
       return res.status(403).json({ message: 'Access denied. Admin/Moderator only.' });
     }
 
-    // Count pending forum posts and pending reports in parallel
-    const [pendingPostsCount, pendingReportsCount] = await Promise.all([
-      ForumPost.countDocuments({ isPending: true }),
-      Report.countDocuments({ status: 'pending' })
-    ]);
+    // Check cache first
+    const cacheKey = 'admin_task_counts';
+    let result = getCachedAdminData(cacheKey);
+    
+    if (!result) {
+      // Count pending forum posts and pending reports in parallel
+      const [pendingPostsCount, pendingReportsCount] = await Promise.all([
+        ForumPost.countDocuments({ isPending: true }),
+        Report.countDocuments({ status: 'pending' })
+      ]);
 
-    const totalCount = pendingPostsCount + pendingReportsCount;
+      const totalCount = pendingPostsCount + pendingReportsCount;
 
-    res.json({
-      totalCount,
-      pendingPosts: pendingPostsCount,
-      pendingReports: pendingReportsCount
-    });
+      result = {
+        totalCount,
+        pendingPosts: pendingPostsCount,
+        pendingReports: pendingReportsCount
+      };
+      
+      // Cache the result
+      setCachedAdminData(cacheKey, result);
+    }
+
+    res.json(result);
   } catch (error) {
     console.error('Error fetching admin task count:', error);
     res.status(500).json({ message: 'Server error' });
@@ -2617,7 +2722,7 @@ const clearUserResolutionCache = (userId = null) => {
 };
 
 // Export cache clearing function for use by other routes
-export { clearUserStatsCache, clearUserResolutionCache };
+export { clearUserStatsCache, clearUserResolutionCache, clearBlogPostsCache, clearAdminCache };
 
 /**
  * Get consolidated user settings data (optimized single query)
@@ -3434,24 +3539,38 @@ router.get('/id/:userId/blog-posts', (req, res, next) => {
     const userId = req.params.userId;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
+    const normalizedLimit = Math.min(limit, 20); // Max 20 posts per page
     
     // Validate ObjectId format
     if (!mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
     
-    // Check if user exists
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+    // Check cache first (only for page 1 with default limit to optimize most common case)
+    let result = null;
+    if (page === 1 && normalizedLimit === 10) {
+      result = getCachedBlogPosts(userId, page);
     }
     
-    // Get user's blog posts with pagination
-    const result = await BlogPost.getUserPosts(userId, { 
-      page, 
-      limit: Math.min(limit, 20), // Max 20 posts per page
-      sort: { createdAt: -1 } // Latest first
-    });
+    if (!result) {
+      // Check if user exists
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+      
+      // Get user's blog posts with pagination
+      result = await BlogPost.getUserPosts(userId, { 
+        page, 
+        limit: normalizedLimit,
+        sort: { createdAt: -1 } // Latest first
+      });
+      
+      // Cache the result (only for page 1 with default limit)
+      if (page === 1 && normalizedLimit === 10) {
+        setCachedBlogPosts(userId, page, result);
+      }
+    }
     
     // Add like status for each post if user is authenticated
     const currentUser = req.user;
@@ -3523,6 +3642,8 @@ router.post('/id/:userId/blog-posts', auth, async (req, res) => {
     // Clear user stats cache since blog post count changed
     clearUserStatsCache(userId);
     clearUserStatsCache(`complete_profile_${req.user.userNumber}`);
+    // Clear blog posts cache since new post was created
+    clearBlogPostsCache(userId);
     
     res.status(201).json(blogPost);
   } catch (error) {
@@ -3578,6 +3699,9 @@ router.put('/id/:userId/blog-posts/:postId', auth, async (req, res) => {
     blogPost.content = content.trim();
     await blogPost.save();
     
+    // Clear blog posts cache since post was updated
+    clearBlogPostsCache(userId);
+    
     res.json(blogPost);
   } catch (error) {
     console.error('Error updating blog post:', error);
@@ -3615,6 +3739,8 @@ router.delete('/id/:userId/blog-posts/:postId', auth, async (req, res) => {
     // Clear user stats cache since blog post count changed
     clearUserStatsCache(userId);
     clearUserStatsCache(`complete_profile_${req.user.userNumber}`);
+    // Clear blog posts cache since post was deleted
+    clearBlogPostsCache(userId);
     
     res.json({ message: 'Blog post deleted successfully' });
   } catch (error) {
@@ -3684,6 +3810,9 @@ router.post('/id/:userId/blog-posts/:postId/like', auth, async (req, res) => {
     // Save the updated blog post
     await blogPost.save();
     
+    // Clear blog posts cache since like count changed
+    clearBlogPostsCache(userId);
+    
     res.json({
       message: result.likedByUser ? 'Liked blog post' : 'Unliked blog post',
       likesCount: result.likesCount,
@@ -3724,6 +3853,9 @@ router.patch('/id/:userId/blog-posts/:postId/toggle-homepage', auth, async (req,
     
     blogPost.showOnHomepage = showOnHomepage;
     await blogPost.save();
+    
+    // Clear blog posts cache since visibility changed
+    clearBlogPostsCache(userId);
     
     res.json({
       message: 'Homepage visibility updated successfully',

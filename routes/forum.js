@@ -234,6 +234,10 @@ router.post('/posts', auth, checkBan, async (req, res) => {
     // Only clear forum posts cache if post was approved immediately
     if (!post.isPending) {
       clearForumPostsCache();
+    } else {
+      // Clear admin cache since a new pending post was created
+      const { clearAdminCache } = await import('./users.js');
+      clearAdminCache('admin_task_counts');
     }
 
     // Broadcast admin task update if a pending post was created
@@ -367,6 +371,12 @@ router.delete('/posts/:slug', auth, async (req, res) => {
     }
 
     await post.save();
+    
+    // Clear admin cache if a pending post was deleted by admin/moderator
+    if (isModAction && post.isPending) {
+      const { clearAdminCache } = await import('./users.js');
+      clearAdminCache('admin_task_counts');
+    }
 
     // Delete all comments related to this forum post
     try {
@@ -687,6 +697,10 @@ router.post('/posts/:id/approve', auth, async (req, res) => {
 
     // Clear forum posts cache since we now have a new approved post
     clearForumPostsCache();
+    
+    // Clear admin cache since pending posts count changed
+    const { clearAdminCache } = await import('./users.js');
+    clearAdminCache('admin_task_counts');
 
     // Populate author info for response
     await post.populate('author', 'username displayName avatar role userNumber');
@@ -739,6 +753,10 @@ router.post('/posts/:id/reject', auth, async (req, res) => {
     }
 
     const post = await ForumPost.rejectPost(id, req.user._id, reason);
+    
+    // Clear admin cache since pending posts count changed
+    const { clearAdminCache } = await import('./users.js');
+    clearAdminCache('admin_task_counts');
 
     // Populate author info for response
     await post.populate('author', 'username displayName avatar role userNumber');

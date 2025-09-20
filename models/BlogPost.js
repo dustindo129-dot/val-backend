@@ -120,7 +120,7 @@ blogPostSchema.statics.getUserPosts = async function(userId, options = {}) {
  */
 blogPostSchema.statics.getHomepagePosts = async function(limit = 8) {
   return this.find({ showOnHomepage: true })
-    .populate('author', 'username displayName avatar')
+    .populate('author', 'username displayName avatar userNumber')
     .sort({ createdAt: -1 }) // Latest first
     .limit(limit)
     .lean();

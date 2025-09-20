@@ -33,6 +33,10 @@ router.post('/', auth, async (req, res) => {
     
     const savedReport = await report.save();
     
+    // Clear admin cache since a new pending report was created
+    const { clearAdminCache } = await import('./users.js');
+    clearAdminCache('admin_task_counts');
+    
     // Return saved report but populate reporter for frontend use
     const populatedReport = await Report.findById(savedReport._id)
       .populate('reporter', 'username avatar')
@@ -91,6 +95,10 @@ router.put('/:id/resolve', auth, checkRole(['admin', 'moderator']), async (req, 
     report.status = 'resolved';
     await report.save();
     
+    // Clear admin cache since pending reports count changed
+    const { clearAdminCache } = await import('./users.js');
+    clearAdminCache('admin_task_counts');
+    
     // Always create notification (with or without response message)
     await createReportFeedbackNotification(
       report.reporter.toString(),
@@ -132,6 +140,10 @@ router.delete('/:id', auth, checkRole(['admin']), async (req, res) => {
     }
     
     await Report.deleteOne({ _id: req.params.id });
+    
+    // Clear admin cache since a report was deleted
+    const { clearAdminCache } = await import('./users.js');
+    clearAdminCache('admin_task_counts');
     
     res.json({ message: 'Report deleted successfully' });
   } catch (error) {
