@@ -15,6 +15,7 @@ import { getCachedUserById, getCachedUserByUsername, clearUserCache, clearAllUse
 import { batchGetUsers } from '../utils/batchUserCache.js';
 import ForumPost from '../models/ForumPost.js';
 import Report from '../models/Report.js';
+import BlogPost from '../models/BlogPost.js';
 
 const router = express.Router();
 
@@ -2819,7 +2820,8 @@ router.get('/number/:userNumber/public-profile-complete', async (req, res) => {
       userModulesResult,
       chaptersParticipated,
       followingCount,
-      commentsCount
+      commentsCount,
+      blogPostsCount
     ] = await Promise.all([
       // Get user modules using direct population (more reliable than complex aggregation)
       User.findById(user._id)
@@ -2868,6 +2870,11 @@ router.get('/number/:userNumber/public-profile-complete', async (req, res) => {
         user: user._id, 
         isDeleted: { $ne: true }, 
         adminDeleted: { $ne: true }
+      }),
+      
+      // Get blog posts count
+      BlogPost.countDocuments({ 
+        author: user._id 
       })
     ]);
 
@@ -2897,6 +2904,7 @@ router.get('/number/:userNumber/public-profile-complete', async (req, res) => {
         chaptersParticipated: chaptersParticipated || 0,
         followingCount: followingCount || 0,
         commentsCount: commentsCount || 0,
+        blogPostsCount: blogPostsCount || 0,
         ongoingModules: ongoingModules,
         completedModules: completedModules
       }
@@ -3395,6 +3403,351 @@ router.post('/by-ids', async (req, res) => {
   } catch (error) {
     console.error('Error fetching users by IDs:', error);
     res.status(500).json({ message: 'Failed to fetch users' });
+  }
+});
+
+/**
+ * BLOG POST ENDPOINTS
+ */
+
+/**
+ * Get user's blog posts
+ * @route GET /api/users/id/:userId/blog-posts
+ */
+router.get('/id/:userId/blog-posts', (req, res, next) => {
+  // Optional authentication - add user info if available
+  const token = req.header('Authorization')?.replace('Bearer ', '');
+  if (token) {
+    auth(req, res, (err) => {
+      if (err) {
+        // If auth fails, continue without user info
+        req.user = null;
+      }
+      next();
+    });
+  } else {
+    req.user = null;
+    next();
+  }
+}, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
+    }
+    
+    // Check if user exists
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Get user's blog posts with pagination
+    const result = await BlogPost.getUserPosts(userId, { 
+      page, 
+      limit: Math.min(limit, 20), // Max 20 posts per page
+      sort: { createdAt: -1 } // Latest first
+    });
+    
+    // Add like status for each post if user is authenticated
+    const currentUser = req.user;
+    if (currentUser) {
+      result.posts = result.posts.map(post => ({
+        ...post,
+        likedByUser: post.likes ? post.likes.includes(currentUser._id.toString()) : false
+      }));
+    } else {
+      // For unauthenticated users, set likedByUser to false
+      result.posts = result.posts.map(post => ({
+        ...post,
+        likedByUser: false
+      }));
+    }
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching user blog posts:', error);
+    res.status(500).json({ message: 'Failed to fetch blog posts' });
+  }
+});
+
+/**
+ * Create a new blog post
+ * @route POST /api/users/id/:userId/blog-posts
+ */
+router.post('/id/:userId/blog-posts', auth, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const { title, content } = req.body;
+    
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
+    }
+    
+    // Only allow users to create posts on their own profile
+    if (req.user._id.toString() !== userId) {
+      return res.status(403).json({ message: 'Not authorized to create blog posts for this user' });
+    }
+    
+    // Validate input
+    if (!title || !title.trim()) {
+      return res.status(400).json({ message: 'Title is required' });
+    }
+    
+    if (!content || !content.trim()) {
+      return res.status(400).json({ message: 'Content is required' });
+    }
+    
+    if (title.length > 200) {
+      return res.status(400).json({ message: 'Title cannot exceed 200 characters' });
+    }
+    
+    if (content.length > 50000) {
+      return res.status(400).json({ message: 'Content cannot exceed 50000 characters' });
+    }
+    
+    // Create new blog post
+    const blogPost = new BlogPost({
+      title: title.trim(),
+      content: content.trim(),
+      author: userId
+    });
+    
+    await blogPost.save();
+    
+    // Clear user stats cache since blog post count changed
+    clearUserStatsCache(userId);
+    clearUserStatsCache(`complete_profile_${req.user.userNumber}`);
+    
+    res.status(201).json(blogPost);
+  } catch (error) {
+    console.error('Error creating blog post:', error);
+    res.status(500).json({ message: 'Failed to create blog post' });
+  }
+});
+
+/**
+ * Update a blog post
+ * @route PUT /api/users/id/:userId/blog-posts/:postId
+ */
+router.put('/id/:userId/blog-posts/:postId', auth, async (req, res) => {
+  try {
+    const { userId, postId } = req.params;
+    const { title, content } = req.body;
+    
+    // Validate ObjectId formats
+    if (!mongoose.Types.ObjectId.isValid(userId) || !mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({ message: 'Invalid ID format' });
+    }
+    
+    // Find the blog post
+    const blogPost = await BlogPost.findById(postId);
+    if (!blogPost) {
+      return res.status(404).json({ message: 'Blog post not found' });
+    }
+    
+    // Check if user can edit this post
+    if (!blogPost.canEdit(req.user._id)) {
+      return res.status(403).json({ message: 'Not authorized to edit this blog post' });
+    }
+    
+    // Validate input
+    if (!title || !title.trim()) {
+      return res.status(400).json({ message: 'Title is required' });
+    }
+    
+    if (!content || !content.trim()) {
+      return res.status(400).json({ message: 'Content is required' });
+    }
+    
+    if (title.length > 200) {
+      return res.status(400).json({ message: 'Title cannot exceed 200 characters' });
+    }
+    
+    if (content.length > 50000) {
+      return res.status(400).json({ message: 'Content cannot exceed 50000 characters' });
+    }
+    
+    // Update blog post
+    blogPost.title = title.trim();
+    blogPost.content = content.trim();
+    await blogPost.save();
+    
+    res.json(blogPost);
+  } catch (error) {
+    console.error('Error updating blog post:', error);
+    res.status(500).json({ message: 'Failed to update blog post' });
+  }
+});
+
+/**
+ * Delete a blog post
+ * @route DELETE /api/users/id/:userId/blog-posts/:postId
+ */
+router.delete('/id/:userId/blog-posts/:postId', auth, async (req, res) => {
+  try {
+    const { userId, postId } = req.params;
+    
+    // Validate ObjectId formats
+    if (!mongoose.Types.ObjectId.isValid(userId) || !mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({ message: 'Invalid ID format' });
+    }
+    
+    // Find the blog post
+    const blogPost = await BlogPost.findById(postId);
+    if (!blogPost) {
+      return res.status(404).json({ message: 'Blog post not found' });
+    }
+    
+    // Check if user can delete this post
+    if (!blogPost.canDelete(req.user._id, req.user.role)) {
+      return res.status(403).json({ message: 'Not authorized to delete this blog post' });
+    }
+    
+    // Delete the blog post
+    await BlogPost.findByIdAndDelete(postId);
+    
+    // Clear user stats cache since blog post count changed
+    clearUserStatsCache(userId);
+    clearUserStatsCache(`complete_profile_${req.user.userNumber}`);
+    
+    res.json({ message: 'Blog post deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting blog post:', error);
+    res.status(500).json({ message: 'Failed to delete blog post' });
+  }
+});
+
+/**
+ * Get a specific blog post
+ * @route GET /api/users/id/:userId/blog-posts/:postId
+ */
+router.get('/id/:userId/blog-posts/:postId', async (req, res) => {
+  try {
+    const { userId, postId } = req.params;
+    
+    // Validate ObjectId formats
+    if (!mongoose.Types.ObjectId.isValid(userId) || !mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({ message: 'Invalid ID format' });
+    }
+    
+    // Find the blog post
+    const blogPost = await BlogPost.findById(postId);
+    if (!blogPost) {
+      return res.status(404).json({ message: 'Blog post not found' });
+    }
+    
+    // Check if the post belongs to the specified user
+    if (blogPost.author.toString() !== userId) {
+      return res.status(404).json({ message: 'Blog post not found' });
+    }
+    
+    res.json(blogPost);
+  } catch (error) {
+    console.error('Error fetching blog post:', error);
+    res.status(500).json({ message: 'Failed to fetch blog post' });
+  }
+});
+
+/**
+ * Like/Unlike a blog post
+ * @route POST /api/users/id/:userId/blog-posts/:postId/like
+ */
+router.post('/id/:userId/blog-posts/:postId/like', auth, async (req, res) => {
+  try {
+    const { userId, postId } = req.params;
+    
+    // Validate ObjectId formats
+    if (!mongoose.Types.ObjectId.isValid(userId) || !mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({ message: 'Invalid ID format' });
+    }
+    
+    // Find the blog post
+    const blogPost = await BlogPost.findById(postId);
+    if (!blogPost) {
+      return res.status(404).json({ message: 'Blog post not found' });
+    }
+    
+    // Check if the post belongs to the specified user
+    if (blogPost.author.toString() !== userId) {
+      return res.status(404).json({ message: 'Blog post not found' });
+    }
+    
+    // Toggle like
+    const result = blogPost.toggleLike(req.user._id);
+    
+    // Save the updated blog post
+    await blogPost.save();
+    
+    res.json({
+      message: result.likedByUser ? 'Liked blog post' : 'Unliked blog post',
+      likesCount: result.likesCount,
+      likedByUser: result.likedByUser
+    });
+  } catch (error) {
+    console.error('Error toggling blog post like:', error);
+    res.status(500).json({ message: 'Failed to toggle like on blog post' });
+  }
+});
+
+// Toggle blog post homepage visibility
+router.patch('/id/:userId/blog-posts/:postId/toggle-homepage', auth, async (req, res) => {
+  try {
+    const { userId, postId } = req.params;
+    const { showOnHomepage } = req.body;
+    
+    if (!mongoose.Types.ObjectId.isValid(userId) || !mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({ message: 'Invalid ID format' });
+    }
+    
+    const blogPost = await BlogPost.findById(postId);
+    if (!blogPost) {
+      return res.status(404).json({ message: 'Blog post not found' });
+    }
+    
+    if (blogPost.author.toString() !== userId) {
+      return res.status(404).json({ message: 'Blog post not found' });
+    }
+    
+    // Check if user can edit this post (owner, admin, or moderator)
+    const canEdit = blogPost.author.toString() === req.user._id.toString() ||
+                   ['admin', 'moderator'].includes(req.user.role);
+    
+    if (!canEdit) {
+      return res.status(403).json({ message: 'Not authorized to edit this blog post' });
+    }
+    
+    blogPost.showOnHomepage = showOnHomepage;
+    await blogPost.save();
+    
+    res.json({
+      message: 'Homepage visibility updated successfully',
+      showOnHomepage: blogPost.showOnHomepage
+    });
+  } catch (error) {
+    console.error('Error toggling blog post homepage visibility:', error);
+    res.status(500).json({ message: 'Failed to toggle homepage visibility' });
+  }
+});
+
+// Get homepage blog posts
+router.get('/blog-posts/homepage', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 8;
+    const posts = await BlogPost.getHomepagePosts(Math.min(limit, 20)); // Max 20 posts
+    
+    res.json({
+      posts,
+      totalCount: posts.length
+    });
+  } catch (error) {
+    console.error('Error fetching homepage blog posts:', error);
+    res.status(500).json({ message: 'Failed to fetch homepage blog posts' });
   }
 });
 
