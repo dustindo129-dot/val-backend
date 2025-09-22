@@ -736,6 +736,57 @@ export const createForumPostDeletedNotification = async (userId, postTitle, dele
 };
 
 /**
+ * Create notification for blog post like
+ * @param {string} blogAuthorId - ID of the user who owns the blog post
+ * @param {string} blogPostId - ID of the liked blog post
+ * @param {string} blogPostTitle - Title of the liked blog post
+ * @param {string} likerId - ID of the user who liked the blog post
+ * @param {string} blogAuthorDisplayName - Display name or username of the blog author for URL
+ */
+export const createLikedBlogPostNotification = async (blogAuthorId, blogPostId, blogPostTitle, likerId, blogAuthorDisplayName) => {
+  try {
+    // Don't notify if user is liking their own blog post
+    if (blogAuthorId === likerId) {
+      return;
+    }
+
+    const liker = await User.findById(likerId).select('displayName username');
+    if (!liker) return;
+
+    const likerDisplayName = liker.displayName || liker.username;
+
+    const message = `<i>${likerDisplayName}</i> đã thích bài viết <b>"${blogPostTitle}"</b> của bạn`;
+    
+    const linkData = { 
+      blogPostId,
+      blogPostTitle,
+      blogAuthorDisplayName
+    };
+
+    const notification = new Notification({
+      userId: blogAuthorId,
+      type: 'liked_blog_post',
+      title: 'Bài viết được thích',
+      message,
+      relatedUser: likerId,
+      data: linkData
+    });
+
+    await notification.save();
+    
+    // Broadcast new notification event to specific user only
+    broadcastEventToUser('new_notification', {
+      userId: blogAuthorId,
+      notification: notification.toObject()
+    }, blogAuthorId);
+
+    console.log(`Blog post like notification created for user ${blogAuthorId}`);
+  } catch (error) {
+    console.error('Error creating liked blog post notification:', error);
+  }
+};
+
+/**
  * Get unread notification count for a user
  * @param {string} userId - ID of the user
  * @returns {number} Count of unread notifications

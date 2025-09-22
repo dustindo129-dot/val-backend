@@ -9,7 +9,7 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['report_feedback', 'comment_reply', 'new_chapter', 'follow_comment', 'liked_comment', 'liked_chapter', 'comment_deleted', 'forum_post_approved', 'forum_post_declined', 'forum_post_comment', 'forum_post_deleted'],
+    enum: ['report_feedback', 'comment_reply', 'new_chapter', 'follow_comment', 'liked_comment', 'liked_chapter', 'comment_deleted', 'forum_post_approved', 'forum_post_declined', 'forum_post_comment', 'forum_post_deleted', 'liked_blog_post'],
     required: true
   },
   title: {

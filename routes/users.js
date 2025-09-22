@@ -16,6 +16,7 @@ import { batchGetUsers } from '../utils/batchUserCache.js';
 import ForumPost from '../models/ForumPost.js';
 import Report from '../models/Report.js';
 import BlogPost from '../models/BlogPost.js';
+import { createLikedBlogPostNotification } from '../services/notificationService.js';
 
 const router = express.Router();
 
@@ -3809,6 +3810,29 @@ router.post('/id/:userId/blog-posts/:postId/like', auth, async (req, res) => {
     
     // Save the updated blog post
     await blogPost.save();
+    
+    // Send notification if the post was liked (not unliked)
+    if (result.likedByUser) {
+      try {
+        // Get the blog author information
+        const blogAuthor = await User.findById(userId).select('displayName username userNumber');
+        if (blogAuthor) {
+          const blogAuthorDisplayName = blogAuthor.displayName || blogAuthor.username;
+          
+          // Create notification for the blog author
+          await createLikedBlogPostNotification(
+            userId, // blogAuthorId
+            postId, // blogPostId
+            blogPost.title, // blogPostTitle
+            req.user._id.toString(), // likerId
+            blogAuthorDisplayName // blogAuthorDisplayName for URL
+          );
+        }
+      } catch (notificationError) {
+        console.error('Error creating blog like notification:', notificationError);
+        // Don't fail the like operation if notification fails
+      }
+    }
     
     // Clear blog posts cache since like count changed
     clearBlogPostsCache(userId);
