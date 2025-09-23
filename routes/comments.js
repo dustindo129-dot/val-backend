@@ -1702,8 +1702,13 @@ router.post('/:commentId/pin', auth, async (req, res) => {
             'active.pj_user': 1
           }
         });
+        
         if (novel && novel.active && novel.active.pj_user) {
-          canPinAsPjUser = novel.active.pj_user.includes(req.user._id) ||
+          // Convert ObjectId to string for comparison
+          const userIdString = req.user._id.toString();
+          
+          canPinAsPjUser = novel.active.pj_user.includes(userIdString) ||
+                          novel.active.pj_user.includes(req.user._id) ||
                           novel.active.pj_user.includes(req.user.username) ||
                           novel.active.pj_user.includes(req.user.displayName);
         }
