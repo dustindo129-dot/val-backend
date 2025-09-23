@@ -59,6 +59,11 @@ const novelSchema = new mongoose.Schema({
     enum: ['Ongoing', 'Completed', 'Hiatus'],
     default: 'Ongoing'
   },
+  mode: {
+    type: String,
+    enum: ['published', 'draft'],
+    default: 'published'
+  },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 }, {

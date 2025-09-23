@@ -1226,7 +1226,8 @@ router.get('/recent', async (req, res) => {
                       { $eq: ['$$contentType', 'novels'] },
                       { $eq: [{ $toString: '$_id' }, '$$contentId'] }
                     ]
-                  }
+                  },
+                  mode: { $ne: 'draft' } // Filter out draft novels
                 }
               },
               { $project: { title: 1 } }
@@ -1276,6 +1277,7 @@ router.get('/recent', async (req, res) => {
                   localField: 'novelId',
                   foreignField: '_id',
                   pipeline: [
+                    { $match: { mode: { $ne: 'draft' } } }, // Filter out draft novels
                     { $project: { title: 1 } }
                   ],
                   as: 'novel'
@@ -1316,6 +1318,15 @@ router.get('/recent', async (req, res) => {
                 null
               ]
             }
+          }
+        },
+        // Filter out comments from draft novels (they won't have contentTitle)
+        {
+          $match: {
+            $or: [
+              { contentTitle: { $ne: null } }, // Novel/chapter comments with valid titles
+              { contentType: { $nin: ['novels', 'chapters'] } } // Non-novel/chapter comments
+            ]
           }
         },
         {

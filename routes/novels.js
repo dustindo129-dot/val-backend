@@ -768,10 +768,11 @@ router.get("/vietnamese", async (req, res) => {
     }
 
     const [result] = await Novel.aggregate([
-      // Match novels with "Vietnamese Novel" genre
+      // Match published novels with "Vietnamese Novel" genre
       {
         $match: {
-          genres: { $in: ['Vietnamese Novel'] }
+          genres: { $in: ['Vietnamese Novel'] },
+          mode: { $ne: 'draft' } // Filter out draft novels
         }
       },
       
@@ -961,8 +962,11 @@ router.get("/hot", async (req, res) => {
       try {
         // Find novels with views in the selected time range
         hotNovels = await Novel.aggregate([
-          // Only include novels with daily views
-          { $match: { "views.daily": { $exists: true, $ne: [] } } },
+          // Only include published novels with daily views
+          { $match: { 
+            "views.daily": { $exists: true, $ne: [] },
+            mode: { $ne: 'draft' } // Filter out draft novels
+          } },
           // Unwind daily views array
           { $unwind: "$views.daily" },
           // Match views from selected time range
@@ -1039,8 +1043,11 @@ router.get("/hot", async (req, res) => {
       // For alltime, use total views
       try {
         hotNovels = await Novel.aggregate([
-          // Match only novels with total views
-          { $match: { "views.total": { $exists: true, $gt: 0 } } },
+          // Match only published novels with total views
+          { $match: { 
+            "views.total": { $exists: true, $gt: 0 },
+            mode: { $ne: 'draft' } // Filter out draft novels
+          } },
           // Sort by total views
           { $sort: { "views.total": -1 } },
           // Limit to top 15
@@ -1111,7 +1118,8 @@ router.get("/hot", async (req, res) => {
             $match: {
               _id: { $nin: existingNovelIds.map(id => 
                 typeof id === 'string' ? mongoose.Types.ObjectId.createFromHexString(id) : id
-              ) }
+              ) },
+              mode: { $ne: 'draft' } // Filter out draft novels
             }
           },
           // Sort by updatedAt (most recent first)
@@ -1206,14 +1214,19 @@ router.get("/", optionalAuth, async (req, res) => {
     const isAdminDashboardRequest = req.query.limit === '1000' && 
                                   req.query.bypass === 'true' && 
                                   (req.query.skipPopulation === 'true' || req.query.includePaidInfo === 'true');
-    
+                                  
     // SECURITY FIX: For pj_user, ONLY apply filtering if this is an admin dashboard request
     // Public browsing (homepage, novel directory) should show all novels to everyone including pj_user
     const isPjUser = req.user && req.user.role === 'pj_user';
     
+    // Check if this is a request to show draft novels (admin/moderator only)
+    const includeDraftNovels = req.query.includeDraft === 'true' && 
+                              req.user && 
+                              (req.user.role === 'admin' || req.user.role === 'moderator');
+    
+    
     // For pj_user making admin dashboard requests, apply role-based filtering
     if (isPjUser && isAdminDashboardRequest) {
-      console.log('pj_user request detected - applying role-based filtering');
       
       // Build the query conditions, only including defined values
       const queryConditions = [];
@@ -1397,7 +1410,8 @@ router.get("/", optionalAuth, async (req, res) => {
               hasPaidContent: 1,
               paidModulesCount: 1,
               paidChaptersCount: 1,
-              availableForRent: 1
+              availableForRent: 1,
+              mode: 1
             }
           },
           { $sort: { updatedAt: -1 } }
@@ -1407,7 +1421,7 @@ router.get("/", optionalAuth, async (req, res) => {
         userManagedNovels = await Novel.find({
           $or: queryConditions
         })
-        .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget availableForRent')
+        .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget availableForRent mode')
         .sort({ updatedAt: -1 })
         .lean();
       }
@@ -1430,6 +1444,7 @@ router.get("/", optionalAuth, async (req, res) => {
       return res.json(response);
     }
 
+
     // Note: isAdminDashboardRequest is already defined above with more secure logic
     
     // Check if this is a novel directory request (needs word count)
@@ -1450,7 +1465,6 @@ router.get("/", optionalAuth, async (req, res) => {
         return res.json(cachedData);
       }
 
-      console.log('Fetching fresh novel list data from database');
 
       // Create projection based on request type
       const projection = {
@@ -1470,11 +1484,24 @@ router.get("/", optionalAuth, async (req, res) => {
         projection.views = 1;
       }
 
+      // Build match query based on whether we want to include draft novels
+      const baseMatchQuery = includeDraftNovels 
+        ? { mode: 'draft' }  // Show only draft novels if requested by admin/mod
+        : { mode: { $ne: 'draft' } }; // Default: filter out draft novels
+
+      console.log('=== AGGREGATION DEBUG ===');
+      console.log('Base match query:', baseMatchQuery);
+      console.log('About to execute aggregation for public route');
+
       const [result] = await Novel.aggregate([
         {
           $facet: {
-            total: [{ $count: 'count' }],
+            total: [
+              { $match: baseMatchQuery }, // Apply draft filtering for total count
+              { $count: 'count' }
+            ],
             novels: [
+              { $match: baseMatchQuery }, // Apply draft filtering
               {
                 $project: projection
               },
@@ -1586,12 +1613,19 @@ router.get("/", optionalAuth, async (req, res) => {
       return res.json(cachedData);
     }
 
-    console.log('Fetching fresh novel list data from database');
 
     // Full aggregation for admin dashboard requests ONLY
 
     // Build aggregation pipeline with optional paid content info
     const aggregationPipeline = [];
+    
+    // Add draft filtering for admin requests
+    const baseMatchQuery = includeDraftNovels 
+      ? { mode: 'draft' }  // Show only draft novels if requested by admin/mod
+      : { mode: { $ne: 'draft' } }; // Default: filter out draft novels
+    
+    aggregationPipeline.push({ $match: baseMatchQuery });
+    
     
     // If paid content info is requested, add lookups for modules and chapters
     // Note: Only modules/chapters with positive balances are considered "paid content"
@@ -1746,6 +1780,7 @@ router.get("/", optionalAuth, async (req, res) => {
                 inactive: 1,
                 novelBalance: 1,
                 novelBudget: 1,
+                mode: 1,
                 // Include paid content fields if requested
                 ...(includePaidInfo ? {
                   hasPaidContent: 1,
@@ -1835,7 +1870,8 @@ router.post("/", [auth, admin], async (req, res) => {
       description,
       note,
       illustration,
-      status
+      status,
+      mode
     } = req.body;
 
     // Auto-promote users to pj_user role when assigned as project managers
@@ -1899,6 +1935,7 @@ router.post("/", [auth, admin], async (req, res) => {
       note,
       illustration,
       status: status || 'Ongoing',
+      mode: mode || 'published', // Default to published if not specified
       createdAt: new Date(),
       updatedAt: new Date()
     });
@@ -2104,7 +2141,8 @@ router.put("/:id", [auth, admin], async (req, res) => {
       description,
       note,
       illustration,
-      status
+      status,
+      mode
     } = req.body;
 
     // Find novel and update it
@@ -2256,6 +2294,11 @@ router.put("/:id", [auth, admin], async (req, res) => {
     novel.alternativeTitles = alternativeTitles;
     novel.author = author;
     novel.illustrator = illustrator;
+    
+    // Only admins and moderators can modify mode
+    if (mode !== undefined && (req.user.role === 'admin' || req.user.role === 'moderator')) {
+      novel.mode = mode;
+    }
     
     // Only update staff if user has permission
     if (canModifyStaff) {
@@ -3833,12 +3876,16 @@ router.get("/homepage", async (req, res) => {
         Novel.aggregate([
           {
             $facet: {
-              total: [{ $count: 'count' }],
+              total: [
+                { $match: { mode: { $ne: 'draft' } } }, // Filter out draft novels for total count
+                { $count: 'count' }
+              ],
               novels: [
-                          {
-            $project: {
-              title: 1,
-              illustration: 1,
+                { $match: { mode: { $ne: 'draft' } } }, // Filter out draft novels
+                {
+                  $project: {
+                    title: 1,
+                    illustration: 1,
               author: 1,
               illustrator: 1,
               status: 1,
