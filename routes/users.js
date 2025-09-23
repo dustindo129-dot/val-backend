@@ -3811,15 +3811,15 @@ router.post('/id/:userId/blog-posts/:postId/like', auth, async (req, res) => {
     // Save the updated blog post
     await blogPost.save();
     
-    // Send notification if the post was liked (not unliked)
-    if (result.likedByUser) {
+    // Send notification only if the post was liked for the first time (not unliked or repeat like)
+    if (result.likedByUser && result.isFirstTimeLike) {
       try {
         // Get the blog author information
         const blogAuthor = await User.findById(userId).select('displayName username userNumber');
         if (blogAuthor) {
           const blogAuthorDisplayName = blogAuthor.displayName || blogAuthor.username;
           
-          // Create notification for the blog author
+          // Create notification for the blog author (first time like only)
           await createLikedBlogPostNotification(
             userId, // blogAuthorId
             postId, // blogPostId

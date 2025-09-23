@@ -38,6 +38,10 @@ const blogPostSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }],
+  likeHistory: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
   likesCount: {
     type: Number,
     default: 0
@@ -150,11 +154,15 @@ blogPostSchema.methods.canDelete = function(userId, userRole = 'user') {
 /**
  * Instance method to toggle like on blog post
  * @param {String} userId - The user ID
- * @returns {Object} Result with likesCount and likedByUser status
+ * @returns {Object} Result with likesCount, likedByUser status, and isFirstTimeLike
  */
 blogPostSchema.methods.toggleLike = function(userId) {
   const userObjectId = new mongoose.Types.ObjectId(userId);
   const likedIndex = this.likes.indexOf(userObjectId);
+  
+  // Check if user has ever liked this post before
+  const hasLikedBefore = this.likeHistory.some(id => id.toString() === userObjectId.toString());
+  const isFirstTimeLike = !hasLikedBefore && likedIndex === -1;
   
   if (likedIndex > -1) {
     // User already liked, remove like
@@ -164,11 +172,17 @@ blogPostSchema.methods.toggleLike = function(userId) {
     // User hasn't liked, add like
     this.likes.push(userObjectId);
     this.likesCount += 1;
+    
+    // Add to like history if first time liking
+    if (!hasLikedBefore) {
+      this.likeHistory.push(userObjectId);
+    }
   }
   
   return {
     likesCount: this.likesCount,
-    likedByUser: likedIndex === -1
+    likedByUser: likedIndex === -1,
+    isFirstTimeLike: isFirstTimeLike
   };
 };
 
