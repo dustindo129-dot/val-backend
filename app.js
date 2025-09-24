@@ -22,6 +22,9 @@ import userChapterInteractionRoutes from './routes/userChapterInteractions.js';
 import userTransactionRoutes from './routes/userTransaction.js';
 import novelTransactionRoutes from './routes/novelTransactions.js';
 import giftRoutes from './routes/gifts.js';
+import ttsRoutes from './routes/tts-minimal.js';
+import ttsSimpleRoutes from './routes/tts-simple.js';
+import ttsFullRoutes from './routes/tts.js';
 import redisClient, { getRedisStatus } from './utils/redisClient.js';
 import { auth } from './middleware/auth.js';
 import admin from './middleware/admin.js';
@@ -29,6 +32,20 @@ import { preWarmAdminCache } from './utils/userCache.js';
 
 // Initialize Express application
 const app = express();
+
+// Add global request logging
+app.use((req, res, next) => {
+    if (req.url.startsWith('/api/tts')) {
+        console.log('🌐 GLOBAL REQUEST LOG:', {
+            timestamp: new Date().toISOString(),
+            method: req.method,
+            url: req.url,
+            origin: req.headers.origin,
+            contentType: req.headers['content-type']
+        });
+    }
+    next();
+});
 
 // Initialize caches and Redis connection
 (async () => {
@@ -69,6 +86,21 @@ app.use(express.json({ limit: "10mb" }));
 // Parse URL-encoded request bodies with a 10MB size limit
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
+// Serve TTS cache files statically with proper CORS headers
+app.use('/tts-cache', (req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    next();
+}, express.static('public/tts-cache', {
+    maxAge: '7d', // Cache for 7 days
+    etag: true,
+    lastModified: true,
+    setHeaders: (res, path) => {
+        res.set('Content-Type', 'audio/mpeg');
+    }
+}));
+
 // Redis status endpoint (admin only)
 app.get('/api/system/redis-status', [auth, admin], async (req, res) => {
   try {
@@ -101,3 +133,6 @@ app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User c
 app.use('/api/transactions', userTransactionRoutes); // User transaction ledger routes
 app.use('/api/novel-transactions', novelTransactionRoutes); // Novel transaction ledger routes
 app.use('/api/gifts', giftRoutes); // Gift system routes
+app.use('/api/tts', ttsRoutes); // Text-to-Speech routes (minimal)
+app.use('/api/tts-simple', ttsSimpleRoutes); // Simple TTS routes (mock generation)
+app.use('/api/tts-full', ttsFullRoutes); // Full TTS routes (Google Cloud integration)

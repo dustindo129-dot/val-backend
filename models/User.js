@@ -50,7 +50,7 @@ const userSchema = new mongoose.Schema({
   },
   avatar: {
     type: String,
-    default: 'https://Valvrareteam.b-cdn.net/defaults/default-avatar.webp'
+    default: 'https://Valvrareteam.b-cdn.net/defaults/default-avatar1.webp'
   },
   role: {
     type: String,

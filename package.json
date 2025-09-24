@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-ses": "3.777.0",
+    "@google-cloud/text-to-speech": "5.8.1",
     "axios": "1.11.0",
     "bcryptjs": "3.0.2",
     "body-parser": "2.2.0",
@@ -28,6 +29,7 @@
     "multer": "2.0.2",
     "node-cache": "5.1.2",
     "node-cron": "3.0.3",
+    "node-fetch": "3.3.2",
     "nodemailer": "6.10.0",
     "path-to-regexp": "8.2.0",
     "sirv": "3.0.1",
