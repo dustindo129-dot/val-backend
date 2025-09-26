@@ -22,9 +22,8 @@ import userChapterInteractionRoutes from './routes/userChapterInteractions.js';
 import userTransactionRoutes from './routes/userTransaction.js';
 import novelTransactionRoutes from './routes/novelTransactions.js';
 import giftRoutes from './routes/gifts.js';
-import ttsRoutes from './routes/tts-minimal.js';
-import ttsSimpleRoutes from './routes/tts-simple.js';
-import ttsFullRoutes from './routes/tts.js';
+import ttsRoutes from './routes/tts.js';
+import { initializeTTSService } from './services/ttsService.js';
 import redisClient, { getRedisStatus } from './utils/redisClient.js';
 import { auth } from './middleware/auth.js';
 import admin from './middleware/admin.js';
@@ -52,6 +51,9 @@ app.use((req, res, next) => {
   try {
     // Pre-warm user cache with admin user for better performance
     await preWarmAdminCache();
+    
+    // Initialize TTS Service
+    await initializeTTSService();
     
     // Check Redis connection
     if (!redisClient.isOpen) {
@@ -133,6 +135,4 @@ app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User c
 app.use('/api/transactions', userTransactionRoutes); // User transaction ledger routes
 app.use('/api/novel-transactions', novelTransactionRoutes); // Novel transaction ledger routes
 app.use('/api/gifts', giftRoutes); // Gift system routes
-app.use('/api/tts', ttsRoutes); // Text-to-Speech routes (minimal)
-app.use('/api/tts-simple', ttsSimpleRoutes); // Simple TTS routes (mock generation)
-app.use('/api/tts-full', ttsFullRoutes); // Full TTS routes (Google Cloud integration)
+app.use('/api/tts', ttsRoutes); // Text-to-Speech routes (Google Cloud TTS)

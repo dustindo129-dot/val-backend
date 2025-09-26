@@ -5,6 +5,11 @@ import { body, validationResult } from 'express-validator';
 
 const router = express.Router();
 
+// TTS routes middleware
+router.use((req, res, next) => {
+    next();
+});
+
 // Validation middleware for TTS generation
 const validateTTSRequest = [
     body('text')
@@ -39,16 +44,11 @@ const validateTTSRequest = [
  * @access Private (requires authentication)
  */
 router.post('/generate', [auth, ...validateTTSRequest], async (req, res) => {
-    console.log('=== TTS Route Handler Called ===');
-    console.log('Request body keys:', Object.keys(req.body));
-    console.log('User ID:', req.user?.id);
-    console.log('Text length:', req.body.text?.length);
     
     try {
         // Check for validation errors
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            console.log('Validation errors:', errors.array());
             return res.status(400).json({
                 success: false,
                 message: 'Validation failed',
@@ -60,18 +60,12 @@ router.post('/generate', [auth, ...validateTTSRequest], async (req, res) => {
             text,
             languageCode = 'vi-VN',
             voiceName = 'vi-VN-Standard-A',
-            audioConfig = {}
+            audioConfig = {},
+            chapterInfo = {}
         } = req.body;
 
         const userId = req.user.id;
         const characterCount = text.length;
-
-        console.log('Processing TTS request:', {
-            userId,
-            characterCount,
-            languageCode,
-            voiceName
-        });
 
         // Default audio configuration
         const defaultAudioConfig = {
@@ -82,8 +76,6 @@ router.post('/generate', [auth, ...validateTTSRequest], async (req, res) => {
             ...audioConfig
         };
 
-        console.log(`TTS generation requested by user ${userId}: ${characterCount} characters`);
-
         // Generate TTS audio
         const result = await generateTTS({
             text,
@@ -91,9 +83,11 @@ router.post('/generate', [auth, ...validateTTSRequest], async (req, res) => {
             voiceName,
             audioConfig: defaultAudioConfig,
             userId,
-            characterCount
+            characterCount,
+            chapterInfo
         });
 
+        // TTS generation completed successfully
         res.json({
             success: true,
             audioUrl: result.audioUrl,
@@ -105,7 +99,7 @@ router.post('/generate', [auth, ...validateTTSRequest], async (req, res) => {
         });
 
     } catch (error) {
-        console.error('TTS generation error:', error);
+        console.error('TTS generation error:', error.message);
         
         // Handle specific error types
         if (error.message.includes('quota')) {

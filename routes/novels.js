@@ -1489,10 +1489,6 @@ router.get("/", optionalAuth, async (req, res) => {
         ? { mode: 'draft' }  // Show only draft novels if requested by admin/mod
         : { mode: { $ne: 'draft' } }; // Default: filter out draft novels
 
-      console.log('=== AGGREGATION DEBUG ===');
-      console.log('Base match query:', baseMatchQuery);
-      console.log('About to execute aggregation for public route');
-
       const [result] = await Novel.aggregate([
         {
           $facet: {

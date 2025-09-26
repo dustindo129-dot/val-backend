@@ -54,7 +54,6 @@ const cleanCache = () => {
             
             if (now - stats.mtime.getTime() > maxAge) {
                 fs.unlinkSync(filePath);
-                console.log(`Deleted old TTS cache file: ${file}`);
             }
         });
     } catch (error) {
@@ -66,20 +65,20 @@ const cleanCache = () => {
 // Initialize Google Cloud TTS client
 const initializeTTSClient = async () => {
     try {
-        // Try to import Google Cloud TTS using dynamic import
+        // Import Google Cloud TTS
         const { TextToSpeechClient: TtsClient } = await import('@google-cloud/text-to-speech');
         TextToSpeechClient = TtsClient;
         
-        // Initialize with service account key
+        // Initialize with Application Default Credentials
         ttsClient = new TextToSpeechClient({
-            projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
-            keyFilename: process.env.GOOGLE_CLOUD_KEY_FILE,
+            projectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'tts-valvrareteam',
+            quotaProjectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'tts-valvrareteam',
         });
         
         console.log('Google Cloud TTS client initialized successfully');
         return true;
     } catch (error) {
-        console.error('Failed to initialize Google Cloud TTS client:', error);
+        console.error('Failed to initialize Google Cloud TTS client:', error.message);
         console.log('TTS will use mock responses until credentials are configured');
         return false;
     }
@@ -135,14 +134,6 @@ const generateMockTTS = async (request) => {
 
 // Generate TTS audio using Google Cloud TTS
 export const generateTTS = async (request) => {
-    console.log('=== TTS Generation Started ===');
-    console.log('Request received:', {
-        hasText: !!request.text,
-        textLength: request.text?.length,
-        languageCode: request.languageCode,
-        voiceName: request.voiceName,
-        userId: request.userId
-    });
 
     const {
         text,
@@ -150,29 +141,62 @@ export const generateTTS = async (request) => {
         voiceName = 'vi-VN-Standard-A',
         audioConfig = {},
         userId,
-        characterCount
+        characterCount,
+        chapterInfo = {}
     } = request;
 
     try {
-        console.log('Ensuring cache directory...');
         ensureCacheDirectory();
         
-        // Generate cache key
-        const cacheKey = generateCacheKey(text, voiceName, audioConfig);
-        const cacheFilePath = path.join(TTS_CONFIG.cacheDirectory, `${cacheKey}.mp3`);
+        // Generate meaningful filename with full info
+        const { novelSlug, novelTitle, moduleTitle, chapterTitle, chapterId } = chapterInfo;
+        
+        // Helper function to clean text for filename
+        const cleanForFilename = (text, maxLength = 50) => {
+            if (!text) return '';
+            return text
+                .toLowerCase()
+                .normalize('NFD') // Decompose Vietnamese characters
+                .replace(/[\u0300-\u036f]/g, '') // Remove diacritics
+                .replace(/đ/g, 'd') // Handle Vietnamese đ specifically
+                .replace(/[^a-z0-9\s]/g, '') // Keep only letters, numbers, spaces
+                .replace(/\s+/g, '-') // Replace spaces with hyphens
+                .replace(/-+/g, '-') // Replace multiple hyphens with single
+                .replace(/^-|-$/g, '') // Remove leading/trailing hyphens
+                .substring(0, maxLength);
+        };
+
+        let filename;
+        if (chapterId || moduleTitle || chapterTitle || novelTitle) {
+            // Use novel title if available, otherwise fall back to slug
+            const novelPart = novelTitle ? cleanForFilename(novelTitle, 60) : 
+                              (novelSlug ? novelSlug.substring(0, 60) : 'novel');
+            
+            const modulePart = moduleTitle ? cleanForFilename(moduleTitle, 20) : 'module';
+            const chapterPart = chapterTitle ? cleanForFilename(chapterTitle, 40) : 'chapter';
+            const hashPart = generateCacheKey(text, voiceName, audioConfig).substring(0, 8);
+            
+            filename = `${novelPart}-${modulePart}-${chapterPart}-${hashPart}.mp3`.replace(/--+/g, '-');
+        } else {
+            // Fallback to hash-based filename only if no info available
+            const cacheKey = generateCacheKey(text, voiceName, audioConfig);
+            filename = `${cacheKey}.mp3`;
+        }
+        
+        const cacheFilePath = path.join(TTS_CONFIG.cacheDirectory, filename);
         
         // Check if cached version exists
         if (fs.existsSync(cacheFilePath)) {
-            console.log(`TTS cache hit for user ${userId}`);
-            
-        return {
-            audioUrl: `${process.env.BACKEND_URL || 'http://localhost:5000'}/tts-cache/${cacheKey}.mp3`,
-            characterCount,
-            estimatedCostVND: 0, // No cost for cached content
-            voiceUsed: voiceName,
-            cacheHit: true,
-            duration: Math.ceil(characterCount / 10)
-        };
+            const cacheResult = {
+                audioUrl: `${process.env.BACKEND_URL}/tts-cache/${filename}`,
+                characterCount,
+                estimatedCostVND: 0, // No cost for cached content
+                voiceUsed: voiceName,
+                cacheHit: true,
+                duration: Math.ceil(characterCount / 10)
+            };
+            console.log('✨ TTS cache hit, returning:', cacheResult.audioUrl);
+            return cacheResult;
         }
 
         // Prepare TTS request
@@ -195,25 +219,75 @@ export const generateTTS = async (request) => {
         
         if (ttsClient) {
             // Use real Google Cloud TTS
-            console.log(`Generating TTS with Google Cloud for user ${userId}: ${characterCount} characters`);
+            // Check if text exceeds Google Cloud TTS limit (5000 bytes)
+            const textBytes = Buffer.byteLength(text, 'utf8');
+            
             try {
-                console.log('Calling Google Cloud TTS API...');
-                const [response] = await ttsClient.synthesizeSpeech(ttsRequest);
-                console.log('Google Cloud TTS API response received');
-                ttsResponse = {
-                    audioContent: response.audioContent,
-                    characterCount,
-                    voiceUsed: voiceName,
-                    duration: Math.ceil(characterCount / 10)
-                };
+                if (textBytes > 5000) {
+                    // Text exceeds limit, chunk into smaller pieces
+                    
+                    // Split text into chunks that fit within the limit
+                    const chunks = [];
+                    const maxChunkSize = 4500; // Leave some buffer
+                    
+                    // Split by sentences to maintain natural speech flow
+                    const sentences = text.split(/[.!?]+/).filter(s => s.trim());
+                    let currentChunk = '';
+                    
+                    for (const sentence of sentences) {
+                        const potentialChunk = currentChunk + sentence + '.';
+                        if (Buffer.byteLength(potentialChunk, 'utf8') > maxChunkSize && currentChunk) {
+                            chunks.push(currentChunk.trim());
+                            currentChunk = sentence + '.';
+                        } else {
+                            currentChunk = potentialChunk;
+                        }
+                    }
+                    if (currentChunk.trim()) {
+                        chunks.push(currentChunk.trim());
+                    }
+                    
+                    // Generate TTS for each chunk
+                    const audioChunks = [];
+                    for (let i = 0; i < chunks.length; i++) {
+                        const chunkRequest = {
+                            ...ttsRequest,
+                            input: { text: chunks[i] }
+                        };
+                        
+                        const [response] = await ttsClient.synthesizeSpeech(chunkRequest);
+                        audioChunks.push(response.audioContent);
+                    }
+                    
+                    // Combine audio chunks (simple concatenation for MP3)
+                    const combinedAudio = Buffer.concat(audioChunks);
+                    
+                    ttsResponse = {
+                        audioContent: combinedAudio,
+                        characterCount,
+                        voiceUsed: voiceName,
+                        duration: Math.ceil(characterCount / 10),
+                        isChunked: true,
+                        chunkCount: chunks.length
+                    };
+                } else {
+                    // Text is within limit, proceed normally
+                    const [response] = await ttsClient.synthesizeSpeech(ttsRequest);
+                    
+                    ttsResponse = {
+                        audioContent: response.audioContent,
+                        characterCount,
+                        voiceUsed: voiceName,
+                        duration: Math.ceil(characterCount / 10)
+                    };
+                }
+                
             } catch (googleError) {
                 console.error('Google Cloud TTS API error:', googleError);
-                console.log('Falling back to mock TTS due to Google Cloud error');
                 ttsResponse = await generateMockTTS({ text, voiceName, audioConfig });
             }
         } else {
             // Use mock TTS for development
-            console.log(`Generating mock TTS for user ${userId}: ${characterCount} characters`);
             ttsResponse = await generateMockTTS({ text, voiceName, audioConfig });
         }
 
@@ -231,17 +305,20 @@ export const generateTTS = async (request) => {
             cleanCache();
         }
 
-        return {
-            audioUrl: `${process.env.BACKEND_URL || 'http://localhost:5000'}/tts-cache/${cacheKey}.mp3`,
+        const result = {
+            audioUrl: `${process.env.BACKEND_URL || 'http://localhost:5000'}/tts-cache/${filename}`,
             characterCount: ttsResponse.characterCount,
             estimatedCostVND,
             voiceUsed: ttsResponse.voiceUsed,
             duration: ttsResponse.duration,
             cacheHit: false
         };
+        console.log('✅ TTS service returning result:', result.audioUrl);
+        return result;
 
     } catch (error) {
-        console.error('TTS generation error:', error);
+        console.error('❌ TTS service error:', error.message);
+        console.error('❌ TTS service stack:', error.stack);
         throw new Error(`TTS generation failed: ${error.message}`);
     }
 };
@@ -344,8 +421,8 @@ export const getTTSPricing = async () => {
     };
 };
 
-// Initialize the service
-(async () => {
+// Initialize TTS service function
+export const initializeTTSService = async () => {
     await initializeTTSClient();
     ensureCacheDirectory();
     
@@ -354,6 +431,11 @@ export const getTTSPricing = async () => {
     
     // Set up periodic cache cleaning (every 6 hours)
     setInterval(cleanCache, 6 * 60 * 60 * 1000);
+};
+
+// Initialize the service (keep for backward compatibility)
+(async () => {
+    await initializeTTSService();
 })();
 
 export default {

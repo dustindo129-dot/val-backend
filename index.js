@@ -46,6 +46,8 @@ import userTransactionRoutes from './routes/userTransaction.js';
 import novelTransactionRoutes from './routes/novelTransactions.js';
 import giftRoutes from './routes/gifts.js';
 import forumRoutes from './routes/forum.js';
+import ttsRoutes from './routes/tts.js';
+import { initializeTTSService } from './services/ttsService.js';
 import { initScheduler } from './scheduler.js';
 
 // Configure ES modules __dirname equivalent
@@ -219,6 +221,9 @@ app.use(cookieParser());  // Parse Cookie header and populate req.cookies
 // This is used for any local image storage (if needed)
 app.use('/images', express.static(path.join(__dirname, 'public', 'images')));
 
+// Serve TTS cache files
+app.use('/tts-cache', express.static(path.join(__dirname, 'public', 'tts-cache')));
+
 // Set up Vite server in middleware mode for development
 let viteDevServer;
 if (!isProduction) {
@@ -299,6 +304,7 @@ app.use('/api/transactions', userTransactionRoutes); // User transaction endpoin
 app.use('/api/novel-transactions', novelTransactionRoutes); // Novel transaction endpoints
 app.use('/api/gifts', giftRoutes); // Gift system endpoints
 app.use('/api/forum', forumRoutes); // Forum system endpoints
+app.use('/api/tts', ttsRoutes); // Text-to-Speech endpoints
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -554,6 +560,14 @@ app.use((err, req, res, next) => {
 mongoose.connect(process.env.MONGODB_URI)
   .then(async () => {
     console.log('Connected to MongoDB');
+    
+    // Initialize TTS Service after MongoDB connection
+    try {
+      await initializeTTSService();
+      console.log('TTS Service initialized successfully');
+    } catch (error) {
+      console.error('TTS Service initialization failed:', error.message);
+    }
   })
   .catch((error) => {
     console.error('MongoDB connection error:', error);
