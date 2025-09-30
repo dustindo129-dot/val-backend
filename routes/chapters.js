@@ -2375,7 +2375,7 @@ router.get('/:id/full', optionalAuth, async (req, res) => {
             from: 'novels', 
             localField: 'novelId', 
             foreignField: '_id', 
-            pipeline: [ { '$project': { title: 1, illustration: 1, active: 1 } } ], 
+            pipeline: [ { '$project': { title: 1, illustration: 1, active: 1, ttsEnabled: 1 } } ], 
             as: 'novel' 
         }},
         // CRITICAL: Add module lookup for rental access checks
@@ -2834,7 +2834,7 @@ router.get('/:chapterId/full-optimized', optionalAuth, async (req, res) => {
           localField: 'novelId',
           foreignField: '_id',
           pipeline: [
-            { $project: { title: 1, illustration: 1, active: 1, author: 1, status: 1, genres: 1 } }
+            { $project: { title: 1, illustration: 1, active: 1, author: 1, status: 1, genres: 1, ttsEnabled: 1 } }
           ],
           as: 'novel'
         }

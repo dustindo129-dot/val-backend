@@ -22,8 +22,13 @@ const validateTTSRequest = [
         .withMessage('Language code must be vi-VN or vi'),
     body('voiceName')
         .optional()
-        .matches(/^vi-VN-(Standard|Wavenet|Neural2)-(A|B|C|D)$/)
-        .withMessage('Invalid Vietnamese voice name'),
+        .custom((value) => {
+            // Accept new simplified names or legacy Google Cloud format
+            const validVoices = ['nu', 'nam'];
+            const legacyPattern = /^vi-VN-(Standard|Wavenet|Neural2)-(A|B|C|D)$/;
+            return validVoices.includes(value) || legacyPattern.test(value);
+        })
+        .withMessage('Invalid Vietnamese voice name (use "nu" or "nam")'),
     body('audioConfig.speakingRate')
         .optional()
         .isFloat({ min: 0.25, max: 4.0 })
@@ -59,7 +64,7 @@ router.post('/generate', [auth, ...validateTTSRequest], async (req, res) => {
         const {
             text,
             languageCode = 'vi-VN',
-            voiceName = 'vi-VN-Standard-A',
+            voiceName = 'nu', // Default to female voice
             audioConfig = {},
             chapterInfo = {}
         } = req.body;
@@ -183,7 +188,7 @@ router.get('/pricing', async (req, res) => {
                 costPer1000CharactersVND: pricing.costPer1000CharactersVND,
                 freeQuotaPerMonth: pricing.freeQuotaPerMonth,
                 supportedVoices: pricing.supportedVoices,
-                qualityLevels: pricing.qualityLevels,
+                qualityLevel: pricing.qualityLevel, // Changed from qualityLevels to qualityLevel
                 lastUpdated: pricing.lastUpdated
             }
         });
@@ -210,7 +215,7 @@ router.get('/test', auth, async (req, res) => {
         const result = await generateTTS({
             text: testText,
             languageCode: 'vi-VN',
-            voiceName: 'vi-VN-Standard-A',
+            voiceName: 'nu', // Use simplified voice name
             audioConfig: {
                 audioEncoding: 'MP3',
                 speakingRate: 1.0,
@@ -244,80 +249,31 @@ router.get('/test', auth, async (req, res) => {
  */
 router.get('/voices', async (req, res) => {
     try {
-        const voices = {
-            standard: [
-                {
-                    name: 'vi-VN-Standard-A',
-                    gender: 'FEMALE',
-                    description: 'Vietnamese female voice (Standard quality)',
-                    sampleRate: 24000
-                },
-                {
-                    name: 'vi-VN-Standard-B',
-                    gender: 'MALE',
-                    description: 'Vietnamese male voice (Standard quality)',
-                    sampleRate: 24000
-                },
-                {
-                    name: 'vi-VN-Standard-C',
-                    gender: 'FEMALE',
-                    description: 'Vietnamese female voice (Standard quality)',
-                    sampleRate: 24000
-                },
-                {
-                    name: 'vi-VN-Standard-D',
-                    gender: 'MALE',
-                    description: 'Vietnamese male voice (Standard quality)',
-                    sampleRate: 24000
-                }
-            ],
-            wavenet: [
-                {
-                    name: 'vi-VN-Wavenet-A',
-                    gender: 'FEMALE',
-                    description: 'Vietnamese female voice (WaveNet quality)',
-                    sampleRate: 24000
-                },
-                {
-                    name: 'vi-VN-Wavenet-B',
-                    gender: 'MALE',
-                    description: 'Vietnamese male voice (WaveNet quality)',
-                    sampleRate: 24000
-                },
-                {
-                    name: 'vi-VN-Wavenet-C',
-                    gender: 'FEMALE',
-                    description: 'Vietnamese female voice (WaveNet quality)',
-                    sampleRate: 24000
-                },
-                {
-                    name: 'vi-VN-Wavenet-D',
-                    gender: 'MALE',
-                    description: 'Vietnamese male voice (WaveNet quality)',
-                    sampleRate: 24000
-                }
-            ],
-            neural2: [
-                {
-                    name: 'vi-VN-Neural2-A',
-                    gender: 'FEMALE',
-                    description: 'Vietnamese female voice (Neural2 quality)',
-                    sampleRate: 24000
-                },
-                {
-                    name: 'vi-VN-Neural2-D',
-                    gender: 'MALE',
-                    description: 'Vietnamese male voice (Neural2 quality)',
-                    sampleRate: 24000
-                }
-            ]
-        };
+        const voices = [
+            {
+                value: 'nu',
+                label: 'Nữ',
+                gender: 'FEMALE',
+                description: 'Giọng nữ tiếng Việt (Standard quality)',
+                googleVoice: 'vi-VN-Standard-A',
+                sampleRate: 24000
+            },
+            {
+                value: 'nam',
+                label: 'Nam',
+                gender: 'MALE',
+                description: 'Giọng nam tiếng Việt (Standard quality)',
+                googleVoice: 'vi-VN-Standard-D',
+                sampleRate: 24000
+            }
+        ];
 
         res.json({
             success: true,
             voices,
-            recommendedVoice: 'vi-VN-Standard-A',
-            totalVoices: Object.values(voices).flat().length
+            recommendedVoice: 'nu',
+            totalVoices: voices.length,
+            quality: 'Standard'
         });
     } catch (error) {
         console.error('TTS voices retrieval error:', error);

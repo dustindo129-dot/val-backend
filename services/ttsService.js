@@ -132,24 +132,44 @@ const generateMockTTS = async (request) => {
     };
 };
 
+// Map simplified voice names to Google Cloud TTS voice IDs
+const VOICE_MAP = {
+    'nu': 'vi-VN-Standard-A',
+    'nam': 'vi-VN-Standard-D',
+    // Legacy support for old voice names
+    'vi-VN-Standard-A': 'vi-VN-Standard-A',
+    'vi-VN-Standard-D': 'vi-VN-Standard-D'
+};
+
+// Map Google voice IDs to simplified names for cache filenames
+const getSimplifiedVoiceName = (voiceName) => {
+    if (voiceName === 'nu' || voiceName === 'nam') return voiceName;
+    if (voiceName === 'vi-VN-Standard-A') return 'nu';
+    if (voiceName === 'vi-VN-Standard-D') return 'nam';
+    return 'nu'; // Default to female voice
+};
+
 // Generate TTS audio using Google Cloud TTS
 export const generateTTS = async (request) => {
 
     const {
         text,
         languageCode = 'vi-VN',
-        voiceName = 'vi-VN-Standard-A',
+        voiceName: requestedVoice = 'nu',
         audioConfig = {},
         userId,
         characterCount,
         chapterInfo = {}
     } = request;
+    
+    // Map simplified voice name to Google Cloud TTS voice ID
+    const voiceName = VOICE_MAP[requestedVoice] || VOICE_MAP['nu'];
 
     try {
         ensureCacheDirectory();
         
         // Generate meaningful filename with full info
-        const { novelSlug, novelTitle, moduleTitle, chapterTitle, chapterId } = chapterInfo;
+        const { novelSlug, novelTitle, moduleTitle, chapterTitle, chapterId, voiceName: voiceNameFromInfo } = chapterInfo;
         
         // Helper function to clean text for filename
         const cleanForFilename = (text, maxLength = 50) => {
@@ -165,18 +185,26 @@ export const generateTTS = async (request) => {
                 .replace(/^-|-$/g, '') // Remove leading/trailing hyphens
                 .substring(0, maxLength);
         };
+        
+        // Extract voice identifier from voice name (simplified to just "nu" or "nam")
+        const extractVoiceId = (voiceName) => {
+            if (!voiceName) return 'nu'; // Default to female
+            // Use the simplified voice name helper
+            return getSimplifiedVoiceName(voiceName);
+        };
 
         let filename;
         if (chapterId || moduleTitle || chapterTitle || novelTitle) {
             // Use novel title if available, otherwise fall back to slug
-            const novelPart = novelTitle ? cleanForFilename(novelTitle, 60) : 
-                              (novelSlug ? novelSlug.substring(0, 60) : 'novel');
+            const novelPart = novelTitle ? cleanForFilename(novelTitle, 50) : 
+                              (novelSlug ? novelSlug.substring(0, 50) : 'novel');
             
             const modulePart = moduleTitle ? cleanForFilename(moduleTitle, 20) : 'module';
-            const chapterPart = chapterTitle ? cleanForFilename(chapterTitle, 40) : 'chapter';
+            const chapterPart = chapterTitle ? cleanForFilename(chapterTitle, 30) : 'chapter';
+            const voicePart = extractVoiceId(voiceNameFromInfo || voiceName);
             const hashPart = generateCacheKey(text, voiceName, audioConfig).substring(0, 8);
             
-            filename = `${novelPart}-${modulePart}-${chapterPart}-${hashPart}.mp3`.replace(/--+/g, '-');
+            filename = `${novelPart}-${modulePart}-${chapterPart}-${voicePart}-${hashPart}.mp3`.replace(/--+/g, '-');
         } else {
             // Fallback to hash-based filename only if no info available
             const cacheKey = generateCacheKey(text, voiceName, audioConfig);
@@ -195,7 +223,7 @@ export const generateTTS = async (request) => {
                 cacheHit: true,
                 duration: Math.ceil(characterCount / 10)
             };
-            console.log('✨ TTS cache hit, returning:', cacheResult.audioUrl);
+            // Cache hit - return cached audio URL
             return cacheResult;
         }
 
@@ -313,7 +341,7 @@ export const generateTTS = async (request) => {
             duration: ttsResponse.duration,
             cacheHit: false
         };
-        console.log('✅ TTS service returning result:', result.audioUrl);
+        // Return generated TTS result
         return result;
 
     } catch (error) {
@@ -346,7 +374,7 @@ const trackTTSUsage = (userId, characterCount) => {
     usageCache.set(userKey, usage);
     
     // TODO: Save to database for persistence
-    console.log(`TTS usage tracked for user ${userId}: ${characterCount} characters`);
+    // Track TTS usage in cache
 };
 
 // Get TTS usage for a user
@@ -411,12 +439,11 @@ export const getTTSPricing = async () => {
         costPerCharacterVND: TTS_CONFIG.costPerCharacterUSD * TTS_CONFIG.usdToVndRate,
         costPer1000CharactersVND: calculateCostVND(1000),
         freeQuotaPerMonth: TTS_CONFIG.freeQuotaPerMonth,
-        supportedVoices: ['vi-VN-Standard-A', 'vi-VN-Standard-B', 'vi-VN-Standard-C', 'vi-VN-Standard-D'],
-        qualityLevels: {
-            standard: 'Standard quality voices',
-            wavenet: 'WaveNet quality voices (premium)',
-            neural2: 'Neural2 quality voices (premium)'
-        },
+        supportedVoices: [
+            { value: 'nu', label: 'Nữ', googleVoice: 'vi-VN-Standard-A' },
+            { value: 'nam', label: 'Nam', googleVoice: 'vi-VN-Standard-D' }
+        ],
+        qualityLevel: 'Standard quality voices',
         lastUpdated: new Date().toISOString()
     };
 };

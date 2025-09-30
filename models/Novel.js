@@ -64,6 +64,10 @@ const novelSchema = new mongoose.Schema({
     enum: ['published', 'draft'],
     default: 'published'
   },
+  ttsEnabled: {
+    type: Boolean,
+    default: false
+  },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 }, {

@@ -1411,7 +1411,8 @@ router.get("/", optionalAuth, async (req, res) => {
               paidModulesCount: 1,
               paidChaptersCount: 1,
               availableForRent: 1,
-              mode: 1
+              mode: 1,
+              ttsEnabled: 1
             }
           },
           { $sort: { updatedAt: -1 } }
@@ -1421,7 +1422,7 @@ router.get("/", optionalAuth, async (req, res) => {
         userManagedNovels = await Novel.find({
           $or: queryConditions
         })
-        .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget availableForRent mode')
+        .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget availableForRent mode ttsEnabled')
         .sort({ updatedAt: -1 })
         .lean();
       }
@@ -1777,6 +1778,7 @@ router.get("/", optionalAuth, async (req, res) => {
                 novelBalance: 1,
                 novelBudget: 1,
                 mode: 1,
+                ttsEnabled: 1,
                 // Include paid content fields if requested
                 ...(includePaidInfo ? {
                   hasPaidContent: 1,
@@ -1867,7 +1869,8 @@ router.post("/", [auth, admin], async (req, res) => {
       note,
       illustration,
       status,
-      mode
+      mode,
+      ttsEnabled
     } = req.body;
 
     // Auto-promote users to pj_user role when assigned as project managers
@@ -1932,6 +1935,7 @@ router.post("/", [auth, admin], async (req, res) => {
       illustration,
       status: status || 'Ongoing',
       mode: mode || 'published', // Default to published if not specified
+      ttsEnabled: ttsEnabled || false, // Default to disabled if not specified
       createdAt: new Date(),
       updatedAt: new Date()
     });
@@ -2047,6 +2051,7 @@ router.get("/:id", optionalAuth, async (req, res) => {
             novelBudget: 1,
             wordCount: 1,
             availableForRent: 1,
+            ttsEnabled: 1,
             modules: 1,
             allChapters: 1
           }
@@ -2138,7 +2143,8 @@ router.put("/:id", [auth, admin], async (req, res) => {
       note,
       illustration,
       status,
-      mode
+      mode,
+      ttsEnabled
     } = req.body;
 
     // Find novel and update it
@@ -2294,6 +2300,11 @@ router.put("/:id", [auth, admin], async (req, res) => {
     // Only admins and moderators can modify mode
     if (mode !== undefined && (req.user.role === 'admin' || req.user.role === 'moderator')) {
       novel.mode = mode;
+    }
+    
+    // Only admins and moderators can modify TTS settings
+    if (ttsEnabled !== undefined && (req.user.role === 'admin' || req.user.role === 'moderator')) {
+      novel.ttsEnabled = ttsEnabled;
     }
     
     // Only update staff if user has permission
@@ -4451,7 +4462,8 @@ router.get("/:id/dashboard", optionalAuth, async (req, res) => {
         ratings: dashboardData.ratings,
         novelBalance: dashboardData.novelBalance,
         novelBudget: dashboardData.novelBudget,
-        wordCount: dashboardData.wordCount
+        wordCount: dashboardData.wordCount,
+        ttsEnabled: dashboardData.ttsEnabled
       });
 
       let modulesWithChapters;
@@ -4662,6 +4674,7 @@ router.post('/batch', optionalAuth, async (req, res) => {
           novelBalance: 1,
           novelBudget: 1,
           wordCount: 1,
+          ttsEnabled: 1,
           modules: 1,
           chapterCounts: 1
         }
