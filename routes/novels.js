@@ -756,16 +756,16 @@ router.get("/vietnamese", async (req, res) => {
 
 
     
-    // Build sort criteria
-    let sortCriteria = {};
-    if (sortOrder === 'newest') {
-      sortCriteria = { createdAt: -1 };
-    } else if (sortOrder === 'updated') {
-      sortCriteria = { updatedAt: -1 };
-    } else if (sortOrder === 'rating') {
-      // Sort by calculated average rating
-      sortCriteria = { averageRating: -1 };
-    }
+      // Build sort criteria - always sort pinned first
+      let sortCriteria = {};
+      if (sortOrder === 'newest') {
+        sortCriteria = { pinned: -1, createdAt: -1 };
+      } else if (sortOrder === 'updated') {
+        sortCriteria = { pinned: -1, updatedAt: -1 };
+      } else if (sortOrder === 'rating') {
+        // Sort by calculated average rating
+        sortCriteria = { pinned: -1, averageRating: -1 };
+      }
 
     const [result] = await Novel.aggregate([
       // Match published novels with "Vietnamese Novel" genre
@@ -1412,18 +1412,19 @@ router.get("/", optionalAuth, async (req, res) => {
               paidChaptersCount: 1,
               availableForRent: 1,
               mode: 1,
-              ttsEnabled: 1
+              ttsEnabled: 1,
+              pinned: 1
             }
           },
-          { $sort: { updatedAt: -1 } }
+          { $sort: { pinned: -1, updatedAt: -1 } }
         ]);
       } else {
         // Use simple find for pj_user without paid content info
         userManagedNovels = await Novel.find({
           $or: queryConditions
         })
-        .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget availableForRent mode ttsEnabled')
-        .sort({ updatedAt: -1 })
+        .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget availableForRent mode ttsEnabled pinned')
+        .sort({ pinned: -1, updatedAt: -1 })
         .lean();
       }
 
@@ -1474,7 +1475,8 @@ router.get("/", optionalAuth, async (req, res) => {
         status: 1,
         genres: 1,
         description: 1,
-        updatedAt: 1
+        updatedAt: 1,
+        pinned: 1
         // Only fields actually used on homepage/directory
         // Exclude: note, active, inactive, novelBalance, novelBudget, author, illustrator, alternativeTitles, createdAt
       };
@@ -1569,8 +1571,8 @@ router.get("/", optionalAuth, async (req, res) => {
                   firstChapter: { $arrayElemAt: ['$firstChapter', 0] }
                 }
               },
-              // Sort by latest activity
-              { $sort: { updatedAt: -1 } },
+              // Sort by pinned first, then by latest activity
+              { $sort: { pinned: -1, updatedAt: -1 } },
               // Apply pagination
               { $skip: skip },
               { $limit: limit }
@@ -1779,6 +1781,7 @@ router.get("/", optionalAuth, async (req, res) => {
                 novelBudget: 1,
                 mode: 1,
                 ttsEnabled: 1,
+                pinned: 1,
                 // Include paid content fields if requested
                 ...(includePaidInfo ? {
                   hasPaidContent: 1,
@@ -1791,8 +1794,8 @@ router.get("/", optionalAuth, async (req, res) => {
               }
             },
             // Admin dashboard doesn't need chapter data - skip expensive chapter lookups
-            // Sort by updatedAt directly (no need for complex latestActivity calculation)
-            { $sort: { updatedAt: -1 } },
+            // Sort by pinned first, then by updatedAt directly
+            { $sort: { pinned: -1, updatedAt: -1 } },
             // Apply pagination
             { $skip: skip },
             { $limit: limit }
@@ -1870,7 +1873,8 @@ router.post("/", [auth, admin], async (req, res) => {
       illustration,
       status,
       mode,
-      ttsEnabled
+      ttsEnabled,
+      pinned
     } = req.body;
 
     // Auto-promote users to pj_user role when assigned as project managers
@@ -1936,6 +1940,7 @@ router.post("/", [auth, admin], async (req, res) => {
       status: status || 'Ongoing',
       mode: mode || 'published', // Default to published if not specified
       ttsEnabled: ttsEnabled || false, // Default to disabled if not specified
+      pinned: pinned || false, // Default to not pinned if not specified
       createdAt: new Date(),
       updatedAt: new Date()
     });
@@ -2144,7 +2149,8 @@ router.put("/:id", [auth, admin], async (req, res) => {
       illustration,
       status,
       mode,
-      ttsEnabled
+      ttsEnabled,
+      pinned
     } = req.body;
 
     // Find novel and update it
@@ -2305,6 +2311,11 @@ router.put("/:id", [auth, admin], async (req, res) => {
     // Only admins and moderators can modify TTS settings
     if (ttsEnabled !== undefined && (req.user.role === 'admin' || req.user.role === 'moderator')) {
       novel.ttsEnabled = ttsEnabled;
+    }
+    
+    // Only admins can modify pinned status
+    if (pinned !== undefined && req.user.role === 'admin') {
+      novel.pinned = pinned;
     }
     
     // Only update staff if user has permission
@@ -3906,7 +3917,8 @@ router.get("/homepage", async (req, res) => {
               inactive: 1,
               novelBalance: 1,
               novelBudget: 1,
-              availableForRent: 1
+              availableForRent: 1,
+              pinned: 1
             }
           },
                 // Simplified chapter lookup - only get what we need
@@ -3975,7 +3987,7 @@ router.get("/homepage", async (req, res) => {
                     latestChapter: { $arrayElemAt: ['$chapters', 0] }
                   }
                 },
-                { $sort: { latestActivity: -1 } },
+                { $sort: { pinned: -1, latestActivity: -1 } },
                 { $skip: skip },
                 { $limit: limit }
               ]
