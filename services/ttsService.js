@@ -69,17 +69,65 @@ const initializeTTSClient = async () => {
         const { TextToSpeechClient: TtsClient } = await import('@google-cloud/text-to-speech');
         TextToSpeechClient = TtsClient;
         
-        // Initialize with Application Default Credentials
-        ttsClient = new TextToSpeechClient({
+        let clientConfig = {
             projectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'tts-valvrareteam',
             quotaProjectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'tts-valvrareteam',
-        });
+        };
+
+        // Priority 1: Use service account JSON from environment variable (recommended for DigitalOcean)
+        if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+            try {
+                const credentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+                clientConfig.credentials = credentials;
+                console.log('🔐 Using credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON');
+                console.log('📧 Service account email:', credentials.client_email);
+            } catch (parseError) {
+                console.error('❌ Failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON:', parseError.message);
+                console.error('Make sure the JSON is properly formatted and escaped');
+                throw parseError;
+            }
+        }
+        // Priority 2: Use file path (if GOOGLE_APPLICATION_CREDENTIALS is set)
+        else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+            console.log('🔐 Using credentials from file:', process.env.GOOGLE_APPLICATION_CREDENTIALS);
+            // The client library will automatically use this file path
+        }
+        // Priority 3: Use individual credential fields (alternative method)
+        else if (process.env.GOOGLE_CLOUD_PRIVATE_KEY && process.env.GOOGLE_CLOUD_CLIENT_EMAIL) {
+            clientConfig.credentials = {
+                client_email: process.env.GOOGLE_CLOUD_CLIENT_EMAIL,
+                private_key: process.env.GOOGLE_CLOUD_PRIVATE_KEY.replace(/\\n/g, '\n'),
+            };
+            console.log('🔐 Using credentials from separate env variables');
+            console.log('📧 Service account email:', process.env.GOOGLE_CLOUD_CLIENT_EMAIL);
+        }
+        else {
+            console.warn('⚠️  No Google Cloud credentials found. TTS will use mock responses.');
+            console.warn('⚠️  Set one of the following:');
+            console.warn('    - GOOGLE_APPLICATION_CREDENTIALS_JSON (full JSON as string)');
+            console.warn('    - GOOGLE_APPLICATION_CREDENTIALS (path to JSON file)');
+            console.warn('    - GOOGLE_CLOUD_CLIENT_EMAIL + GOOGLE_CLOUD_PRIVATE_KEY');
+        }
         
-        console.log('Google Cloud TTS client initialized successfully');
-        return true;
+        ttsClient = new TextToSpeechClient(clientConfig);
+        
+        // Test the connection by listing voices
+        try {
+            const [result] = await ttsClient.listVoices({ languageCode: 'vi-VN' });
+            console.log('✅ Google Cloud TTS client initialized successfully');
+            console.log(`✅ Available Vietnamese voices: ${result.voices.length}`);
+            return true;
+        } catch (testError) {
+            console.error('❌ TTS client created but failed to list voices:', testError.message);
+            console.error('This usually means credentials are invalid or API is not enabled');
+            throw testError;
+        }
     } catch (error) {
-        console.error('Failed to initialize Google Cloud TTS client:', error.message);
-        console.log('TTS will use mock responses until credentials are configured');
+        console.error('❌ Failed to initialize Google Cloud TTS client:', error.message);
+        if (error.code === 7) {
+            console.error('❌ Permission denied - check if Cloud Text-to-Speech API is enabled');
+        }
+        console.log('⚠️  TTS will use mock responses until credentials are configured');
         return false;
     }
 };
