@@ -776,6 +776,13 @@ router.get("/vietnamese", async (req, res) => {
         }
       },
       
+      // Ensure pinned field exists for backward compatibility
+      {
+        $addFields: {
+          pinned: { $ifNull: ['$pinned', false] }
+        }
+      },
+      
       // Calculate average rating for sorting
       {
         $addFields: {
@@ -1416,6 +1423,12 @@ router.get("/", optionalAuth, async (req, res) => {
               pinned: 1
             }
           },
+          // Ensure pinned field exists for backward compatibility
+          {
+            $addFields: {
+              pinned: { $ifNull: ['$pinned', false] }
+            }
+          },
           { $sort: { pinned: -1, updatedAt: -1 } }
         ]);
       } else {
@@ -1426,6 +1439,12 @@ router.get("/", optionalAuth, async (req, res) => {
         .select('title illustration author illustrator status genres alternativeTitles updatedAt createdAt description note active inactive novelBalance novelBudget availableForRent mode ttsEnabled pinned')
         .sort({ pinned: -1, updatedAt: -1 })
         .lean();
+        
+        // Ensure backward compatibility: add pinned field with default false if missing
+        userManagedNovels = userManagedNovels.map(novel => ({
+          ...novel,
+          pinned: novel.pinned ?? false
+        }));
       }
 
       // Skip expensive chapter lookups and staff population for pj_user - they don't need them for dashboard
@@ -1568,7 +1587,9 @@ router.get("/", optionalAuth, async (req, res) => {
               // Set firstChapter as single object (not array)
               {
                 $addFields: {
-                  firstChapter: { $arrayElemAt: ['$firstChapter', 0] }
+                  firstChapter: { $arrayElemAt: ['$firstChapter', 0] },
+                  // Ensure pinned field exists for backward compatibility
+                  pinned: { $ifNull: ['$pinned', false] }
                 }
               },
               // Sort by pinned first, then by latest activity
@@ -1791,6 +1812,12 @@ router.get("/", optionalAuth, async (req, res) => {
                 } : {}),
                 // Always include availableForRent for rental checkbox
                 ...(!includePaidInfo ? { availableForRent: 1 } : {})
+              }
+            },
+            // Ensure pinned field exists for backward compatibility
+            {
+              $addFields: {
+                pinned: { $ifNull: ['$pinned', false] }
               }
             },
             // Admin dashboard doesn't need chapter data - skip expensive chapter lookups
@@ -3984,7 +4011,9 @@ router.get("/homepage", async (req, res) => {
                         { $max: '$chapters.createdAt' }
                       ]
                     },
-                    latestChapter: { $arrayElemAt: ['$chapters', 0] }
+                    latestChapter: { $arrayElemAt: ['$chapters', 0] },
+                    // Ensure pinned field exists for backward compatibility
+                    pinned: { $ifNull: ['$pinned', false] }
                   }
                 },
                 { $sort: { pinned: -1, latestActivity: -1 } },
