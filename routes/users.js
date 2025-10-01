@@ -3275,15 +3275,6 @@ router.put('/number/:userNumber/password', auth, async (req, res) => {
 
     const { currentPassword, newPassword } = req.body;
 
-    // Log request details for debugging
-    console.log('Password update request:', {
-      userNumber,
-      currentPasswordLength: currentPassword?.length,
-      newPasswordLength: newPassword?.length,
-      hasCurrentPassword: !!currentPassword,
-      hasNewPassword: !!newPassword
-    });
-
     // Validate password strength
     if (newPassword.length < 6) {
       return res.status(400).json({ message: 'Mật khẩu phải có ít nhất 6 ký tự' });
@@ -3293,34 +3284,22 @@ router.put('/number/:userNumber/password', auth, async (req, res) => {
     const user = await User.findById(req.user._id);
 
     if (!user) {
-      console.error('User not found in database:', req.user._id);
       return res.status(404).json({ message: 'User not found' });
     }
 
     // Verify current password
-    console.log('Verifying current password...');
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     if (!isMatch) {
-      console.log('Current password verification FAILED');
       return res.status(401).json({ message: 'Mật khẩu hiện tại không đúng' });
     }
 
-    console.log('Current password verified ✓');
-
     // Update password - let the pre-save middleware handle hashing
     user.password = newPassword;
-    console.log('Attempting to save new password...');
     await user.save();
-    console.log('Password saved successfully ✓');
 
     res.json({ message: 'Password updated successfully' });
   } catch (error) {
-    console.error('❌ Password update error - Full details:', {
-      name: error.name,
-      message: error.message,
-      code: error.code,
-      stack: error.stack
-    });
+    console.error('Password update error:', error);
     
     // Provide more specific error messages
     let errorMessage = 'Không thể cập nhật mật khẩu';
