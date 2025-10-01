@@ -547,7 +547,7 @@ router.put('/:displayNameSlug/password', auth, async (req, res) => {
 
     // Validate password strength
     if (newPassword.length < 6) {
-      return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+      return res.status(400).json({ message: 'Mật khẩu phải có ít nhất 6 ký tự' });
     }
 
     // Get user with password
@@ -556,7 +556,7 @@ router.put('/:displayNameSlug/password', auth, async (req, res) => {
     // Verify current password
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     if (!isMatch) {
-      return res.status(401).json({ message: 'Current password is incorrect' });
+      return res.status(401).json({ message: 'Mật khẩu hiện tại không đúng' });
     }
 
     // Update password - let the pre-save middleware handle hashing
@@ -566,7 +566,21 @@ router.put('/:displayNameSlug/password', auth, async (req, res) => {
     res.json({ message: 'Password updated successfully' });
   } catch (error) {
     console.error('Password update error:', error);
-    res.status(500).json({ message: 'Failed to update password' });
+    
+    // Provide more specific error messages
+    let errorMessage = 'Không thể cập nhật mật khẩu';
+    
+    if (error.name === 'ValidationError') {
+      errorMessage = 'Mật khẩu không hợp lệ. Vui lòng kiểm tra lại yêu cầu mật khẩu.';
+    } else if (error.message && error.message.includes('password')) {
+      errorMessage = error.message;
+    } else if (error.code === 11000) {
+      errorMessage = 'Lỗi cơ sở dữ liệu. Vui lòng thử lại.';
+    } else if (error.name === 'MongoError' || error.name === 'MongoServerError') {
+      errorMessage = 'Lỗi kết nối cơ sở dữ liệu. Vui lòng thử lại sau.';
+    }
+    
+    res.status(500).json({ message: errorMessage });
   }
 });
 
@@ -3263,7 +3277,7 @@ router.put('/number/:userNumber/password', auth, async (req, res) => {
 
     // Validate password strength
     if (newPassword.length < 6) {
-      return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+      return res.status(400).json({ message: 'Mật khẩu phải có ít nhất 6 ký tự' });
     }
 
     // Get user with password
@@ -3272,7 +3286,7 @@ router.put('/number/:userNumber/password', auth, async (req, res) => {
     // Verify current password
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     if (!isMatch) {
-      return res.status(401).json({ message: 'Current password is incorrect' });
+      return res.status(401).json({ message: 'Mật khẩu hiện tại không đúng' });
     }
 
     // Update password - let the pre-save middleware handle hashing
@@ -3282,7 +3296,21 @@ router.put('/number/:userNumber/password', auth, async (req, res) => {
     res.json({ message: 'Password updated successfully' });
   } catch (error) {
     console.error('Password update error:', error);
-    res.status(500).json({ message: 'Failed to update password' });
+    
+    // Provide more specific error messages
+    let errorMessage = 'Không thể cập nhật mật khẩu';
+    
+    if (error.name === 'ValidationError') {
+      errorMessage = 'Mật khẩu không hợp lệ. Vui lòng kiểm tra lại yêu cầu mật khẩu.';
+    } else if (error.message && error.message.includes('password')) {
+      errorMessage = error.message;
+    } else if (error.code === 11000) {
+      errorMessage = 'Lỗi cơ sở dữ liệu. Vui lòng thử lại.';
+    } else if (error.name === 'MongoError' || error.name === 'MongoServerError') {
+      errorMessage = 'Lỗi kết nối cơ sở dữ liệu. Vui lòng thử lại sau.';
+    }
+    
+    res.status(500).json({ message: errorMessage });
   }
 });
 
