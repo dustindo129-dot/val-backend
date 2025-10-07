@@ -2921,11 +2921,15 @@ router.get('/number/:userNumber/public-profile-complete', async (req, res) => {
       return res.status(400).json({ message: 'Invalid user number' });
     }
     
-    // Check cache first (5 minute cache for profile data)
+    // Check cache first (5 minute cache for profile data) - unless forceRefresh is requested
+    const forceRefresh = req.query.forceRefresh === 'true';
     const cacheKey = `complete_profile_${userNumber}`;
-    const cachedProfile = getCachedUserStats(cacheKey);
-    if (cachedProfile) {
-      return res.json(cachedProfile);
+    
+    if (!forceRefresh) {
+      const cachedProfile = getCachedUserStats(cacheKey);
+      if (cachedProfile) {
+        return res.json(cachedProfile);
+      }
     }
     
     // Find user by userNumber
@@ -2973,9 +2977,9 @@ router.get('/number/:userNumber/public-profile-complete', async (req, res) => {
       // Get chapters participated count
       Chapter.countDocuments({
         $or: [
-          { translator: { $in: [user._id.toString(), user.username, user.displayName] } },
-          { editor: { $in: [user._id.toString(), user.username, user.displayName] } },
-          { proofreader: { $in: [user._id.toString(), user.username, user.displayName] } }
+          { translator: { $in: [user._id.toString(), user.username, user.displayName, user.userNumber.toString()] } },
+          { editor: { $in: [user._id.toString(), user.username, user.displayName, user.userNumber.toString()] } },
+          { proofreader: { $in: [user._id.toString(), user.username, user.displayName, user.userNumber.toString()] } }
         ]
       }),
       
@@ -3936,6 +3940,46 @@ router.get('/blog-posts/homepage', async (req, res) => {
   } catch (error) {
     console.error('Error fetching homepage blog posts:', error);
     res.status(500).json({ message: 'Failed to fetch homepage blog posts' });
+  }
+});
+
+/**
+ * Clear user's profile cache by userNumber
+ * @route DELETE /api/users/number/:userNumber/cache
+ */
+router.delete('/number/:userNumber/cache', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber to get their ID
+    const targetUser = await User.findOne({ userNumber }).select('_id');
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Only allow users to clear their own cache or admins/mods
+    const canClearCache = req.user._id.toString() === targetUser._id.toString() || 
+                         ['admin', 'moderator'].includes(req.user.role);
+    
+    if (!canClearCache) {
+      return res.status(403).json({ message: 'Not authorized to clear this cache' });
+    }
+
+    // Clear various caches related to this user
+    const cacheKey = `complete_profile_${userNumber}`;
+    clearUserStatsCache(cacheKey);
+    clearUserStatsCache(targetUser._id.toString());
+    clearUserResolutionCache(targetUser._id);
+    clearBlogPostsCache(targetUser._id.toString());
+    
+    res.json({ message: 'Profile cache cleared successfully' });
+  } catch (error) {
+    console.error('Error clearing profile cache:', error);
+    res.status(500).json({ message: 'Failed to clear profile cache' });
   }
 });
 
