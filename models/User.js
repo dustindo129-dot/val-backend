@@ -85,6 +85,16 @@ const userSchema = new mongoose.Schema({
     default: '',
     maxlength: 10000
   },
+  wallpaper: {
+    type: String,
+    default: null
+  },
+  wallpaperPosition: {
+    type: Number,
+    default: 50,
+    min: 0,
+    max: 100
+  },
   ongoingModules: [{
     moduleId: {
       type: mongoose.Schema.Types.ObjectId,

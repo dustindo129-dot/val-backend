@@ -3018,6 +3018,8 @@ router.get('/number/:userNumber/public-profile-complete', async (req, res) => {
       role: user.role,
       intro: user.intro || '',
       interests: user.interests || [],
+      wallpaper: user.wallpaper || null,
+      wallpaperPosition: user.wallpaperPosition || 50,
       createdAt: user.createdAt,
       lastLogin: user.lastLogin,
       isVerified: user.isVerified || false,
@@ -3507,6 +3509,168 @@ router.put('/number/:userNumber/intro', auth, async (req, res) => {
   } catch (error) {
     console.error('Introduction update error:', error);
     res.status(500).json({ message: 'Failed to update introduction' });
+  }
+});
+
+/**
+ * Update user's wallpaper by userNumber
+ * @route PUT /api/users/number/:userNumber/wallpaper
+ */
+router.put('/number/:userNumber/wallpaper', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    const { wallpaper } = req.body;
+
+    // Validate wallpaper URL
+    if (!wallpaper || typeof wallpaper !== 'string') {
+      return res.status(400).json({ message: 'Valid wallpaper URL is required' });
+    }
+
+    // Optional: Validate that it's a Bunny.net URL
+    if (!wallpaper.includes('valvrareteam.b-cdn.net')) {
+      return res.status(400).json({ message: 'Invalid wallpaper URL' });
+    }
+
+    // Get user
+    const user = await User.findById(req.user._id);
+
+    // Update wallpaper
+    user.wallpaper = wallpaper;
+    await user.save();
+
+    // Clear user resolution cache since user data changed
+    clearUserResolutionCache(req.user._id);
+    
+    // Clear profile cache to ensure fresh data on reload
+    const cacheKey = `complete_profile_${user.userNumber}`;
+    clearUserStatsCache(cacheKey);
+
+    res.json({ 
+      message: 'Wallpaper updated successfully',
+      wallpaper: user.wallpaper
+    });
+
+  } catch (error) {
+    console.error('Wallpaper update error:', error);
+    res.status(500).json({ message: 'Failed to update wallpaper' });
+  }
+});
+
+/**
+ * Remove user's wallpaper by userNumber
+ * @route DELETE /api/users/number/:userNumber/wallpaper
+ */
+router.delete('/number/:userNumber/wallpaper', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    // Get user
+    const user = await User.findById(req.user._id);
+
+    // Remove wallpaper
+    user.wallpaper = null;
+    await user.save();
+
+    // Clear user resolution cache since user data changed
+    clearUserResolutionCache(req.user._id);
+    
+    // Clear profile cache to ensure fresh data on reload
+    const cacheKey = `complete_profile_${user.userNumber}`;
+    clearUserStatsCache(cacheKey);
+
+    res.json({ 
+      message: 'Wallpaper removed successfully'
+    });
+
+  } catch (error) {
+    console.error('Wallpaper removal error:', error);
+    res.status(500).json({ message: 'Failed to remove wallpaper' });
+  }
+});
+
+/**
+ * Update user's wallpaper position by userNumber
+ * @route PUT /api/users/number/:userNumber/wallpaper-position
+ */
+router.put('/number/:userNumber/wallpaper-position', auth, async (req, res) => {
+  try {
+    const userNumber = parseInt(req.params.userNumber);
+    
+    if (isNaN(userNumber) || userNumber <= 0) {
+      return res.status(400).json({ message: 'Invalid user number' });
+    }
+    
+    // Find user by userNumber
+    const targetUser = await User.findOne({ userNumber });
+    if (!targetUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if the user matches the authenticated user
+    if (req.user._id.toString() !== targetUser._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+
+    const { wallpaperPosition } = req.body;
+
+    // Validate wallpaper position
+    if (typeof wallpaperPosition !== 'number' || wallpaperPosition < 0 || wallpaperPosition > 100) {
+      return res.status(400).json({ message: 'Wallpaper position must be a number between 0 and 100' });
+    }
+
+    // Get user
+    const user = await User.findById(req.user._id);
+
+    // Update wallpaper position
+    user.wallpaperPosition = wallpaperPosition;
+    await user.save();
+
+    // Clear user resolution cache since user data changed
+    clearUserResolutionCache(req.user._id);
+    
+    // Clear profile cache to ensure fresh data on reload
+    const cacheKey = `complete_profile_${user.userNumber}`;
+    clearUserStatsCache(cacheKey);
+
+    res.json({
+      message: 'Wallpaper position updated successfully',
+      wallpaperPosition: user.wallpaperPosition
+    });
+
+  } catch (error) {
+    console.error('Wallpaper position update error:', error);
+    res.status(500).json({ message: 'Failed to update wallpaper position' });
   }
 });
 
