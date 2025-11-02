@@ -174,7 +174,7 @@ const staffUserCache = new NodeCache({ stdTTL: 600, checkperiod: 120 }); // 10 m
  */
 router.post('/like', auth, async (req, res) => {
   try {
-    const { chapterId, timestamp, deviceId } = req.body;
+    const { chapterId, timestamp, deviceId, targetLikedState } = req.body;
     const userId = req.user._id;
 
     if (!chapterId) {
@@ -191,23 +191,24 @@ router.post('/like', auth, async (req, res) => {
       return res.status(404).json({ message: "Chapter not found" });
     }
 
-    // OPTIMIZATION 2: Use MongoDB aggregation pipeline in findOneAndUpdate for atomic toggle
+    // OPTIMIZATION 2: Use MongoDB aggregation pipeline in findOneAndUpdate for atomic state setting
     // This eliminates the separate findOne query by using conditional operators
+    // Set the specific target state instead of toggling
     const interaction = await UserChapterInteraction.findOneAndUpdate(
       { userId, chapterId, novelId: chapter.novelId._id },
       [
         {
           $set: {
-            // Store the previous liked state before toggling (for first-time detection)
+            // Store the previous liked state before setting new state (for first-time detection)
             _prevLiked: { $ifNull: ["$liked", false] },
             _prevHasLikedBefore: { $ifNull: ["$hasLikedBefore", false] },
-            // Toggle the liked state
-            liked: { $not: { $ifNull: ["$liked", false] } },
-            // Set hasLikedBefore to true if we're liking now (was false, now true)
+            // Set the specific target state from frontend instead of toggling
+            liked: targetLikedState !== undefined ? targetLikedState : { $not: { $ifNull: ["$liked", false] } },
+            // Set hasLikedBefore to true if we're liking now or if it was already true
             hasLikedBefore: {
               $or: [
                 { $ifNull: ["$hasLikedBefore", false] }, // Keep true if already true
-                { $not: { $ifNull: ["$liked", false] } }  // Set true if we're toggling to liked
+                targetLikedState !== undefined ? targetLikedState : { $not: { $ifNull: ["$liked", false] } }  // Set true if target is liked
               ]
             },
             lastLikeTimestamp: timestamp || new Date(),
@@ -253,6 +254,15 @@ router.post('/like', auth, async (req, res) => {
     // Invalidate related caches
     interactionCache.del(getUserInteractionCacheKey(userId, chapterId));
     interactionCache.del(getChapterStatsCacheKey(chapterId));
+    
+    // Clear server-side chapter caches to prevent stale data after refresh
+    try {
+      // Import and clear chapter-related caches from chapters.js
+      const { clearChapterRelatedCaches } = await import('./chapters.js');
+      clearChapterRelatedCaches(chapterId, chapter.novelId._id.toString(), userId.toString());
+    } catch (cacheError) {
+      // Don't fail the like operation if cache clearing fails
+    }
 
     // Broadcast real-time update to all connected clients
     broadcastEvent('chapter_like_update', {

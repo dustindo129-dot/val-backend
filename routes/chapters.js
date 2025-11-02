@@ -3498,4 +3498,7 @@ router.get('/user-permissions/:username', async (req, res) => {
   }
 });
 
+// Export cache clearing function for use by other routes
+export { clearChapterRelatedCaches };
+
 export default router; 
