@@ -908,7 +908,7 @@ router.get('/reviews/:novelId', async (req, res) => {
       review: { $exists: true, $ne: null }
     })
     .populate('userId', 'username displayName avatar') // Get user information
-    .sort({ updatedAt: -1 }) // Newest first
+    .sort({ createdAt: -1 }) // Sort by original submission date, not edit date
     .skip(skip)
     .limit(limit);
 
@@ -924,7 +924,7 @@ router.get('/reviews/:novelId', async (req, res) => {
       user: review.userId,
       rating: review.rating,
       review: review.review,
-      date: review.updatedAt,
+      date: review.createdAt, // Use original submission date, not edit date
       createdAt: review.createdAt,
       updatedAt: review.updatedAt,
       reviewIsEdited: review.reviewIsEdited || false,

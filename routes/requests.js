@@ -363,9 +363,7 @@ router.post('/:requestId/approve', auth, async (req, res) => {
         novelId: matchingNovel._id,
         userId: request.user,
         amount: request.deposit,
-        note: request.type === 'new' 
-          ? `Lúa cọc yêu cầu truyện mới: ${request.title}`
-          : `Lúa cọc đề xuất từ nhóm dịch: ${request.title}`,
+        note: `Lúa cọc yêu cầu truyện mới: ${request.title}${request.note ? ` - ${request.note}` : ''}`,
         budgetAfter: runningBudget,
         type: 'user'
       }], { session });
@@ -379,6 +377,18 @@ router.post('/:requestId/approve', auth, async (req, res) => {
         userId: contribution.user,
         amount: contribution.amount,
         note: `Đóng góp cho yêu cầu: ${request.title}${contribution.note ? ` - ${contribution.note}` : ''}`,
+        budgetAfter: runningBudget,
+        type: 'user'
+      }], { session });
+    }
+    
+    // 3. Create special contribution history entry for web requests showing request details
+    if (request.type === 'web' && request.note && request.note.trim()) {
+      await ContributionHistory.create([{
+        novelId: matchingNovel._id,
+        userId: request.user,
+        amount: 0,
+        note: request.note,
         budgetAfter: runningBudget,
         type: 'user'
       }], { session });
