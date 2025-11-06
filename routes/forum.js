@@ -711,6 +711,7 @@ router.post('/posts/:id/approve', auth, async (req, res) => {
         post.author._id.toString(),
         post._id.toString(),
         post.title,
+        post.slug,
         req.user._id.toString()
       );
     } catch (notificationError) {
@@ -767,6 +768,7 @@ router.post('/posts/:id/reject', auth, async (req, res) => {
         post.author._id.toString(),
         post._id.toString(),
         post.title,
+        post.slug,
         req.user._id.toString(),
         reason
       );

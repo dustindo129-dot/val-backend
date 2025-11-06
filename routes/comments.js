@@ -1857,6 +1857,7 @@ router.post('/:contentType/:contentId', auth, checkBan, async (req, res) => {
             forumPost.author._id.toString(),
             forumPost._id.toString(),
             forumPost.title,
+            forumPost.slug,
             req.user._id.toString(),
             comment._id.toString()
           );

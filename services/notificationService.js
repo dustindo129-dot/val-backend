@@ -566,9 +566,10 @@ export const createCommentDeletionNotification = async (commentOwnerId, moderato
  * @param {string} userId - ID of the post author
  * @param {string} postId - ID of the approved post
  * @param {string} postTitle - Title of the approved post
+ * @param {string} postSlug - Slug of the approved post
  * @param {string} approverId - ID of the admin/mod who approved
  */
-export const createForumPostApprovedNotification = async (userId, postId, postTitle, approverId) => {
+export const createForumPostApprovedNotification = async (userId, postId, postTitle, postSlug, approverId) => {
   try {
     // We no longer include admin/mod identity in notification content
 
@@ -582,6 +583,7 @@ export const createForumPostApprovedNotification = async (userId, postId, postTi
       data: {
         postId,
         postTitle,
+        postSlug,
         status: 'approved'
       }
     });
@@ -603,10 +605,11 @@ export const createForumPostApprovedNotification = async (userId, postId, postTi
  * @param {string} userId - ID of the post author
  * @param {string} postId - ID of the declined post
  * @param {string} postTitle - Title of the declined post
+ * @param {string} postSlug - Slug of the declined post (optional, since post may be deleted)
  * @param {string} declinerId - ID of the admin/mod who declined
  * @param {string} reason - Reason for decline (optional)
  */
-export const createForumPostDeclinedNotification = async (userId, postId, postTitle, declinerId, reason = '') => {
+export const createForumPostDeclinedNotification = async (userId, postId, postTitle, postSlug, declinerId, reason = '') => {
   try {
     // Do not include admin/mod identity in message
     let message = `Bài đăng <b>"${postTitle}"</b> đã bị từ chối`;
@@ -624,6 +627,7 @@ export const createForumPostDeclinedNotification = async (userId, postId, postTi
       data: {
         postId,
         postTitle,
+        postSlug,
         status: 'declined',
         reason: reason || ''
       }
@@ -646,10 +650,11 @@ export const createForumPostDeclinedNotification = async (userId, postId, postTi
  * @param {string} postAuthorId - ID of the post author
  * @param {string} postId - ID of the forum post
  * @param {string} postTitle - Title of the forum post
+ * @param {string} postSlug - Slug of the forum post
  * @param {string} commenterId - ID of the commenter
  * @param {string} commentId - ID of the comment
  */
-export const createForumPostCommentNotification = async (postAuthorId, postId, postTitle, commenterId, commentId) => {
+export const createForumPostCommentNotification = async (postAuthorId, postId, postTitle, postSlug, commenterId, commentId) => {
   try {
     // Don't notify if user is commenting on their own post
     if (postAuthorId === commenterId) {
@@ -672,6 +677,7 @@ export const createForumPostCommentNotification = async (postAuthorId, postId, p
       data: {
         postId,
         postTitle,
+        postSlug,
         commenterId,
         commenterName,
         commentId
