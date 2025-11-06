@@ -983,7 +983,7 @@ router.post('/:novelId/modules', auth, async (req, res) => {
     const module = new Module({
       novelId: req.params.novelId,
       title: req.body.title,
-      illustration: req.body.illustration,
+      illustration: req.body.illustration || undefined, // Use undefined if empty to trigger default
       order: nextOrder,
       chapters: [],
       mode: req.body.mode || 'published',
@@ -1094,7 +1094,7 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
 
     const updateData = {
       title: req.body.title,
-      illustration: req.body.illustration,
+      illustration: req.body.illustration || undefined, // Use undefined if empty to trigger default
       mode: req.body.mode || 'published',
       moduleBalance: req.body.mode === 'paid' ? (parseInt(req.body.moduleBalance) || 0) : 0,
       recalculateRentOnUnlock: req.body.mode === 'rent' ? (req.body.recalculateRentOnUnlock || false) : false,
