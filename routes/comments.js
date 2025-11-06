@@ -1450,6 +1450,53 @@ router.post('/:commentId/replies', auth, checkBan, async (req, res) => {
       }
     }
 
+    // Create notification for forum comment replies (when replying to a forum comment)
+    if (parentComment.contentType === 'forum') {
+      try {
+        const ForumPost = require('../models/ForumPost.js').default;
+        const forumPost = await ForumPost.findById(parentComment.contentId).populate('author', '_id username displayName');
+        
+        // Only notify if the parent comment author is NOT the forum post author
+        // (forum post author already gets notified by regular forum comment notification)
+        if (forumPost && forumPost.author && 
+            parentComment.user.toString() !== forumPost.author._id.toString()) {
+          
+          // This will be a regular comment reply notification, but for forum context
+          await createCommentReplyNotification(
+            parentComment.user.toString(),
+            reply._id.toString(),
+            null, // no novelId for forum
+            null  // no chapterId for forum
+          );
+        }
+      } catch (notificationError) {
+        console.error('Failed to send forum comment reply notification:', notificationError);
+        // Don't fail the comment creation if notification fails
+      }
+    }
+
+    // Create notification for forum post author if this is a forum reply
+    // (replies to forum comments are also comments on the forum post)
+    if (parentComment.contentType === 'forum') {
+      try {
+        const ForumPost = require('../models/ForumPost.js').default;
+        const forumPost = await ForumPost.findById(parentComment.contentId).populate('author', '_id username displayName');
+        if (forumPost && forumPost.author) {
+          await createForumPostCommentNotification(
+            forumPost.author._id.toString(),
+            forumPost._id.toString(),
+            forumPost.title,
+            forumPost.slug,
+            req.user._id.toString(),
+            reply._id.toString()
+          );
+        }
+      } catch (notificationError) {
+        console.error('Failed to send forum post comment notification for reply:', notificationError);
+        // Don't fail the comment creation if notification fails
+      }
+    }
+
     // Create follow notifications for users following this novel (for replies too)
     // novelId and chapterId already extracted above
     

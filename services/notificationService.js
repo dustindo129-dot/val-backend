@@ -93,31 +93,63 @@ export const createCommentReplyNotification = async (originalCommenterId, replyC
       return;
     }
 
-    const novel = await Novel.findById(novelId);
-    if (!novel) return;
-
     // Use display name from the populated user object
     const replierDisplayName = replyComment.user.displayName || replyComment.user.username;
 
-    let message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn tại <b>${novel.title}</b>`;
-    let linkData = { 
-      novelId,
-      novelTitle: novel.title
-    };
+    let message, linkData = {};
 
-    if (chapterId) {
-      const chapter = await Chapter.findById(chapterId);
-      if (chapter) {
-        message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn tại <b>${chapter.title}</b>`;
-        linkData.chapterId = chapterId;
-        linkData.chapterTitle = chapter.title;
+    // Handle forum comment replies (when novelId is null)
+    if (!novelId) {
+      // Get the parent comment to determine context
+      const parentComment = await Comment.findById(replyComment.parentId);
+      if (parentComment && parentComment.contentType === 'forum') {
+        // For forum replies, get forum post info
+        try {
+          const ForumPost = require('../models/ForumPost.js').default;
+          const forumPost = await ForumPost.findById(parentComment.contentId);
+          if (forumPost) {
+            message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn trong bài đăng <b>${forumPost.title}</b>`;
+            linkData = {
+              postId: forumPost._id.toString(),
+              postTitle: forumPost.title,
+              postSlug: forumPost.slug,
+              originalCommentId: parentComment._id.toString()
+            };
+          } else {
+            message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn`;
+          }
+        } catch (err) {
+          console.error('Error getting forum post for reply notification:', err);
+          message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn`;
+        }
+      } else {
+        message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn`;
       }
-    }
+    } else {
+      // Handle novel/chapter comment replies (existing logic)
+      const novel = await Novel.findById(novelId);
+      if (!novel) return;
 
-    // Get the parent comment ID from the reply comment for navigation
-    const parentComment = await Comment.findById(replyComment.parentId);
-    if (parentComment) {
-      linkData.originalCommentId = parentComment._id.toString();
+      message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn tại <b>${novel.title}</b>`;
+      linkData = { 
+        novelId,
+        novelTitle: novel.title
+      };
+
+      if (chapterId) {
+        const chapter = await Chapter.findById(chapterId);
+        if (chapter) {
+          message = `<i>${replierDisplayName}</i> đã trả lời bình luận của bạn tại <b>${chapter.title}</b>`;
+          linkData.chapterId = chapterId;
+          linkData.chapterTitle = chapter.title;
+        }
+      }
+
+      // Get the parent comment ID from the reply comment for navigation
+      const parentComment = await Comment.findById(replyComment.parentId);
+      if (parentComment) {
+        linkData.originalCommentId = parentComment._id.toString();
+      }
     }
 
     const notification = new Notification({
