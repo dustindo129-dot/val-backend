@@ -14,8 +14,8 @@ router.use((req, res, next) => {
 const validateTTSRequest = [
     body('text')
         .trim()
-        .isLength({ min: 1, max: 100000 })
-        .withMessage('Text must be between 1 and 100,000 characters'),
+        .isLength({ min: 1, max: 500000 })
+        .withMessage('Text must be between 1 and 500,000 characters'),
     body('languageCode')
         .optional()
         .isIn(['vi-VN', 'vi'])
