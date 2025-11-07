@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
+import axios from 'axios';
 
 // Google Cloud TTS client will be initialized later
 let TextToSpeechClient = null;
@@ -17,9 +18,18 @@ const TTS_CONFIG = {
     costPerCharacterUSD: 0.000004, // $4 per 1M characters
     usdToVndRate: 24500, // Approximate exchange rate
     freeQuotaPerMonth: 1000000, // 1M characters free per month
-    cacheDirectory: path.join(process.cwd(), 'public', 'tts-cache'),
+    cacheDirectory: path.join(process.cwd(), 'public', 'tts-cache'), // Local fallback only
     maxCacheSizeMB: 1000, // 1GB cache limit
     cacheExpiryHours: 168 // 7 days
+};
+
+// Bunny CDN Configuration
+const BUNNY_CONFIG = {
+    storageApiUrl: process.env.BUNNY_STORAGE_API_URL || 'https://storage.bunnycdn.com',
+    storageZone: process.env.BUNNY_STORAGE_ZONE || 'valvrareteam',
+    apiKey: process.env.BUNNY_API_KEY,
+    cdnUrl: process.env.BUNNY_CDN_URL || 'https://valvrareteam.b-cdn.net',
+    ttsFolder: 'tts-audio' // Dedicated folder for TTS files
 };
 
 // Calculate cost in VND
@@ -41,9 +51,92 @@ const ensureCacheDirectory = () => {
     }
 };
 
-// Clean old cache files
+// Upload audio buffer to Bunny CDN
+const uploadToBunnycdn = async (audioBuffer, filename) => {
+    if (!BUNNY_CONFIG.apiKey) {
+        throw new Error('Bunny CDN API key not configured');
+    }
+
+    try {
+        const storagePath = `/${BUNNY_CONFIG.ttsFolder}/${filename}`;
+        const bunnyStorageUrl = `${BUNNY_CONFIG.storageApiUrl}/${BUNNY_CONFIG.storageZone}${storagePath}`;
+        
+        console.log(`Uploading TTS audio to Bunny CDN: ${storagePath}`);
+        
+        // Upload with retry logic
+        let lastError = null;
+        const maxRetries = 3;
+        
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                const response = await axios.put(bunnyStorageUrl, audioBuffer, {
+                    headers: {
+                        'AccessKey': BUNNY_CONFIG.apiKey,
+                        'Content-Type': 'audio/mpeg',
+                        'Content-Length': audioBuffer.length
+                    },
+                    timeout: 30000, // 30 second timeout
+                    maxContentLength: Infinity,
+                    maxBodyLength: Infinity
+                });
+                
+                console.log(`✅ TTS audio uploaded successfully (${audioBuffer.length} bytes)`);
+                
+                // Return the CDN URL
+                return `${BUNNY_CONFIG.cdnUrl}${storagePath}`;
+                
+            } catch (error) {
+                console.error(`Upload attempt ${attempt + 1}/${maxRetries} failed:`, error.message);
+                lastError = error;
+                
+                if (attempt < maxRetries - 1) {
+                    // Wait before retry with exponential backoff
+                    const delay = 1000 * Math.pow(2, attempt);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+        
+        throw new Error(`Failed to upload to Bunny CDN after ${maxRetries} attempts: ${lastError.message}`);
+        
+    } catch (error) {
+        console.error('Error uploading TTS audio to Bunny CDN:', error);
+        throw error;
+    }
+};
+
+// Check if audio file exists on Bunny CDN
+const checkBunnyCdnCache = async (filename) => {
+    if (!BUNNY_CONFIG.apiKey) {
+        return false;
+    }
+
+    try {
+        const storagePath = `/${BUNNY_CONFIG.ttsFolder}/${filename}`;
+        const bunnyStorageUrl = `${BUNNY_CONFIG.storageApiUrl}/${BUNNY_CONFIG.storageZone}${storagePath}`;
+        
+        // Make a HEAD request to check if file exists
+        const response = await axios.head(bunnyStorageUrl, {
+            headers: {
+                'AccessKey': BUNNY_CONFIG.apiKey
+            },
+            timeout: 5000
+        });
+        
+        return response.status === 200;
+    } catch (error) {
+        // File doesn't exist or other error
+        return false;
+    }
+};
+
+// Clean old cache files (local fallback only)
 const cleanCache = () => {
     try {
+        if (!fs.existsSync(TTS_CONFIG.cacheDirectory)) {
+            return;
+        }
+        
         const now = Date.now();
         const maxAge = TTS_CONFIG.cacheExpiryHours * 60 * 60 * 1000;
         
@@ -57,7 +150,7 @@ const cleanCache = () => {
             }
         });
     } catch (error) {
-        console.error('Error cleaning TTS cache:', error);
+        console.error('Error cleaning local TTS cache:', error);
     }
 };
 
@@ -88,58 +181,11 @@ const initializeTTSClient = async () => {
         return true;
     } catch (error) {
         console.error('Failed to initialize Google Cloud TTS client:', error.message);
-        console.log('TTS will use mock responses until credentials are configured');
+        console.log('TTS service will be unavailable until credentials are configured');
         return false;
     }
 };
 
-// Mock TTS generation for development (replace with real Google Cloud TTS)
-const generateMockTTS = async (request) => {
-    const { text, voiceName, audioConfig } = request;
-    const characterCount = text.length;
-    
-    // Simulate processing time
-    await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
-    
-    // Create a proper minimal MP3 file that browsers can play
-    // This is a valid MP3 file header with a very short silent audio segment
-    const mockAudioData = Buffer.from([
-        // MP3 Frame Header (FFE0 = MPEG-1, Layer III, no protection, 128kbps, 44.1kHz, stereo)
-        0xFF, 0xE0, 0x18, 0xC4,
-        // MP3 frame data (minimal silent frame)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00
-    ]);
-    
-    console.log(`Generated mock TTS audio: ${characterCount} characters, ${mockAudioData.length} bytes`);
-    
-    return {
-        audioContent: mockAudioData,
-        characterCount,
-        voiceUsed: voiceName,
-        duration: Math.max(1, Math.ceil(characterCount / 100)) // More realistic: 100 chars per second
-    };
-};
 
 // Map simplified voice names to Google Cloud TTS voice IDs
 const VOICE_MAP = {
@@ -220,19 +266,20 @@ export const generateTTS = async (request) => {
             filename = `${cacheKey}.mp3`;
         }
         
-        const cacheFilePath = path.join(TTS_CONFIG.cacheDirectory, filename);
-        
-        // Check if cached version exists
-        if (fs.existsSync(cacheFilePath)) {
+        // Check if cached version exists on Bunny CDN
+        const isCached = await checkBunnyCdnCache(filename);
+        if (isCached) {
+            const bunnyUrl = `${BUNNY_CONFIG.cdnUrl}/${BUNNY_CONFIG.ttsFolder}/${filename}`;
+            console.log(`✅ TTS cache hit on Bunny CDN: ${filename}`);
+            
             const cacheResult = {
-                audioUrl: `${process.env.BACKEND_URL}/tts-cache/${filename}`,
+                audioUrl: bunnyUrl,
                 characterCount,
                 estimatedCostVND: 0, // No cost for cached content
                 voiceUsed: voiceName,
                 cacheHit: true,
                 duration: Math.ceil(characterCount / 10)
             };
-            // Cache hit - return cached audio URL
             return cacheResult;
         }
 
@@ -319,17 +366,29 @@ export const generateTTS = async (request) => {
                     };
                 }
                 
-            } catch (googleError) {
-                console.error('Google Cloud TTS API error:', googleError);
-                ttsResponse = await generateMockTTS({ text, voiceName, audioConfig });
-            }
+                } catch (googleError) {
+                    console.error('Google Cloud TTS API error:', googleError);
+                    throw new Error(`Google Cloud TTS failed: ${googleError.message}`);
+                }
         } else {
-            // Use mock TTS for development
-            ttsResponse = await generateMockTTS({ text, voiceName, audioConfig });
+            // TTS client not initialized - fail the request
+            throw new Error('Google Cloud TTS service is not properly configured. Please check credentials and try again.');
         }
 
-        // Save audio to cache
-        fs.writeFileSync(cacheFilePath, ttsResponse.audioContent);
+        // Upload audio to Bunny CDN
+        let audioUrl;
+        try {
+            audioUrl = await uploadToBunnycdn(ttsResponse.audioContent, filename);
+            console.log(`✅ TTS audio uploaded to Bunny CDN: ${filename}`);
+        } catch (bunnyError) {
+            console.error('Failed to upload to Bunny CDN, falling back to local storage:', bunnyError.message);
+            
+            // Fallback to local storage if Bunny upload fails
+            ensureCacheDirectory();
+            const cacheFilePath = path.join(TTS_CONFIG.cacheDirectory, filename);
+            fs.writeFileSync(cacheFilePath, ttsResponse.audioContent);
+            audioUrl = `${process.env.BACKEND_URL || 'http://localhost:5000'}/tts-cache/${filename}`;
+        }
         
         // Track usage
         trackTTSUsage(userId, characterCount);
@@ -337,20 +396,19 @@ export const generateTTS = async (request) => {
         // Calculate cost
         const estimatedCostVND = calculateCostVND(characterCount);
         
-        // Clean old cache files periodically
+        // Clean old local cache files periodically (fallback cleanup)
         if (Math.random() < 0.1) { // 10% chance
             cleanCache();
         }
 
         const result = {
-            audioUrl: `${process.env.BACKEND_URL || 'http://localhost:5000'}/tts-cache/${filename}`,
+            audioUrl,
             characterCount: ttsResponse.characterCount,
             estimatedCostVND,
             voiceUsed: ttsResponse.voiceUsed,
             duration: ttsResponse.duration,
             cacheHit: false
         };
-        // Return generated TTS result
         return result;
 
     } catch (error) {
