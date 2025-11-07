@@ -1186,8 +1186,8 @@ router.get('/recent', async (req, res) => {
         {
           $match: {
             isDeleted: { $ne: true },
-            adminDeleted: { $ne: true },
-            parentId: null // Only root comments, not replies
+            adminDeleted: { $ne: true }
+            // Removed parentId filter to include both root comments and replies
           }
         },
         {
