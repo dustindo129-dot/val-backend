@@ -2361,10 +2361,10 @@ router.put("/:id", [auth, admin], async (req, res) => {
     novel.status = status;
     
     // Only update timestamp for significant changes that should affect "latest updates"
-    // - Status changes (completed, ongoing, etc.)
+    // - Status changes (completed, ongoing, etc.) EXCEPT when changing to "Hiatus"
     // - When explicitly requested (preserveTimestamp = false)
     // - Don't update for staff changes, description edits, genre updates, etc.
-    const shouldUpdateTimestamp = statusChanged || (!req.body.preserveTimestamp && req.body.forceTimestampUpdate);
+    const shouldUpdateTimestamp = (statusChanged && status !== 'Hiatus') || (!req.body.preserveTimestamp && req.body.forceTimestampUpdate);
     
     if (shouldUpdateTimestamp) {
       novel.updatedAt = new Date();
