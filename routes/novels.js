@@ -2324,6 +2324,8 @@ router.put("/:id", [auth, admin], async (req, res) => {
       }
     }
 
+    const previousMode = novel.mode;
+
     // Update fields
     novel.title = title;
     novel.alternativeTitles = alternativeTitles;
@@ -2360,11 +2362,17 @@ router.put("/:id", [auth, admin], async (req, res) => {
     const statusChanged = status && status !== novel.status;
     novel.status = status;
     
+    const publishedFromDraft = previousMode === 'draft' && novel.mode === 'published';
+
     // Only update timestamp for significant changes that should affect "latest updates"
     // - Status changes (completed, ongoing, etc.) EXCEPT when changing to "Hiatus"
+    // - Publishing a draft novel
     // - When explicitly requested (preserveTimestamp = false)
     // - Don't update for staff changes, description edits, genre updates, etc.
-    const shouldUpdateTimestamp = (statusChanged && status !== 'Hiatus') || (!req.body.preserveTimestamp && req.body.forceTimestampUpdate);
+    const shouldUpdateTimestamp =
+      (statusChanged && status !== 'Hiatus') ||
+      publishedFromDraft ||
+      (!req.body.preserveTimestamp && req.body.forceTimestampUpdate);
     
     if (shouldUpdateTimestamp) {
       novel.updatedAt = new Date();
