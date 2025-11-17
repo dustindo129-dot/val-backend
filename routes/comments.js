@@ -2,7 +2,7 @@ import express from 'express';
 import { auth, checkBan } from '../middleware/auth.js';
 import Comment from '../models/Comment.js';
 import { broadcastEvent } from '../services/sseService.js';
-import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification, createCommentDeletionNotification, createForumPostCommentNotification } from '../services/notificationService.js';
+import { createCommentReplyNotification, createFollowCommentNotifications, createLikedCommentNotification, createLikedForumCommentNotification, createCommentDeletionNotification, createForumPostCommentNotification } from '../services/notificationService.js';
 import { clearChapterCommentsCache, extractCommentIdentifiers } from '../utils/chapterCacheUtils.js';
 import { batchGetUsers } from '../utils/batchUserCache.js';
 import { validateNovelExists } from '../utils/novelValidation.js';
@@ -1678,6 +1678,18 @@ router.post('/:commentId/like', auth, checkBan, async (req, res) => {
           );
         } catch (error) {
           console.error('Error creating like notification:', error);
+        }
+      } else if (comment.contentType === 'forum') {
+        // Handle forum comment likes
+        try {
+          await createLikedForumCommentNotification(
+            comment.user.toString(),
+            comment._id.toString(),
+            userId.toString(),
+            comment.contentId.toString()
+          );
+        } catch (error) {
+          console.error('Error creating forum comment like notification:', error);
         }
       }
     }

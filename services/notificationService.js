@@ -424,6 +424,58 @@ export const createLikedCommentNotification = async (commentOwnerId, commentId, 
 };
 
 /**
+ * Create notification for forum comment like (first time only)
+ * @param {string} commentOwnerId - ID of the user who owns the comment
+ * @param {string} commentId - ID of the liked comment
+ * @param {string} likerId - ID of the user who liked the comment
+ * @param {string} forumPostId - ID of the forum post where the comment was made
+ */
+export const createLikedForumCommentNotification = async (commentOwnerId, commentId, likerId, forumPostId) => {
+  try {
+    // Don't notify if user is liking their own comment
+    if (commentOwnerId === likerId) {
+      return;
+    }
+
+    const [forumPost, liker] = await Promise.all([
+      ForumPost.findById(forumPostId),
+      User.findById(likerId).select('displayName username')
+    ]);
+
+    if (!forumPost || !liker) return;
+
+    const likerDisplayName = liker.displayName || liker.username;
+
+    const message = `<i>${likerDisplayName}</i> đã thích bình luận của bạn trong bài đăng <b>${forumPost.title}</b>`;
+
+    const notification = new Notification({
+      userId: commentOwnerId,
+      type: 'liked_comment',
+      title: 'Bình luận được thích',
+      message,
+      relatedUser: likerId,
+      relatedComment: commentId,
+      data: { 
+        postId: forumPostId,
+        postTitle: forumPost.title,
+        postSlug: forumPost.slug,
+        commentId 
+      }
+    });
+
+    await notification.save();
+    
+    // Broadcast new notification event to specific user only
+    broadcastEventToUser('new_notification', {
+      userId: commentOwnerId,
+      notification: notification.toObject()
+    }, commentOwnerId);
+  } catch (error) {
+    console.error('Error creating liked forum comment notification:', error);
+  }
+};
+
+/**
  * Create notification for chapter like (first time only)
  * @param {string} chapterOwner - Username or ObjectId of the user who owns the chapter (translator/editor/proofreader)
  * @param {string} chapterId - ID of the liked chapter
