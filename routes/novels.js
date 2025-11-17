@@ -25,6 +25,100 @@ const clearUserNovelInteractionCaches = (() => {
     };
   }
 })();
+
+/**
+ * Helper function to check if user can see draft modules
+ * @param {Object} user - The authenticated user
+ * @param {Object} novel - The novel object (if available)
+ * @returns {boolean} Whether user can see draft modules
+ */
+const canSeeDraftModules = (user, novel = null) => {
+  if (!user) return false;
+  
+  // Admin and moderators can see all draft modules
+  if (user.role === 'admin' || user.role === 'moderator') {
+    return true;
+  }
+  
+  // For pj_user, check if they have access to this specific novel
+  if (user.role === 'pj_user' && novel?.active?.pj_user) {
+    const hasPjUserAccess = novel.active.pj_user.some(pjUser => {
+      // Handle case where pjUser is an object (new format)
+      if (typeof pjUser === 'object' && pjUser !== null) {
+        return (
+          pjUser._id === user.id ||
+          pjUser._id === user._id ||
+          pjUser.username === user.username ||
+          pjUser.displayName === user.displayName ||
+          pjUser.userNumber === user.userNumber
+        );
+      }
+      // Handle case where pjUser is a primitive value (old format)
+      return (
+        pjUser === user.id ||
+        pjUser === user._id ||
+        pjUser === user.username ||
+        pjUser === user.displayName ||
+        pjUser === user.userNumber
+      );
+    });
+    
+    if (hasPjUserAccess) return true;
+  }
+  
+  // Check if user has novel-level translator, editor, or proofreader roles
+  if (novel?.active) {
+    const checkUserInStaffList = (staffList) => {
+      if (!staffList || !Array.isArray(staffList)) return false;
+      return staffList.some(staffValue => {
+        if (typeof staffValue === 'object' && staffValue !== null) {
+          return (
+            staffValue._id?.toString() === user._id?.toString() ||
+            staffValue.username === user.username ||
+            staffValue.displayName === user.displayName ||
+            staffValue.userNumber?.toString() === user.userNumber?.toString()
+          );
+        }
+        return (
+          staffValue?.toString() === user._id?.toString() ||
+          staffValue === user.username ||
+          staffValue === user.displayName ||
+          staffValue?.toString() === user.userNumber?.toString()
+        );
+      });
+    };
+    
+    // Check novel-level staff roles
+    if (checkUserInStaffList(novel.active.translator) ||
+        checkUserInStaffList(novel.active.editor) ||
+        checkUserInStaffList(novel.active.proofreader)) {
+      return true;
+    }
+  }
+  
+  return false;
+};
+
+/**
+ * Filter modules based on user permissions and draft visibility
+ * @param {Array} modules - Array of modules to filter
+ * @param {Object} user - The authenticated user
+ * @param {Object} novel - The novel object (if available)
+ * @returns {Array} Filtered modules
+ */
+const filterModulesByVisibility = (modules, user, novel = null) => {
+  const userCanSeeDrafts = canSeeDraftModules(user, novel);
+  
+  return modules.filter(module => {
+    // If module is not draft, it's visible
+    if (module.mode !== 'draft') {
+      return true;
+    }
+    
+    // If module is draft, only show to authorized users
+    return userCanSeeDrafts;
+  });
+};
 import { addClient, removeClient, sseClients, broadcastEvent, listConnectedClients, performHealthCheck, analyzeTabBehavior, getTabConnectionHistory, isTabBlocked, trackIgnoredDuplicate } from '../services/sseService.js';
 import Request from '../models/Request.js';
 import Contribution from '../models/Contribution.js';
@@ -51,67 +145,6 @@ const router = express.Router();
 // Query deduplication cache to prevent multiple identical requests
 const pendingQueries = new Map();
 
-/**
- * Helper function to check if user can see draft modules
- * @param {Object} user - The authenticated user
- * @param {Object} novel - The novel object (if available)
- * @returns {boolean} Whether user can see draft modules
- */
-const canSeeDraftModules = (user, novel = null) => {
-  if (!user) return false;
-  
-  // Admin and moderators can see all draft modules
-  if (user.role === 'admin' || user.role === 'moderator') {
-    return true;
-  }
-  
-  // For pj_user, check if they have access to this specific novel
-  if (user.role === 'pj_user' && novel?.active?.pj_user) {
-    return novel.active.pj_user.some(pjUser => {
-      // Handle case where pjUser is an object (new format)
-      if (typeof pjUser === 'object' && pjUser !== null) {
-        return (
-          pjUser._id === user.id ||
-          pjUser._id === user._id ||
-          pjUser.username === user.username ||
-          pjUser.displayName === user.displayName ||
-          pjUser.userNumber === user.userNumber
-        );
-      }
-      // Handle case where pjUser is a primitive value (old format)
-      return (
-        pjUser === user.id ||
-        pjUser === user._id ||
-        pjUser === user.username ||
-        pjUser === user.displayName ||
-        pjUser === user.userNumber
-      );
-    });
-  }
-  
-  return false;
-};
-
-/**
- * Filter modules based on user permissions and draft visibility
- * @param {Array} modules - Array of modules to filter
- * @param {Object} user - The authenticated user
- * @param {Object} novel - The novel object (if available)
- * @returns {Array} Filtered modules
- */
-const filterModulesByVisibility = (modules, user, novel = null) => {
-  const userCanSeeDrafts = canSeeDraftModules(user, novel);
-  
-  return modules.filter(module => {
-    // If module is not draft, it's visible
-    if (module.mode !== 'draft') {
-      return true;
-    }
-    
-    // If module is draft, only show to authorized users
-    return userCanSeeDrafts;
-  });
-};
 
 /**
  * Utility function to validate ObjectId and send error response if invalid
@@ -826,12 +859,22 @@ router.get("/vietnamese", async (req, res) => {
                 let: { novelId: '$_id' },
                 pipeline: [
                   {
+                    $lookup: {
+                      from: 'modules',
+                      localField: 'moduleId',
+                      foreignField: '_id',
+                      as: 'module'
+                    }
+                  },
+                  {
                     $match: {
                       $expr: { 
                         $and: [
                           { $eq: ['$novelId', '$$novelId'] },
                           // Filter out draft chapters from Vietnamese novels display
-                          { $ne: ['$mode', 'draft'] }
+                          { $ne: ['$mode', 'draft'] },
+                          // Filter out chapters from draft modules
+                          { $ne: [{ $arrayElemAt: ['$module.mode', 0] }, 'draft'] }
                         ]
                       }
                     }
@@ -857,12 +900,22 @@ router.get("/vietnamese", async (req, res) => {
                 let: { novelId: '$_id' },
                 pipeline: [
                   {
+                    $lookup: {
+                      from: 'modules',
+                      localField: 'moduleId',
+                      foreignField: '_id',
+                      as: 'module'
+                    }
+                  },
+                  {
                     $match: {
                       $expr: { 
                         $and: [
                           { $eq: ['$novelId', '$$novelId'] },
                           // Also filter out draft chapters from first chapter link
-                          { $ne: ['$mode', 'draft'] }
+                          { $ne: ['$mode', 'draft'] },
+                          // Filter out chapters from draft modules
+                          { $ne: [{ $arrayElemAt: ['$module.mode', 0] }, 'draft'] }
                         ]
                       }
                     }
@@ -1004,12 +1057,22 @@ router.get("/hot", async (req, res) => {
               let: { novelId: '$_id' },
               pipeline: [
                 {
+                  $lookup: {
+                    from: 'modules',
+                    localField: 'moduleId',
+                    foreignField: '_id',
+                    as: 'module'
+                  }
+                },
+                {
                   $match: {
                     $expr: { 
                       $and: [
                         { $eq: ['$novelId', '$$novelId'] },
                         // Filter out draft chapters from hot novels display
-                        { $ne: ['$mode', 'draft'] }
+                        { $ne: ['$mode', 'draft'] },
+                        // Filter out chapters from draft modules
+                        { $ne: [{ $arrayElemAt: ['$module.mode', 0] }, 'draft'] }
                       ]
                     }
                   }
@@ -1066,12 +1129,22 @@ router.get("/hot", async (req, res) => {
               let: { novelId: '$_id' },
               pipeline: [
                 {
+                  $lookup: {
+                    from: 'modules',
+                    localField: 'moduleId',
+                    foreignField: '_id',
+                    as: 'module'
+                  }
+                },
+                {
                   $match: {
                     $expr: { 
                       $and: [
                         { $eq: ['$novelId', '$$novelId'] },
                         // Filter out draft chapters from hot novels display
-                        { $ne: ['$mode', 'draft'] }
+                        { $ne: ['$mode', 'draft'] },
+                        // Filter out chapters from draft modules
+                        { $ne: [{ $arrayElemAt: ['$module.mode', 0] }, 'draft'] }
                       ]
                     }
                   }
@@ -1140,12 +1213,22 @@ router.get("/hot", async (req, res) => {
               let: { novelId: '$_id' },
               pipeline: [
                 {
+                  $lookup: {
+                    from: 'modules',
+                    localField: 'moduleId',
+                    foreignField: '_id',
+                    as: 'module'
+                  }
+                },
+                {
                   $match: {
                     $expr: { 
                       $and: [
                         { $eq: ['$novelId', '$$novelId'] },
                         // Filter out draft chapters from recent novels display
-                        { $ne: ['$mode', 'draft'] }
+                        { $ne: ['$mode', 'draft'] },
+                        // Filter out chapters from draft modules
+                        { $ne: [{ $arrayElemAt: ['$module.mode', 0] }, 'draft'] }
                       ]
                     }
                   }
@@ -1530,12 +1613,22 @@ router.get("/", optionalAuth, async (req, res) => {
                   let: { novelId: '$_id' },
                   pipeline: [
                     {
+                      $lookup: {
+                        from: 'modules',
+                        localField: 'moduleId',
+                        foreignField: '_id',
+                        as: 'module'
+                      }
+                    },
+                    {
                       $match: {
                         $expr: { 
                           $and: [
                             { $eq: ['$novelId', '$$novelId'] },
                             // Filter out draft chapters from homepage display
-                            { $ne: ['$mode', 'draft'] }
+                            { $ne: ['$mode', 'draft'] },
+                            // Filter out chapters from draft modules
+                            { $ne: [{ $arrayElemAt: ['$module.mode', 0] }, 'draft'] }
                           ]
                         }
                       }
@@ -1561,12 +1654,22 @@ router.get("/", optionalAuth, async (req, res) => {
                   let: { novelId: '$_id' },
                   pipeline: [
                     {
+                      $lookup: {
+                        from: 'modules',
+                        localField: 'moduleId',
+                        foreignField: '_id',
+                        as: 'module'
+                      }
+                    },
+                    {
                       $match: {
                         $expr: { 
                           $and: [
                             { $eq: ['$novelId', '$$novelId'] },
                             // Also filter out draft chapters from first chapter link
-                            { $ne: ['$mode', 'draft'] }
+                            { $ne: ['$mode', 'draft'] },
+                            // Filter out chapters from draft modules
+                            { $ne: [{ $arrayElemAt: ['$module.mode', 0] }, 'draft'] }
                           ]
                         }
                       }
@@ -3843,6 +3946,9 @@ router.get("/:id/complete", optionalAuth, async (req, res) => {
         chapters: (chaptersByModule[module._id.toString()] || []).sort((a, b) => (a.order || 0) - (b.order || 0))
       }));
 
+      // Apply draft module filtering based on user permissions
+      const filteredModules = filterModulesByVisibility(modulesWithChapters, req.user, novel);
+
       // Build interaction response
       const stats = novelStats[0];
       const interactions = {
@@ -3862,7 +3968,7 @@ router.get("/:id/complete", optionalAuth, async (req, res) => {
 
       return {
         novel: populatedNovel,
-        modules: modulesWithChapters,
+        modules: filteredModules,
         gifts,
         interactions,
         contributionHistory

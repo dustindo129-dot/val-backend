@@ -253,37 +253,102 @@ const pendingQueries = new Map();
  * @returns {boolean} Whether user can see draft modules
  */
 const canSeeDraftModules = (user, novel = null) => {
-  if (!user) return false;
+  console.log(`    canSeeDraftModules called with user: ${user ? 'present' : 'null'}, novel: ${novel ? 'present' : 'null'}`);
+  
+  if (!user) {
+    console.log(`    -> No user, returning false`);
+    return false;
+  }
+  
+  console.log(`    -> User role: ${user.role}`);
   
   // Admin and moderators can see all draft modules
   if (user.role === 'admin' || user.role === 'moderator') {
+    console.log(`    -> Admin/Moderator access, returning true`);
     return true;
   }
   
   // For pj_user, check if they have access to this specific novel
   if (user.role === 'pj_user' && novel?.active?.pj_user) {
-    return novel.active.pj_user.some(pjUser => {
+    console.log(`    -> Checking pj_user access against: ${JSON.stringify(novel.active.pj_user)}`);
+    const hasPjUserAccess = novel.active.pj_user.some(pjUser => {
       // Handle case where pjUser is an object (new format)
       if (typeof pjUser === 'object' && pjUser !== null) {
-        return (
+        const match = (
           pjUser._id === user.id ||
           pjUser._id === user._id ||
           pjUser.username === user.username ||
           pjUser.displayName === user.displayName ||
           pjUser.userNumber === user.userNumber
         );
+        console.log(`    -> Checking object pjUser ${JSON.stringify(pjUser)} against user: ${match}`);
+        return match;
       }
       // Handle case where pjUser is a primitive value (old format)
-      return (
+      const match = (
         pjUser === user.id ||
         pjUser === user._id ||
         pjUser === user.username ||
         pjUser === user.displayName ||
         pjUser === user.userNumber
       );
+      console.log(`    -> Checking primitive pjUser ${pjUser} against user: ${match}`);
+      return match;
     });
+    
+    if (hasPjUserAccess) {
+      console.log(`    -> PJ User access granted, returning true`);
+      return true;
+    }
   }
   
+  // Check if user has novel-level translator, editor, or proofreader roles
+  if (novel?.active) {
+    console.log(`    -> Checking novel staff roles...`);
+    console.log(`    -> Translator: ${JSON.stringify(novel.active.translator)}`);
+    console.log(`    -> Editor: ${JSON.stringify(novel.active.editor)}`);
+    console.log(`    -> Proofreader: ${JSON.stringify(novel.active.proofreader)}`);
+    
+    const checkUserInStaffList = (staffList) => {
+      if (!staffList || !Array.isArray(staffList)) return false;
+      return staffList.some(staffValue => {
+        if (typeof staffValue === 'object' && staffValue !== null) {
+          const match = (
+            staffValue._id?.toString() === user._id?.toString() ||
+            staffValue.username === user.username ||
+            staffValue.displayName === user.displayName ||
+            staffValue.userNumber?.toString() === user.userNumber?.toString()
+          );
+          console.log(`    -> Checking object staff ${JSON.stringify(staffValue)} against user: ${match}`);
+          return match;
+        }
+        const match = (
+          staffValue?.toString() === user._id?.toString() ||
+          staffValue === user.username ||
+          staffValue === user.displayName ||
+          staffValue?.toString() === user.userNumber?.toString()
+        );
+        console.log(`    -> Checking primitive staff ${staffValue} against user: ${match}`);
+        return match;
+      });
+    };
+    
+    // Check novel-level staff roles
+    const isTranslator = checkUserInStaffList(novel.active.translator);
+    const isEditor = checkUserInStaffList(novel.active.editor);
+    const isProofreader = checkUserInStaffList(novel.active.proofreader);
+    
+    console.log(`    -> Is translator: ${isTranslator}`);
+    console.log(`    -> Is editor: ${isEditor}`);
+    console.log(`    -> Is proofreader: ${isProofreader}`);
+    
+    if (isTranslator || isEditor || isProofreader) {
+      console.log(`    -> Staff access granted, returning true`);
+      return true;
+    }
+  }
+  
+  console.log(`    -> No access granted, returning false`);
   return false;
 };
 
@@ -720,19 +785,42 @@ router.get("/slug/:slug", async (req, res) => {
 // New optimized route to get all modules with chapters for a novel
 router.get('/:novelId/modules-with-chapters', optionalAuth, async (req, res) => {
   try {
+    console.log(`\n=== MODULES WITH CHAPTERS DEBUG ===`);
+    console.log(`Novel ID: ${req.params.novelId}`);
+    console.log(`User authenticated: ${!!req.user}`);
+    console.log(`User details: ${req.user ? JSON.stringify({id: req.user._id, role: req.user.role, username: req.user.username}) : 'null'}`);
+
     // Get novel info for permission checking
     const novel = await Novel.findById(req.params.novelId).lean();
     if (!novel) {
       return res.status(404).json({ message: 'Novel not found' });
     }
 
+    console.log(`Novel found: ${novel.title}`);
+    console.log(`Novel active staff: ${JSON.stringify(novel.active)}`);
+
     // First get all modules for the novel
     const allModules = await Module.find({ novelId: req.params.novelId })
       .sort('order')
       .lean(); // Use lean() for better performance since we're modifying the objects
 
+    console.log(`Total modules found: ${allModules.length}`);
+    allModules.forEach((module, index) => {
+      console.log(`Module ${index + 1}: ${module.title} (mode: ${module.mode})`);
+    });
+
+    // Test canSeeDraftModules function
+    const userCanSeeDrafts = canSeeDraftModules(req.user, novel);
+    console.log(`Can user see drafts: ${userCanSeeDrafts}`);
+
     // Filter modules based on user permissions (hide draft modules from unauthorized users)
     const modules = filterModulesByVisibility(allModules, req.user, novel);
+
+    console.log(`Filtered modules count: ${modules.length}`);
+    modules.forEach((module, index) => {
+      console.log(`Filtered Module ${index + 1}: ${module.title} (mode: ${module.mode})`);
+    });
+    console.log(`=== END DEBUG ===\n`);
 
     // Get all chapters for this novel in one query
     const chapters = await Chapter.find({ 
@@ -1138,6 +1226,32 @@ router.put('/:novelId/modules/:moduleId', auth, async (req, res) => {
           { updatedAt: new Date() }
         );
         console.log(`Updated novel timestamp due to module ${updatedModule.title} switching from draft to ${req.body.mode}`);
+        
+        // When module switches from draft to published/rent, create notifications for visible chapters
+        if (req.body.mode === 'published' || req.body.mode === 'rent') {
+          try {
+            // Get all chapters in this module that are already visible (published, paid, protected)
+            const visibleChapters = await Chapter.find({ 
+              moduleId: req.params.moduleId,
+              mode: { $in: ['published', 'paid', 'protected'] }
+            });
+            
+            if (visibleChapters.length > 0) {
+              console.log(`Creating new_chapter notifications for ${visibleChapters.length} visible chapters in module ${updatedModule.title} (switched from draft to ${req.body.mode})`);
+              
+              // Create notifications for each visible chapter
+              const notificationPromises = visibleChapters.map(chapter => 
+                createNewChapterNotifications(req.params.novelId, chapter._id, chapter.title)
+              );
+              
+              await Promise.all(notificationPromises);
+              console.log(`Successfully created new_chapter notifications for visible chapters in module ${updatedModule.title}`);
+            }
+          } catch (notificationError) {
+            console.error('Error creating notifications for visible chapters when module switched from draft:', notificationError);
+            // Don't fail the module update if notification creation fails
+          }
+        }
       }
       
       // If module is being switched to paid mode, convert all chapters to published
