@@ -22,9 +22,7 @@ export const generalLimiter = rateLimit({
   skip: (req) => {
     // Skip rate limiting for health checks
     return req.path === '/health';
-  },
-  // Trust proxy for accurate IP detection in production
-  trustProxy: process.env.NODE_ENV === 'production'
+  }
 });
 
 // Strict rate limiter for authentication endpoints
@@ -37,8 +35,7 @@ export const authLimiter = rateLimit({
     retryAfter: '15 minutes'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: process.env.NODE_ENV === 'production'
+  legacyHeaders: false
 });
 
 // Very strict limiter for registration (prevent spam accounts)
@@ -50,8 +47,7 @@ export const registerLimiter = rateLimit({
     retryAfter: '1 hour'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: process.env.NODE_ENV === 'production'
+  legacyHeaders: false
 });
 
 // Login rate limiter - slightly more lenient than registration
@@ -64,8 +60,7 @@ export const loginLimiter = rateLimit({
     retryAfter: '15 minutes'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: process.env.NODE_ENV === 'production'
+  legacyHeaders: false
 });
 
 // Upload rate limiter - for file uploads (images, etc.)
@@ -77,8 +72,7 @@ export const uploadLimiter = rateLimit({
     retryAfter: '15 minutes'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: process.env.NODE_ENV === 'production'
+  legacyHeaders: false
 });
 
 // TTS rate limiter - Text-to-Speech is expensive
@@ -90,8 +84,7 @@ export const ttsLimiter = rateLimit({
     retryAfter: '1 hour'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: process.env.NODE_ENV === 'production'
+  legacyHeaders: false
 });
 
 // Comment/interaction rate limiter
@@ -103,8 +96,7 @@ export const interactionLimiter = rateLimit({
     retryAfter: '5 minutes'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: process.env.NODE_ENV === 'production'
+  legacyHeaders: false
 });
 
 // Top-up/payment rate limiter
@@ -116,8 +108,7 @@ export const paymentLimiter = rateLimit({
     retryAfter: '1 hour'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: process.env.NODE_ENV === 'production'
+  legacyHeaders: false
 });
 
 // Speed limiter - gradually slows down repeated requests

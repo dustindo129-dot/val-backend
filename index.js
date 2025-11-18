@@ -73,10 +73,11 @@ const isProduction = process.env.NODE_ENV === 'production';
 const port = process.env.PORT || (isProduction ? 5000 : 5001);
 const root = path.join(__dirname, '..');
 
-// Trust proxy in production (required for rate limiting behind load balancer)
+// Configure proxy trust securely for production
 if (isProduction) {
-  app.set('trust proxy', true);
-  console.log('✅ Proxy trust enabled for production');
+  // Trust first proxy only (more secure than 'true')
+  app.set('trust proxy', 1);
+  console.log('✅ Secure proxy trust enabled for production');
 }
 
 // Configure body parsers with large limits BEFORE other middleware
@@ -262,6 +263,8 @@ app.use('/tts-cache', express.static(path.join(__dirname, 'public', 'tts-cache')
 
 // Set up Vite server in middleware mode for development
 let viteDevServer;
+let foundValidPath = false; // Track if static files are available
+
 if (!isProduction) {
   const initViteServer = async () => {
     viteDevServer = await createServer({
@@ -293,7 +296,7 @@ if (!isProduction) {
   ];
   
   console.log('🔍 Checking static file paths in production:');
-  let foundValidPath = false;
+  
   possiblePaths.forEach((p, index) => {
     const exists = fs.existsSync(p);
     console.log(`${index + 1}. ${p} ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}`);
@@ -340,7 +343,8 @@ if (!isProduction) {
       console.error('   ❌ Could not read /workspace directory');
     }
     
-    console.error('⚠️ Frontend files will not be served correctly!');
+    console.error('⚠️ Frontend must be built and deployed separately!');
+    console.error('💡 This is API-only mode - frontend should be served from CDN/separate service');
   }
 }
 
@@ -518,13 +522,27 @@ if (isProduction) {
   });
 }
 
-// SSR handler for vite-plugin-ssr (handle non-API routes)
+// Fallback handler for non-API routes when no static files found
 app.use('*', async (req, res, next) => {
   const url = req.originalUrl;
   
   // Skip API routes - they're handled separately
   if (url.startsWith('/api/')) {
     return next();
+  }
+  
+  // If in production and no static files found, redirect to frontend URL
+  if (isProduction && !foundValidPath) {
+    // For main site routes, redirect to frontend URL
+    if (url === '/' || url.startsWith('/truyen') || url.startsWith('/danh-sach-truyen')) {
+      return res.redirect(302, process.env.FRONTEND_URL || 'https://valvrareteam.net');
+    }
+    // For other routes, return a JSON response indicating API-only mode
+    return res.status(404).json({
+      error: 'Frontend not available',
+      message: 'This server is running in API-only mode',
+      frontend_url: process.env.FRONTEND_URL || 'https://valvrareteam.net'
+    });
   }
   
   // Only use SSR for bots, regular users get CSR
