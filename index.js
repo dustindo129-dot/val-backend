@@ -16,6 +16,18 @@ import isBot from './utils/isBot.js';
 import sirv from 'sirv';
 import fs from 'fs';
 import { cleanupStaleConnections, listConnectedClients, performHealthCheck, closeDuplicateConnections } from './services/sseService.js';
+import helmet from 'helmet';
+import { 
+  generalLimiter, 
+  authLimiter, 
+  registerLimiter, 
+  loginLimiter, 
+  uploadLimiter, 
+  ttsLimiter,
+  interactionLimiter,
+  paymentLimiter,
+  speedLimiter
+} from './middleware/rateLimiter.js';
 
 // Increase buffer limits and thread pool size
 process.env.UV_THREADPOOL_SIZE = 128; 
@@ -56,8 +68,9 @@ const __dirname = path.dirname(__filename);
 
 // Initialize Express application
 const app = express();
-const port = process.env.PORT || 5000;
 const isProduction = process.env.NODE_ENV === 'production';
+// Use different default ports for development vs production
+const port = process.env.PORT || (isProduction ? 5000 : 5001);
 const root = path.join(__dirname, '..');
 
 // Configure body parsers with large limits BEFORE other middleware
@@ -80,6 +93,23 @@ app.use(express.urlencoded({
 
 // Add compression for performance
 app.use(compression());
+
+// Add Helmet for security headers (DDoS and security protection)
+app.use(helmet({
+  contentSecurityPolicy: false, // Disable CSP to avoid conflicts with inline scripts
+  crossOriginEmbedderPolicy: false, // Allow embedding resources
+  hsts: {
+    maxAge: 31536000, // 1 year
+    includeSubDomains: true,
+    preload: true
+  }
+}));
+
+// Apply general speed limiter to slow down repeated requests
+app.use(speedLimiter);
+
+// Apply general rate limiter to all requests
+app.use(generalLimiter);
 
 // Configure CORS
 const corsOptions = {
@@ -233,7 +263,10 @@ if (!isProduction) {
       server: { 
         middlewareMode: true,
         hmr: {
-          port: 24678  // Different port for backend HMR
+          port: 24678,  // Different port for backend HMR
+          // Let Vite find alternative port if 24678 is busy
+          host: 'localhost',
+          strictPort: false
         }
       }
     });
@@ -283,28 +316,41 @@ if (!isProduction) {
   }
 }
 
-// Register API routes
-app.use('/api/auth', authRoutes);      // Authentication endpoints
-app.use('/api/novels', novelRoutes);   // Novel management endpoints
-app.use('/api/comments', commentRoutes); // Comment system endpoints
-app.use('/api/users', userRoutes);      // User management endpoints
-app.use('/api/chapters', chaptersRouter); // Chapter management endpoints
-app.use('/api/modules', moduleRoutes);   // Module management endpoints
-app.use('/api/userchapterinteractions', userChapterInteractionRoutes); // User chapter interactions endpoints
-app.use('/api/usernovelinteractions', userNovelInteractionRoutes); // User novel interactions endpoints
-app.use('/api/reports', reportRoutes); // Report endpoints
-app.use('/api/notifications', notificationRoutes); // Notification endpoints
-app.use('/api/upload', uploadRoutes); // File upload endpoints
-app.use('/api/requests', requestRoutes); // Request system endpoints
-app.use('/api/topup', topupRoutes); // Top-up transaction endpoints
-app.use('/api/contributions', contributionRoutes); // Contribution endpoints
-app.use('/api/topup-admin', topupAdminRoutes);
+// Register API routes with appropriate rate limiting
+// Authentication endpoints - strict rate limiting to prevent brute force
+app.use('/api/auth', authLimiter, authRoutes);
+
+// Upload endpoints - rate limited to prevent abuse
+app.use('/api/upload', uploadLimiter, uploadRoutes);
+
+// TTS endpoints - expensive operation, strict limits
+app.use('/api/tts', ttsLimiter, ttsRoutes);
+
+// Payment/top-up endpoints - strict limits for security
+app.use('/api/topup', paymentLimiter, topupRoutes);
+app.use('/api/topup-admin', paymentLimiter, topupAdminRoutes);
+
+// User interaction endpoints - moderate limits
+app.use('/api/comments', interactionLimiter, commentRoutes);
+app.use('/api/userchapterinteractions', interactionLimiter, userChapterInteractionRoutes);
+app.use('/api/usernovelinteractions', interactionLimiter, userNovelInteractionRoutes);
+app.use('/api/contributions', interactionLimiter, contributionRoutes);
+app.use('/api/forum', interactionLimiter, forumRoutes);
+
+// Read-heavy endpoints - more lenient limits (already covered by generalLimiter)
+app.use('/api/novels', novelRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/chapters', chaptersRouter);
+app.use('/api/modules', moduleRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/requests', requestRoutes);
+app.use('/api/transactions', userTransactionRoutes);
+app.use('/api/novel-transactions', novelTransactionRoutes);
+app.use('/api/gifts', giftRoutes);
+
+// Webhooks - no rate limiting (handled by external services)
 app.use('/api/webhooks', webhookRoutes);
-app.use('/api/transactions', userTransactionRoutes); // User transaction endpoints
-app.use('/api/novel-transactions', novelTransactionRoutes); // Novel transaction endpoints
-app.use('/api/gifts', giftRoutes); // Gift system endpoints
-app.use('/api/forum', forumRoutes); // Forum system endpoints
-app.use('/api/tts', ttsRoutes); // Text-to-Speech endpoints
 
 // Health check endpoint
 app.get('/health', (req, res) => {

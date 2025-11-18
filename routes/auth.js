@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { sendPasswordResetEmail } from '../services/emailService.js';
+import { registerLimiter, loginLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
 
@@ -101,8 +102,9 @@ router.post('/register-admin', async (req, res) => {
 /**
  * Register a new regular user
  * @route POST /api/auth/signup
+ * Rate limited to 5 registrations per hour per IP
  */
-router.post('/signup', async (req, res) => {
+router.post('/signup', registerLimiter, async (req, res) => {
   try {
     console.log('\n--- Starting signup process ---');
     console.log('Request body:', JSON.stringify(req.body, null, 2));
@@ -217,9 +219,10 @@ router.post('/signup', async (req, res) => {
 /**
  * Login user and return JWT token
  * Accepts both username and email as login identifier
+ * Rate limited to 30 attempts per 15 minutes per IP
  * @route POST /api/auth/login
  */
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
 
