@@ -401,19 +401,17 @@ const runCleanupIfNeeded = async () => {
  * This ensures rentals are cleaned up regularly even without API calls
  */
 const startBackgroundCleanup = () => {
-  // Run initial cleanup after 1 minute
+  // Run initial cleanup after 1 minute (silent in production)
   setTimeout(async () => {
-    console.log('Starting initial rental cleanup...');
     await runCleanupIfNeeded();
   }, 60000);
 
-  // Then run cleanup every 30 minutes
+  // Then run cleanup every 30 minutes (silent in production)
   setInterval(async () => {
-    console.log('Running scheduled rental cleanup...');
     await runCleanupIfNeeded();
   }, BACKGROUND_CLEANUP_INTERVAL);
   
-  console.log(`Background rental cleanup started (interval: ${BACKGROUND_CLEANUP_INTERVAL / 60000} minutes)`);
+  // Background rental cleanup started (silent in production)
 };
 
 // Start background cleanup when module loads

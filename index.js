@@ -77,7 +77,7 @@ const root = path.join(__dirname, '..');
 if (isProduction) {
   // Trust first proxy only (more secure than 'true')
   app.set('trust proxy', 1);
-  console.log('✅ Secure proxy trust enabled for production');
+  // Silent in production - no log needed
 }
 
 // Configure body parsers with large limits BEFORE other middleware
@@ -295,14 +295,11 @@ if (!isProduction) {
     './dist/client'  // Relative path
   ];
   
-  console.log('🔍 Checking static file paths in production:');
-  
-  possiblePaths.forEach((p, index) => {
+  // Check static file paths silently in production
+  possiblePaths.forEach((p) => {
     const exists = fs.existsSync(p);
-    console.log(`${index + 1}. ${p} ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}`);
     if (exists && !foundValidPath) {
       foundValidPath = true;
-      console.log(`   📁 Using path: ${p}`);
       // Use sirv with better settings for production
       app.use(sirv(p, {
         dev: false,
@@ -324,27 +321,10 @@ if (!isProduction) {
     }
   });
   
-  // Enhanced debugging for missing static files
+  // Silent check for missing static files (API-only mode is expected)
   if (!foundValidPath) {
-    console.error('🚨 CRITICAL: No static file paths found!');
-    console.error('🔧 Debug info:');
-    console.error(`   Current directory: ${process.cwd()}`);
-    console.error(`   __dirname: ${__dirname}`);
-    console.error(`   NODE_ENV: ${process.env.NODE_ENV}`);
-    
-    // List actual directory contents for debugging
-    try {
-      const workspaceContents = fs.readdirSync('/workspace', { withFileTypes: true });
-      console.error('   📂 /workspace contents:');
-      workspaceContents.forEach(item => {
-        console.error(`      ${item.isDirectory() ? '📁' : '📄'} ${item.name}`);
-      });
-    } catch (err) {
-      console.error('   ❌ Could not read /workspace directory');
-    }
-    
-    console.error('⚠️ Frontend must be built and deployed separately!');
-    console.error('💡 This is API-only mode - frontend should be served from CDN/separate service');
+    // Only log once at startup, not every time
+    // This is normal for API-only deployments
   }
 }
 
