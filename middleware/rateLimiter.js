@@ -22,7 +22,9 @@ export const generalLimiter = rateLimit({
   skip: (req) => {
     // Skip rate limiting for health checks
     return req.path === '/health';
-  }
+  },
+  // Trust proxy for accurate IP detection in production
+  trustProxy: process.env.NODE_ENV === 'production'
 });
 
 // Strict rate limiter for authentication endpoints
@@ -36,6 +38,7 @@ export const authLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: process.env.NODE_ENV === 'production'
 });
 
 // Very strict limiter for registration (prevent spam accounts)
@@ -48,6 +51,7 @@ export const registerLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: process.env.NODE_ENV === 'production'
 });
 
 // Login rate limiter - slightly more lenient than registration
@@ -61,6 +65,7 @@ export const loginLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: process.env.NODE_ENV === 'production'
 });
 
 // Upload rate limiter - for file uploads (images, etc.)
@@ -73,6 +78,7 @@ export const uploadLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: process.env.NODE_ENV === 'production'
 });
 
 // TTS rate limiter - Text-to-Speech is expensive
@@ -85,6 +91,7 @@ export const ttsLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: process.env.NODE_ENV === 'production'
 });
 
 // Comment/interaction rate limiter
@@ -97,6 +104,7 @@ export const interactionLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: process.env.NODE_ENV === 'production'
 });
 
 // Top-up/payment rate limiter
@@ -109,6 +117,7 @@ export const paymentLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: process.env.NODE_ENV === 'production'
 });
 
 // Speed limiter - gradually slows down repeated requests

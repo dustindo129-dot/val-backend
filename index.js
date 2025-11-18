@@ -73,6 +73,12 @@ const isProduction = process.env.NODE_ENV === 'production';
 const port = process.env.PORT || (isProduction ? 5000 : 5001);
 const root = path.join(__dirname, '..');
 
+// Trust proxy in production (required for rate limiting behind load balancer)
+if (isProduction) {
+  app.set('trust proxy', true);
+  console.log('✅ Proxy trust enabled for production');
+}
+
 // Configure body parsers with large limits BEFORE other middleware
 app.use(express.json({
   limit: '50mb',
@@ -280,14 +286,20 @@ if (!isProduction) {
   const possiblePaths = [
     path.resolve(__dirname, '../dist/client'),  // When server is in its own directory
     path.resolve(__dirname, '../../dist/client'), // Fallback path
-    '/app/dist/client'  // Docker path
+    '/app/dist/client',  // Docker path
+    '/workspace/dist/client', // DigitalOcean App Platform path
+    path.resolve('/workspace', 'dist/client'), // Alternative workspace path
+    './dist/client'  // Relative path
   ];
   
-  console.log('Possible static file paths:');
-  possiblePaths.forEach(p => {
+  console.log('🔍 Checking static file paths in production:');
+  let foundValidPath = false;
+  possiblePaths.forEach((p, index) => {
     const exists = fs.existsSync(p);
-    console.log(`- ${p} (${exists ? 'exists' : 'not found'})`);
-    if (exists) {
+    console.log(`${index + 1}. ${p} ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}`);
+    if (exists && !foundValidPath) {
+      foundValidPath = true;
+      console.log(`   📁 Using path: ${p}`);
       // Use sirv with better settings for production
       app.use(sirv(p, {
         dev: false,
@@ -309,10 +321,26 @@ if (!isProduction) {
     }
   });
   
-  // If none of the paths exist, log a warning
-  const anyPathExists = possiblePaths.some(p => fs.existsSync(p));
-  if (!anyPathExists) {
-    console.warn('WARNING: No static file paths found. Frontend may not be served correctly.');
+  // Enhanced debugging for missing static files
+  if (!foundValidPath) {
+    console.error('🚨 CRITICAL: No static file paths found!');
+    console.error('🔧 Debug info:');
+    console.error(`   Current directory: ${process.cwd()}`);
+    console.error(`   __dirname: ${__dirname}`);
+    console.error(`   NODE_ENV: ${process.env.NODE_ENV}`);
+    
+    // List actual directory contents for debugging
+    try {
+      const workspaceContents = fs.readdirSync('/workspace', { withFileTypes: true });
+      console.error('   📂 /workspace contents:');
+      workspaceContents.forEach(item => {
+        console.error(`      ${item.isDirectory() ? '📁' : '📄'} ${item.name}`);
+      });
+    } catch (err) {
+      console.error('   ❌ Could not read /workspace directory');
+    }
+    
+    console.error('⚠️ Frontend files will not be served correctly!');
   }
 }
 
