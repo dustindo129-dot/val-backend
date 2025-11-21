@@ -107,25 +107,24 @@ const uploadToBunnycdn = async (audioBuffer, filename) => {
 
 // Check if audio file exists on Bunny CDN
 const checkBunnyCdnCache = async (filename) => {
-    if (!BUNNY_CONFIG.apiKey) {
-        return false;
-    }
-
     try {
         const storagePath = `/${BUNNY_CONFIG.ttsFolder}/${filename}`;
-        const bunnyStorageUrl = `${BUNNY_CONFIG.storageApiUrl}/${BUNNY_CONFIG.storageZone}${storagePath}`;
+        const cdnUrl = `${BUNNY_CONFIG.cdnUrl}${storagePath}`;
         
-        // Make a HEAD request to check if file exists
-        const response = await axios.head(bunnyStorageUrl, {
-            headers: {
-                'AccessKey': BUNNY_CONFIG.apiKey
-            },
-            timeout: 5000
+        // Make a HEAD request to the CDN URL (public, no auth required, faster)
+        const response = await axios.head(cdnUrl, {
+            timeout: 3000, // Shorter timeout since CDN should respond quickly
+            validateStatus: (status) => status < 500 // Don't throw on 404, only on server errors
         });
         
         return response.status === 200;
     } catch (error) {
-        // File doesn't exist or other error
+        // File doesn't exist or network error - treat as cache miss
+        if (error.response && error.response.status === 404) {
+            return false; // File doesn't exist
+        }
+        // For other errors (timeout, network issues), log but don't fail
+        console.warn(`Cache check warning for ${filename}:`, error.message);
         return false;
     }
 };
@@ -269,7 +268,8 @@ export const generateTTS = async (request) => {
         // Check if cached version exists on Bunny CDN
         const isCached = await checkBunnyCdnCache(filename);
         if (isCached) {
-            const bunnyUrl = `${BUNNY_CONFIG.cdnUrl}/${BUNNY_CONFIG.ttsFolder}/${filename}`;
+            const storagePath = `/${BUNNY_CONFIG.ttsFolder}/${filename}`;
+            const bunnyUrl = `${BUNNY_CONFIG.cdnUrl}${storagePath}`;
             console.log(`✅ TTS cache hit on Bunny CDN: ${filename}`);
             
             const cacheResult = {
